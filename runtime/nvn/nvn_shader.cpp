@@ -11,10 +11,6 @@
 // files): control+0x6F8 program size, +0x700 constant-data offset, +0x704 data size, +0x708 header size (0x30);
 // the data section starts with 0x12345678 and, for graphics stages, the Maxwell SPH at +0x30. Compute programs
 // have neither.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <bcrypt.h>
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +23,7 @@
 #include "nvn_aa.h"
 #include "nvn_foliage.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_pipeline.h"
 #include "nvn_rt.h"   // [rt]
 #include "os/perf.h"   // SNAP_PERF instrumentation
@@ -75,41 +72,43 @@ bool ShaderFastIo() {
   return on;
 }
 std::string Sha256Hex(const uint8_t* d, size_t n, const std::string& extra) {
-  static BCRYPT_ALG_HANDLE shared = [] {
-    BCRYPT_ALG_HANDLE a = nullptr;
-    return BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0 ? nullptr : a;
-  }();
-  const bool keep = ShaderFastIo() && shared;
-  BCRYPT_ALG_HANDLE alg = keep ? shared : nullptr;
-  BCRYPT_HASH_HANDLE h = nullptr;
-  std::string out;
-  if (!keep && BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) return out;
-  if (BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0) >= 0) {
-    BCryptHashData(h, const_cast<PUCHAR>(d), (ULONG)n, 0);
-    BCryptHashData(h, (PUCHAR)extra.data(), (ULONG)extra.size(), 0);
-    uint8_t dig[32] = {};
-    BCryptFinishHash(h, dig, 32, 0);
-    char hx[65];
-    for (int i = 0; i < 32; i++) snprintf(hx + 2 * i, 3, "%02x", dig[i]);
-    out.assign(hx, 64);
-    BCryptDestroyHash(h);
-  }
-  if (!keep) BCryptCloseAlgorithmProvider(alg, 0);
-  return out;
+  uint8_t dig[32] = {};
+  nvn::os_host::sha256_2(d, n, extra.data(), extra.size(), dig);
+  char hx[65];
+  for (int i = 0; i < 32; i++) snprintf(hx + 2 * i, 3, "%02x", dig[i]);
+  return std::string(hx, 64);
 }
 
 // ---- tiny JSON reader (the manifest is machine-written, numbers only) ---------------------------------------------
+struct JKV;
 struct J {
   char type = 0;  // 'n' number, 'a' array, 'o' object
   double num = 0;
   std::vector<J> arr;
-  std::vector<std::pair<std::string, J>> obj;
-  const J* get(const char* k) const {
-    for (auto& kv : obj) if (kv.first == k) return &kv.second;
-    return nullptr;
-  }
+  std::vector<JKV> obj;
+  J();
+  ~J();
+  J(const J&);
+  J(J&&) noexcept;
+  J& operator=(const J&);
+  J& operator=(J&&) noexcept;
+  const J* get(const char* k) const;
   int i(const char* k, int def = 0) const { auto* v = get(k); return v ? (int)v->num : def; }
 };
+struct JKV {
+  std::string first;
+  J second;
+};
+inline J::J() = default;
+inline J::~J() = default;
+inline J::J(const J&) = default;
+inline J::J(J&&) noexcept = default;
+inline J& J::operator=(const J&) = default;
+inline J& J::operator=(J&&) noexcept = default;
+inline const J* J::get(const char* k) const {
+  for (auto& kv : obj) if (kv.first == k) return &kv.second;
+  return nullptr;
+}
 struct JP {
   const char* p; const char* e;
   void ws() { while (p < e && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++; }
@@ -155,31 +154,10 @@ struct JP {
 };
 
 bool ReadFile(const std::string& path, std::vector<uint8_t>* out) {
-  if (ShaderFastIo()) {   // load pass: one sized Win32 read instead of a byte-wise istreambuf_iterator copy (same bytes)
-    HANDLE fh = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                            FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (fh == INVALID_HANDLE_VALUE) return false;
-    LARGE_INTEGER sz{};
-    bool ok = GetFileSizeEx(fh, &sz) && sz.QuadPart >= 0 && sz.QuadPart < (1ll << 31);
-    if (ok) {
-      out->resize((size_t)sz.QuadPart);
-      DWORD got = 0;
-      ok = sz.QuadPart == 0 || (::ReadFile(fh, out->data(), (DWORD)sz.QuadPart, &got, nullptr) && got == (DWORD)sz.QuadPart);
-    }
-    CloseHandle(fh);
-    if (!ok) out->clear();
-    return ok;
-  }
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return false;
-  out->assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
-  return true;
+  return nvn::os_host::read_file_bytes(path, out);
 }
 bool WriteFile(const std::string& path, const void* d, size_t n) {
-  std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) return false;
-  f.write(static_cast<const char*>(d), (std::streamsize)n);
-  return f.good();
+  return nvn::os_host::write_file_bytes(path, d, n);
 }
 
 // Run the dotnet shader harness (BelowNormal priority, 10 minute cap). Returns true when the manifest exists.
@@ -195,33 +173,21 @@ bool RunHarness(const std::string& bin, const std::string& spv, const std::strin
     if (k != std::string::npos) dll = dll.substr(0, k) + "build\\xlate\\r" + e + "\\h\\bin\\Release\\net10.0\\ShaderHarness.dll";
   }
   if (dll.empty()) {   // release build (no baked dev path): the harness folder next to the exe
-    char mp[MAX_PATH] = {};
-    GetModuleFileNameA(nullptr, mp, MAX_PATH);
-    std::string d = mp;
-    size_t k = d.find_last_of("\\/");
-    if (k != std::string::npos) dll = d.substr(0, k) + "\\shader_harness\\ShaderHarness.exe";
+    const char sep = nvn::os_host::path_sep();
+    dll = nvn::os_host::exe_dir() + sep + "shader_harness" + sep + "ShaderHarness.exe";
   }
   if (const char* e = getenv("NVN_SHADER_HARNESS")) dll = e;
   if (dll.empty()) { LogError("shader translation needs the harness: set NVN_SHADER_HARNESS=<ShaderHarness.dll>"); return false; }
   std::ostringstream cl;
-  const bool native = dll.size() > 4 && _stricmp(dll.c_str() + dll.size() - 4, ".exe") == 0;   // self-contained publish (release): run the apphost, no dotnet
+  const bool native = dll.size() > 4 && nvn::os_host::ascii_ieq(dll.c_str() + dll.size() - 4, ".exe");   // self-contained publish (release): run the apphost, no dotnet
   if (!native) cl << "dotnet ";
   cl << "\"" << dll << "\" --nvn \"" << bin << "\" \"" << spv << "\" \"" << json << "\" " << stage << " " << constOff << " "
      << codeOff;
-  std::string cmd = cl.str();
-  STARTUPINFOA si{sizeof si};
-  PROCESS_INFORMATION pi{};
-  if (!CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE, BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-    LogError("cannot start dotnet (%lu)", GetLastError());
+  if (!nvn::os_host::run_shader_harness(cl.str(), json)) {
+    LogError("shader harness failed or is unavailable");
     return false;
   }
-  DWORD w = WaitForSingleObject(pi.hProcess, 600000);
-  DWORD code = 1;
-  if (w == WAIT_OBJECT_0) GetExitCodeProcess(pi.hProcess, &code);
-  else TerminateProcess(pi.hProcess, 1);   // our own child only
-  CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-  if (code != 0) { LogError("shader harness failed (exit %lu)", code); return false; }
-  return GetFileAttributesA(json.c_str()) != INVALID_FILE_ATTRIBUTES;
+  return true;
 }
 
 VkShaderStageFlagBits StageBit(int nvnStage) {
@@ -251,7 +217,7 @@ void LoadAbAlt(Host* h, const uint8_t* data, uint32_t dataSize, int stage, uint3
   if (r && *r && strcmp(r, "0")) salt += std::string("|xlate-r") + r;
   const std::string key = Sha256Hex(data, dataSize, salt + "|" + std::to_string(stage) + "|" + std::to_string(codeOff));
   std::vector<uint8_t> spv;
-  if (key.empty() || !ReadFile(std::string(dir) + "\\" + key + ".spv", &spv)) { Log("xlate A/B: no alternate translation for %s", baseKey.c_str()); return; }
+  if (key.empty() || !ReadFile(std::string(dir) + nvn::os_host::path_sep() + key + ".spv", &spv)) { Log("xlate A/B: no alternate translation for %s", baseKey.c_str()); return; }
   std::vector<uint32_t> words(spv.size() / 4);
   memcpy(words.data(), spv.data(), words.size() * 4);
   if (eft) SpvAddEarlyFragmentTests(words);
@@ -295,7 +261,7 @@ bool BuildStage(Host* h, const ShaderData& sd, StageProg* out) {
   }
   std::string key = Sha256Hex(data, dataSize, TranslatorSaltStr() + "|" + std::to_string(stage) + "|" + std::to_string(codeOff));
   if (key.empty()) return false;
-  const std::string base = h->cacheDir + "\\" + key;
+  const std::string base = h->cacheDir + nvn::os_host::path_sep() + key;
   const std::string spvPath = base + ".spv", jsonPath = base + ".json";
   std::vector<uint8_t> spv, js;
   // cache I/O (2026-11-14): entries are written to .tmp and renamed (json last), and validated on load, so a kill mid-write cannot leave a permanent bad entry
@@ -311,24 +277,24 @@ bool BuildStage(Host* h, const ShaderData& sd, StageProg* out) {
       } else {
         LogError("bad shader cache entry %s (spv %zu bytes); retranslating", base.c_str(), spv.size());
       }
-      DeleteFileA(spvPath.c_str()); DeleteFileA(jsonPath.c_str());
+      nvn::os_host::remove_file(spvPath); nvn::os_host::remove_file(jsonPath);
     }
     if (attempt) break;
     const std::string binPath = base + ".bin", spvTmp = spvPath + ".tmp", jsonTmp = jsonPath + ".tmp";
     WriteFile(binPath, data, dataSize);
     Log("translating shader %s (stage %d)", key.c_str(), stage);
-    DeleteFileA(spvTmp.c_str()); DeleteFileA(jsonTmp.c_str());
+    nvn::os_host::remove_file(spvTmp); nvn::os_host::remove_file(jsonTmp);
     bool ok = RunHarness(binPath, spvTmp, jsonTmp, stage, constOff, codeOff);
-    DeleteFileA(binPath.c_str());
-    if (ok) ok = MoveFileExA(spvTmp.c_str(), spvPath.c_str(), MOVEFILE_REPLACE_EXISTING) && MoveFileExA(jsonTmp.c_str(), jsonPath.c_str(), MOVEFILE_REPLACE_EXISTING);
+    nvn::os_host::remove_file(binPath);
+    if (ok) ok = nvn::os_host::atomic_replace(spvTmp, spvPath) && nvn::os_host::atomic_replace(jsonTmp, jsonPath);
     if (ok) {   // first-launch progress line (a warm cache never gets here)
       static std::atomic<int> translated{0};
       int n = ++translated;
       if (n == 1 || n % 100 == 0) fprintf(stderr, "[nvn] first-run shader translation: %d shaders translated so far (cache: %s)\n", n, h->cacheDir.c_str());
     }
-    if (!ok) { DeleteFileA(spvTmp.c_str()); DeleteFileA(jsonTmp.c_str()); return false; }
+    if (!ok) { nvn::os_host::remove_file(spvTmp); nvn::os_host::remove_file(jsonTmp); return false; }
   }
-  if (!loaded) { LogError("shader cache entry %s unusable after retranslation", base.c_str()); DeleteFileA(spvPath.c_str()); DeleteFileA(jsonPath.c_str()); return false; }
+  if (!loaded) { LogError("shader cache entry %s unusable after retranslation", base.c_str()); nvn::os_host::remove_file(spvPath); nvn::os_host::remove_file(jsonPath); return false; }
   StageProg sp;
   sp.valid = true; sp.stage = stage; snprintf(sp.key, sizeof sp.key, "%.12s", key.c_str()); sp.fragOutputMap = m.i("fragmentOutputMap");
   snprintf(sp.fkey, sizeof sp.fkey, "%s", key.c_str());
@@ -384,7 +350,7 @@ bool BuildStage(Host* h, const ShaderData& sd, StageProg* out) {
 // service to compile pipelines without the game having created the program. Compute stages are not supported.
 bool LoadStageFromCacheImpl(Host* h, const std::string& key, StageProg* out, bool eft, bool* eftApplied) {
   std::vector<uint8_t> spv, js;
-  const std::string base = h->cacheDir + "\\" + key;
+  const std::string base = h->cacheDir + nvn::os_host::path_sep() + key;
   if (!ReadFile(base + ".spv", &spv) || !ReadFile(base + ".json", &js)) return false;
   J m;
   JP jp{reinterpret_cast<const char*>(js.data()), reinterpret_cast<const char*>(js.data()) + js.size()};

@@ -11,9 +11,7 @@
 //  * Files are versioned by game build, translator version, descriptor layout and (cache blob only) driver identity; a mismatch discards them.
 //    <shadercache>\cache_stamp.txt makes that a wipe: a changed GPU, device ID or driver version deletes the driver blob, a changed build,
 //    translator or key layout deletes the key list as well. <shadercache>\status.json (key and ready counts) is written for the launcher chip.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "nvn_os_host.h"
 
 #include <algorithm>
 #include <atomic>
@@ -140,19 +138,14 @@ std::string g_buildId = "DDB900FF04A912ED42430508389853CFAF1ACCCE";
 
 std::string Dir() {
   const char* e = getenv("SNAP_SHADERCACHE_DIR");
+  const std::string sep(1, nvn::os_host::path_sep());
   std::string d;
   if (e && *e) d = e;
-  else if ((e = getenv("SNAP_CONFIG_DIR")) && *e) d = std::string(e) + "\\shadercache";
-  else {
-    char buf[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableA("APPDATA", buf, MAX_PATH);
-    d = (n ? std::string(buf) : std::string(".")) + "\\SnapRecomp\\shadercache";
-  }
+  else if ((e = getenv("SNAP_CONFIG_DIR")) && *e) d = std::string(e) + sep + "shadercache";
+  else d = nvn::os_host::cache_dir() + sep + "shadercache";
   if (const char* r = getenv("SNAP_XLATE_REV"); r && *r && strcmp(r, "0")) d += std::string("_r") + r;   // translator revision: its own pipeline keys and VkPipelineCache
   if (const char* sm = getenv("SNAP_SAFE_MODE"); sm && sm[0] == '1') d += "_safe";   // safe mode: a separate cache folder, so the real one is neither read nor changed (docs/safe-mode.md)
-  for (size_t i = 3; i < d.size(); i++)
-    if (d[i] == '\\' || d[i] == '/') CreateDirectoryA(d.substr(0, i).c_str(), nullptr);
-  CreateDirectoryA(d.c_str(), nullptr);
+  nvn::os_host::ensure_dir(d);
   return d;
 }
 
@@ -221,12 +214,10 @@ Tmpl* GetTmpl(const char* key12) {
     if (it != S->fullKeys.end()) full = it->second;
   }
   if (full.empty() && S->h) {   // startup precompile: the game has not built this stage yet, find its translation in the shader cache by the 12-hex prefix
-    WIN32_FIND_DATAA fd;
-    HANDLE hf = FindFirstFileA((S->h->cacheDir + "\\" + key12 + "*.spv").c_str(), &fd);
-    if (hf != INVALID_HANDLE_VALUE) {
-      std::string n = fd.cFileName;
+    const std::vector<std::string> matches = nvn::os_host::list_files(S->h->cacheDir, key12, ".spv");
+    if (!matches.empty()) {
+      const std::string& n = matches.front();
       if (n.size() > 4) full = n.substr(0, n.size() - 4);
-      FindClose(hf);
     }
   }
   std::call_once(t->once, [&] {
@@ -269,7 +260,7 @@ ProgramImpl* GetLayoutFor(const PipeDesc& pd, StageProg* out[6]) {
 
 // ---- key list --------------------------------------------------------------------------------------------------------------------
 void LoadKeys() {
-  const std::string path = S->dir + "\\pipeline_keys.bin";
+  const std::string path = S->dir + std::string(1, nvn::os_host::path_sep()) + "pipeline_keys.bin";
   const FileHdr want = MakeHdr(S->h, kMagicKeys, false);
   bool good = false;
   {
@@ -323,11 +314,8 @@ void AddSeedKeys() {
   std::string path;
   if (const char* e = getenv("SNAP_PIPELINE_SEED")) { if (!strcmp(e, "0")) return; path = e; }
   if (path.empty()) {
-    char buf[MAX_PATH] = {};
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    std::string exe(buf, n);
-    size_t sl = exe.find_last_of("\/");
-    path = (sl == std::string::npos ? std::string() : exe.substr(0, sl + 1)) + "pipeline_keys_seed.bin";
+    const std::string dir = nvn::os_host::exe_dir();
+    path = (dir.empty() ? std::string() : dir + std::string(1, nvn::os_host::path_sep())) + "pipeline_keys_seed.bin";
   }
   std::ifstream f(path, std::ios::binary);
   FileHdr got{};
@@ -375,7 +363,7 @@ bool CheckStamp(Host* h) {
   char gpu[200], bld[160];
   snprintf(gpu, sizeof gpu, "vendor=%u device=%u driver=%u uuid=%s", h->props.vendorID, h->props.deviceID, h->props.driverVersion, HexBytes(h->props.pipelineCacheUUID, 16).c_str());
   snprintf(bld, sizeof bld, "translator=%016llx game=%016llx desc=%u format=%u", (unsigned long long)S->translatorHash, (unsigned long long)S->buildHash, (unsigned)sizeof(PipeDesc), kFormatVersion);
-  const std::string path = S->dir + "\\cache_stamp.txt";
+  const std::string path = S->dir + std::string(1, nvn::os_host::path_sep()) + "cache_stamp.txt";
   std::string oldGpu, oldBld;
   {
     std::ifstream f(path);
@@ -383,7 +371,7 @@ bool CheckStamp(Host* h) {
   }
   while (!oldGpu.empty() && (oldGpu.back() == '\r')) oldGpu.pop_back();
   while (!oldBld.empty() && (oldBld.back() == '\r')) oldBld.pop_back();
-  auto rm = [&](const char* n) { DeleteFileA((S->dir + "\\" + n).c_str()); };
+  auto rm = [&](const char* n) { nvn::os_host::remove_file(S->dir + std::string(1, nvn::os_host::path_sep()) + n); };
   if (!oldGpu.empty() || !oldBld.empty()) {
     if (oldBld != bld) {
       Log("pipeline cache: the game build, translator or key layout changed (%s -> %s): key list and driver cache wiped", oldBld.c_str(), bld);
@@ -410,18 +398,19 @@ void WriteStatus() {
   size_t known;
   { std::lock_guard<std::mutex> lk(S->km); known = S->known.size(); }
   std::error_code ec;
-  const uint64_t blob = std::filesystem::file_size(S->dir + "\\pipeline_cache.bin", ec);
+  const std::string sep(1, nvn::os_host::path_sep());
+  const uint64_t blob = std::filesystem::file_size(S->dir + sep + "pipeline_cache.bin", ec);
   char b[320];
   snprintf(b, sizeof b, "{\"format\": 1, \"known\": %zu, \"ready\": %u, \"entries\": %u, \"blob_bytes\": %llu, \"translator\": \"%016llx\", \"game\": \"%016llx\", \"updated\": %lld}\n",
            known, ready, entries, (unsigned long long)(ec ? 0 : blob), (unsigned long long)S->translatorHash, (unsigned long long)S->buildHash, (long long)time(nullptr));
-  const std::string path = S->dir + "\\status.json", tmp = path + ".tmp";
+  const std::string path = S->dir + sep + "status.json", tmp = path + ".tmp";
   { std::ofstream f(tmp, std::ios::trunc); f << b; if (!f.good()) return; }
-  MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+  nvn::os_host::atomic_replace(tmp, path);
 }
 
 // ---- pipeline cache persistence ---------------------------------------------------------------------------------------------------
 bool LoadCache(Host* h) {
-  std::ifstream f(S->dir + "\\pipeline_cache.bin", std::ios::binary);
+  std::ifstream f(S->dir + std::string(1, nvn::os_host::path_sep()) + "pipeline_cache.bin", std::ios::binary);
   FileHdr got{};
   const FileHdr want = MakeHdr(h, kMagicCache, true);
   if (!f || !f.read((char*)&got, sizeof got) || !HdrMatches(got, want)) return false;   // other driver / build / translator: the blob is useless
@@ -448,17 +437,17 @@ void SaveCache(bool force) {
   // The housekeeper and the thread finishing a precompile run can both get here: each writes its own tmp file, then renames it into place
   // (MoveFileEx replace is atomic), so the cache file is always one writer's complete blob.
   static std::atomic<unsigned> saveSeq{0};
-  const std::string path = S->dir + "\\pipeline_cache.bin",
-                    tmp = path + "." + std::to_string(GetCurrentProcessId()) + "." + std::to_string(saveSeq.fetch_add(1)) + ".tmp";
+  const std::string path = S->dir + std::string(1, nvn::os_host::path_sep()) + "pipeline_cache.bin",
+                    tmp = path + "." + std::to_string(nvn::os_host::current_process_id()) + "." + std::to_string(saveSeq.fetch_add(1)) + ".tmp";
   {
     std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
     const FileHdr hdr = MakeHdr(h, kMagicCache, true);
     f.write((const char*)&hdr, sizeof hdr);
     f.write(data.data(), (std::streamsize)n);
     f.flush();
-    if (!f.good()) { f.close(); DeleteFileA(tmp.c_str()); return; }
+    if (!f.good()) { f.close(); nvn::os_host::remove_file(tmp); return; }
   }
-  if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) { DeleteFileA(tmp.c_str()); return; }
+  if (!nvn::os_host::atomic_replace(tmp, path)) { nvn::os_host::remove_file(tmp); return; }
   S->lastSaveNs = snap_perf::now_ns();
   Log("pipeline cache saved (%zu bytes)", n);
   WriteStatus();
@@ -508,8 +497,8 @@ void Worker() {
       else { j = S->cold.front(); S->cold.pop_front(); }
       S->running++;
     }
-    SetThreadPriority(GetCurrentThread(), isHot ? THREAD_PRIORITY_NORMAL
-                                                : (S->mode.load() == SHADERPRECOMPILE_MODE_NOW ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_BELOW_NORMAL));
+    if (isHot || S->mode.load() == SHADERPRECOMPILE_MODE_NOW) nvn::os_host::set_current_thread_normal();
+    else nvn::os_host::set_current_thread_below_normal();
     const uint64_t t0 = snap_perf::now_ns();
     RunJob(j);
     const uint64_t dt = snap_perf::now_ns() - t0;
@@ -525,7 +514,7 @@ void Worker() {
         Log("pipeline run: %u pipelines built in %.0f ms", d, wallMs);
         if (d) S->avgMs = (double)S->busyNs.load() / 1e6 / d;
         SaveCache(true);
-        std::ofstream st(S->dir + "\\stats.txt", std::ios::trunc);
+        std::ofstream st(S->dir + std::string(1, nvn::os_host::path_sep()) + "stats.txt", std::ios::trunc);
         st << S->avgMs << "\n";
       }
     }
@@ -549,7 +538,7 @@ void EnsureWorkers(int want) {
 void Housekeeping() {
   while (true) {
     for (int i = 0; i < 50; i++) {
-      Sleep(100);
+      nvn::os_host::sleep_ms(100);
       std::lock_guard<std::mutex> lk(S->qm);
       if (S->stop) return;
     }
@@ -626,24 +615,16 @@ void PipelineServiceInit(Host* h) {
   int mode = SHADERPRECOMPILE_MODE_UNSET;
   if (const char* e = getenv("SNAP_SHADER_PRECOMPILE")) mode = !strcmp(e, "now") ? SHADERPRECOMPILE_MODE_NOW : !strcmp(e, "playing") ? SHADERPRECOMPILE_MODE_PLAYING : mode;
   else {
-    std::ifstream f(S->dir + "\\mode.txt");
+    std::ifstream f(S->dir + std::string(1, nvn::os_host::path_sep()) + "mode.txt");
     std::string w;
     if (f >> w) mode = w == "now" ? SHADERPRECOMPILE_MODE_NOW : w == "playing" ? SHADERPRECOMPILE_MODE_PLAYING : mode;
   }
   { std::lock_guard<std::mutex> lk(g_early); if (g_earlyMode >= 0) mode = g_earlyMode; }
   S->mode = mode;
-  { std::ifstream f(S->dir + "\\stats.txt"); double v; if (f >> v && v > 0.1 && v < 5000) S->avgMs = v; }
+  { std::ifstream f(S->dir + std::string(1, nvn::os_host::path_sep()) + "stats.txt"); double v; if (f >> v && v > 0.1 && v < 5000) S->avgMs = v; }
   // enumerate the translation cache so background jobs can load any stage by its key prefix
-  {
-    WIN32_FIND_DATAA fd;
-    HANDLE hf = FindFirstFileA((h->cacheDir + "\\*.json").c_str(), &fd);
-    if (hf != INVALID_HANDLE_VALUE) {
-      do {
-        std::string n = fd.cFileName;
-        if (n.size() == 64 + 5) S->fullKeys.emplace(n.substr(0, 12), n.substr(0, 64));
-      } while (FindNextFileA(hf, &fd));
-      FindClose(hf);
-    }
+  for (const std::string& n : nvn::os_host::list_files(h->cacheDir, nullptr, ".json")) {
+    if (n.size() == 64 + 5) S->fullKeys.emplace(n.substr(0, 12), n.substr(0, 64));
   }
   const bool stampSame = CheckStamp(h);
   const bool blobLoaded = LoadCache(h);
@@ -809,7 +790,7 @@ void shaderprecompile_set_mode(int mode) {
   if (mode < 0 || mode > 2) return;
   if (!S || !S->up) { std::lock_guard<std::mutex> lk(g_early); g_earlyMode = mode; return; }
   S->mode = mode;
-  std::ofstream f(S->dir + "\\mode.txt", std::ios::trunc);
+  std::ofstream f(S->dir + std::string(1, nvn::os_host::path_sep()) + "mode.txt", std::ios::trunc);
   f << (mode == SHADERPRECOMPILE_MODE_NOW ? "now" : mode == SHADERPRECOMPILE_MODE_PLAYING ? "playing" : "unset") << "\n";
   if (mode == SHADERPRECOMPILE_MODE_NOW && S->state.load() != SHADERPRECOMPILE_RUNNING) BeginRun();
 }
