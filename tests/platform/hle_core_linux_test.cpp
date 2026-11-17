@@ -60,9 +60,10 @@ static void test_registry() {
     CHECK(lang_code != nullptr);
     CHECK(sock_write != nullptr);
 
-    // Unported fs/hid must NOT be registered as fake overrides.
+    // Real overrides from fs and hid must now also be present; unported/nonexistent symbols remain null.
+    CHECK(hle::find_override("_ZN2nn2fs8MountRomEPKcPvm") != nullptr);
+    CHECK(hle::find_override("_ZN2nn3hid14InitializeNpadEv") != nullptr);
     CHECK(hle::find_override("_ZN2nn2fs10MountRomFsEPKc") == nullptr);
-    CHECK(hle::find_override("_ZN2nn3hid13InitializeNpadEv") == nullptr);
 
     // bind_all() must distinguish real overrides from generated weak stubs (unimplemented.cpp).
     std::unordered_map<std::string, GuestFn> bound;

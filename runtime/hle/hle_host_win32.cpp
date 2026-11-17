@@ -26,6 +26,10 @@ extern "C" void snap_pace_vsync_note_none();
 #pragma comment(linker, "/alternatename:snap_pace_vsync_note=snap_pace_vsync_note_none")
 #pragma comment(linker, "/alternatename:snap_ui_pick_profile=snap_ui_pick_profile_none")
 #pragma comment(linker, "/alternatename:snap_photoexport_drain_for_exit=snap_photoexport_drain_none")
+#pragma comment(linker, "/alternatename:snap_audio_log_checks=snap_audio_log_checks_none")
+#pragma comment(linker, "/alternatename:snap_state_request=snap_state_request_none")
+#pragma comment(linker, "/alternatename:snap_state_idle=snap_state_idle_none")
+#pragma comment(linker, "/alternatename:snap_state_count=snap_state_count_none")
 #endif
 
 namespace hle {

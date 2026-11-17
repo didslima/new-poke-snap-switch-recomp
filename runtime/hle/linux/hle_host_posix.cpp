@@ -28,17 +28,37 @@
 #include "../input_core.h"
 #include "../profiles.h"
 
-// Weak ELF fallbacks for optional NVN pacing and photo-export drain hooks.
+// Weak ELF fallbacks for optional NVN pacing, photo-export drain, audio checks, and save-state hooks.
 extern "C" __attribute__((weak)) int snap_pace_vsync_wait(int64_t*) { return 0; }
 extern "C" __attribute__((weak)) void snap_pace_vsync_note() {}
 extern "C" __attribute__((weak)) void snap_photoexport_drain_for_exit(int) {}
+extern "C" __attribute__((weak)) void snap_audio_log_checks(void) {}
+extern "C" __attribute__((weak)) void snap_state_request(int, const char*) {}
+extern "C" __attribute__((weak)) int snap_state_idle() { return 1; }
+extern "C" __attribute__((weak)) int snap_state_count(const char*) { return 0; }
 
-// Weak Stage 6B/6C-A link seams for unported HLE subsystems (HID, profiles, input_core).
-// register_fs is now strongly defined by runtime/hle/fs.cpp.
-namespace hle {
-__attribute__((weak)) void register_hid(std::vector<Entry>&) {}
-}  // namespace hle
+// Weak Stage 6C-B1 seams for unported NVN frame counters and cheats (overridden when ported).
+namespace nvn {
+__attribute__((weak)) int g_presentCount = 0;
+__attribute__((weak)) int g_fdBurst = 0;
+}  // namespace nvn
 
+namespace hle::cheats {
+__attribute__((weak)) void tick() {}
+}  // namespace hle::cheats
+
+// Weak Stage 6C-B1 backend fallback until SDL3 input_backends is ported in Stage 6C-B2.
+namespace hle::input {
+__attribute__((weak)) std::unique_ptr<Backend> make_default_backend() {
+  struct NullBackend final : Backend {
+    const char* name() const override { return "none"; }
+    void poll(RawInput&) override {}
+  };
+  return std::make_unique<NullBackend>();
+}
+}  // namespace hle::input
+
+// Weak Stage 6B/6C link seams for unported HLE profiles/UI (register_fs and register_hid are now strongly defined).
 namespace hle::profiles {
 __attribute__((weak)) Store::Store(std::string) {}
 __attribute__((weak)) bool Store::load() { return false; }
@@ -57,28 +77,6 @@ __attribute__((weak)) const Active& active() {
 extern "C" __attribute__((weak)) int snap_ui_pick_profile(const hle::profiles::PickItem*, int) {
   return -1;
 }
-
-namespace hle::input {
-__attribute__((weak)) Mapping Mapping::defaults() { return Mapping{}; }
-__attribute__((weak)) bool swap_ab_effective(const Mapping&) { return false; }
-__attribute__((weak)) const std::vector<Source>& action_sources(const Mapping&, int) {
-  static const std::vector<Source> kEmpty{};
-  return kEmpty;
-}
-__attribute__((weak)) const char* key_name(int) { return ""; }
-__attribute__((weak)) const char* mouse_name(int) { return ""; }
-__attribute__((weak)) Hub::Hub() {}
-__attribute__((weak)) Mapping Hub::mapping() const { return Mapping{}; }
-__attribute__((weak)) PadFx& pad_fx() {
-  static PadFx fx{};
-  return fx;
-}
-__attribute__((weak)) Hub& hub() {
-  static Hub h{};
-  return h;
-}
-__attribute__((weak)) void script_event(const char*) {}
-}  // namespace hle::input
 
 namespace hle::host {
 
