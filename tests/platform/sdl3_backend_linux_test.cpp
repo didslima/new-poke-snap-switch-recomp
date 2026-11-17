@@ -1,14 +1,23 @@
 // SPDX-License-Identifier: MIT
 // Stage 6C-B2: isolated tests for Linux SDL3 input backend (and NullBackend when built headless without SDL3).
 // Never depends on a physical controller or an SDL window; never executes guest code.
+#include <unistd.h>
+
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
+#include <unordered_map>
 
 #include "hle/hle.h"
+#include "hle/hle_config.h"
 #include "hle/input_core.h"
+#include "hle/svc_common.h"
 
 #ifdef HLE_WITH_SDL3
 #include <SDL3/SDL.h>
@@ -113,11 +122,119 @@ static void test_sdl3_virtual_hotplug_and_disconnect() {
 }
 #endif
 
+static void test_end_to_end_sdl3_hub_hid_integration() {
+    // End-to-end: bind_all() -> real nn::hid overrides -> Hub -> real make_default_backend() (SDL3 or NullBackend).
+    std::unordered_map<std::string, GuestFn> bound;
+    hle::bind_all([](const char* sym, GuestFn fn, void* u) {
+        (*static_cast<std::unordered_map<std::string, GuestFn>*>(u))[sym] = fn;
+    }, &bound);
+
+    GuestFn fn_init = bound["_ZN2nn3hid14InitializeNpadEv"];
+    GuestFn fn_npad = bound["_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj"];
+    GuestFn fn_style = bound["_ZN2nn3hid15GetNpadStyleSetERKj"];
+    CHECK(fn_init != nullptr && fn_npad != nullptr && fn_style != nullptr);
+    CHECK(hle::find_override("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj") == fn_npad);
+
+    char tmpl[] = "/tmp/snap_hid_integ_XXXXXX";
+    char* tmp = mkdtemp(tmpl);
+    CHECK(tmp != nullptr);
+    const std::string orig_map = hle::config().input_map_path;
+    if (tmp) hle::config().input_map_path = std::string(tmp) + "/input.json";
+
+    // Reset Hub backend to force real make_default_backend() instantiation inside Hub::poll().
+    hle::input::hub().set_backend(nullptr);
+    hle::input::hub().set_mapping(hle::input::Mapping::defaults());
+    hle::input::hub().set_menu_open(false);
+    hle::input::hub().set_window_focus(true);
+
+    Cpu c{};
+    fn_init(&c);
+
+    uint32_t npad_id = 0;
+    uint8_t state[0x28] = {};
+    auto read_npad = [&](uint64_t* btns, int32_t* ly, uint32_t* attr) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        std::memset(state, 0, sizeof(state));
+        c = Cpu{};
+        c.x[0] = reinterpret_cast<uint64_t>(state);
+        c.x[1] = reinterpret_cast<uint64_t>(&npad_id);
+        fn_npad(&c);
+        std::memcpy(btns, state + 8, 8);
+        std::memcpy(ly, state + 0x14, 4);
+        std::memcpy(attr, state + 0x20, 4);
+    };
+
+    // Baseline with no physical/virtual controller: neutral state.
+    uint64_t btns = 0;
+    int32_t ly = 0;
+    uint32_t attr = 0;
+    read_npad(&btns, &ly, &attr);
+    CHECK(btns == 0 && ly == 0 && attr == 0);
+
+#ifdef HLE_WITH_SDL3
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_SOUTH) | (1u << SDL_GAMEPAD_BUTTON_EAST) |
+                       (1u << SDL_GAMEPAD_BUTTON_WEST) | (1u << SDL_GAMEPAD_BUTTON_NORTH);
+    desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_LEFTX) | (1u << SDL_GAMEPAD_AXIS_LEFTY);
+    desc.name = "SnapIntegPad1";
+
+    const SDL_JoystickID vid1 = SDL_AttachVirtualJoystick(&desc);
+    if (vid1 != 0) {
+        SDL_Joystick* j1 = SDL_OpenJoystick(vid1);
+        CHECK(j1 != nullptr);
+        if (j1) {
+            SDL_SetJoystickVirtualButton(j1, SDL_GAMEPAD_BUTTON_EAST, true);
+            SDL_SetJoystickVirtualAxis(j1, SDL_GAMEPAD_AXIS_LEFTY, -32767);
+        }
+        read_npad(&btns, &ly, &attr);
+        CHECK(attr == 1);
+        CHECK((btns & (1ull << hle::input::kA)) != 0);
+        CHECK(ly > 20000);
+
+        // Disconnect -> state returns to neutral.
+        if (j1) SDL_CloseJoystick(j1);
+        CHECK(SDL_DetachVirtualJoystick(vid1));
+        read_npad(&btns, &ly, &attr);
+        CHECK(attr == 0 && btns == 0 && ly == 0);
+
+        // Reconnect -> state recovers.
+        desc.name = "SnapIntegPadReconnect";
+        const SDL_JoystickID vid2 = SDL_AttachVirtualJoystick(&desc);
+        CHECK(vid2 != 0);
+        if (vid2 != 0) {
+            SDL_Joystick* j2 = SDL_OpenJoystick(vid2);
+            CHECK(j2 != nullptr);
+            if (j2) SDL_SetJoystickVirtualButton(j2, SDL_GAMEPAD_BUTTON_NORTH, true);
+            read_npad(&btns, &ly, &attr);
+            CHECK(attr == 1);
+            CHECK((btns & (1ull << hle::input::kX)) != 0);
+            if (j2) SDL_CloseJoystick(j2);
+            CHECK(SDL_DetachVirtualJoystick(vid2));
+            read_npad(&btns, &ly, &attr);
+            CHECK(attr == 0 && btns == 0);
+        }
+    }
+#endif
+
+    // Release Hub backend before main exits so SDL shuts down cleanly.
+    hle::input::hub().set_backend(nullptr);
+    hle::config().input_map_path = orig_map;
+    if (tmp) {
+        std::error_code ec;
+        std::filesystem::remove_all(tmp, ec);
+    }
+}
+
 int main() {
     test_backend_lifecycle_and_headless();
 #ifdef HLE_WITH_SDL3
     test_sdl3_virtual_hotplug_and_disconnect();
 #endif
+    test_end_to_end_sdl3_hub_hid_integration();
     std::printf("sdl3_backend_linux_test: %d checks, %d failures\n", g_checks.load(), g_fail.load());
     return g_fail.load() ? 1 : 0;
 }

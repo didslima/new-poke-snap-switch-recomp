@@ -234,7 +234,7 @@ std::unique_ptr<Backend> make_default_backend() {
 #else
   struct NullBackend final : Backend {
     const char* name() const override { return "none"; }
-    void poll(RawInput&) override {}
+    void poll(RawInput& out) override { out.focused = false; }
   };
   return std::make_unique<NullBackend>();
 #endif

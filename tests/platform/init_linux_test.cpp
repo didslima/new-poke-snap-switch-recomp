@@ -233,6 +233,8 @@ int main() {
         CHECK(res.tls_hooks_bound == 2);
         CHECK(res.hle_overrides_bound > 100);
         CHECK(loader::find_override("_ZN2nn2oe16GetOperationModeEv") != nullptr);
+        CHECK(loader::find_override("_ZN2nn2fs8MountRomEPKcPvm") != nullptr);
+        CHECK(loader::find_override("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj") != nullptr);
         CHECK(res.main_cpu != nullptr);
         CHECK(res.main_thread_type != 0);
         CHECK(res.tpidr != 0);
