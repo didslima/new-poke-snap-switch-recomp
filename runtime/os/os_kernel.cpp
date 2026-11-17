@@ -755,7 +755,7 @@ static void unlock_locked(Thread *me, uint64_t addr) {
     }
     gword(addr).store(next->wtag | (n > 1 ? LOCK_WAITERS : 0), std::memory_order_release);
     next->lock_owner = nullptr;
-    wake(next, R_OK);
+    wake(next, R_SUCCESS);
     recompute_priority(me);
     recompute_priority(next);
 }
@@ -764,7 +764,7 @@ uint32_t k_arbitrate_lock(Thread *me, uint32_t owner_handle, uint64_t addr, uint
     Lock lk(G);
     Thread *owner = find_handle(owner_handle);
     if (!owner) return R_INVALID_HANDLE;
-    if (gword(addr).load(std::memory_order_acquire) != (owner_handle | LOCK_WAITERS)) return R_OK;
+    if (gword(addr).load(std::memory_order_acquire) != (owner_handle | LOCK_WAITERS)) return R_SUCCESS;
     if (owner == me) fatal("thread %#x waits for lock %#llx that it owns", me->handle, (unsigned long long)addr);
     g_stats.lock_contended++;
     me->woken = false;
@@ -783,7 +783,7 @@ uint32_t k_arbitrate_unlock(Thread *me, uint64_t addr) {
     if ((gword(addr).load(std::memory_order_acquire) & ~LOCK_WAITERS) != me->handle) return R_INVALID_STATE;
     unlock_locked(me, addr);
     if (snap_perf::on) crit_g_hold();
-    return R_OK;
+    return R_SUCCESS;
 }
 
 uint32_t k_wait_key_atomic(Thread *me, uint64_t addr, uint64_t key, uint32_t tag, int64_t ns) {
@@ -826,7 +826,7 @@ void k_signal_key(uint64_t key, int count) {
         for (;;) {   // acquire the mutex for t, or queue t on its owner
             uint32_t v = 0;
             if (gword(a).compare_exchange_strong(v, t->wtag, std::memory_order_acq_rel)) {
-                wake(t, R_OK);
+                wake(t, R_SUCCESS);
                 break;
             }
             if (!(v & LOCK_WAITERS)) {
@@ -885,7 +885,7 @@ uint32_t cv_wait(uint64_t cv, uint64_t cs, int64_t ns) {
     Thread *me = self();
     uint32_t r = k_wait_key_atomic(me, cs, cv, me->handle, ns);
     if ((gword(cs).load(std::memory_order_acquire) & ~LOCK_WAITERS) != me->handle) cs_enter(cs);
-    return r == R_TIMEOUT ? R_TIMEOUT : R_OK;
+    return r == R_TIMEOUT ? R_TIMEOUT : R_SUCCESS;
 }
 void cv_signal(uint64_t cv) {
     if (gword(cv).load(std::memory_order_acquire)) k_signal_key(cv, 1);
@@ -985,7 +985,7 @@ static unsigned __stdcall host_entry(void *arg) {
         Lock lk(G);
         gst8a(t->tt + TT_STATE, TS_TERMINATED);   // sdk+0x34473c
         t->exited = 1;
-        keyq_wake_all(mkkey(K_JOIN, t->tt), R_OK);
+        keyq_wake_all(mkkey(K_JOIN, t->tt), R_SUCCESS);
         mw_notify_locked(t->tt);
         release_core(t);
     }
@@ -1014,7 +1014,7 @@ void thread_wait_exit(Thread *t) {
     Lock lk(G);
     t->joiners++;   // thread_destroy waits until every joiner has stopped reading t (finding 8b)
     while (!t->exited) block_on_key(me, lk, mkkey(K_JOIN, t->tt), W_JOIN, Deadline::max());
-    if (--t->joiners == 0) keyq_wake_all(mkkey(K_JOINERS, t->tt), R_OK);
+    if (--t->joiners == 0) keyq_wake_all(mkkey(K_JOINERS, t->tt), R_SUCCESS);
 }
 
 void thread_destroy(Thread *t) {
@@ -1441,7 +1441,7 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
     case 0x0c: {   // GetThreadPriority(out w1, handle w1)
         Thread *t = svc_thread((uint32_t)c->x[1]);
         if (!t) { c->x[0] = R_INVALID_HANDLE; return 1; }
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         c->x[1] = (uint64_t)(t->eff_prio + 28);
         return 1;
     }
@@ -1449,13 +1449,13 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
         Thread *t = svc_thread((uint32_t)c->x[0]);
         if (!t) { c->x[0] = R_INVALID_HANDLE; return 1; }
         change_priority(t, (int)(uint32_t)c->x[1] - 28);
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         return 1;
     }
     case 0x0e: {   // GetThreadCoreMask(out w1 core, out x2 mask, handle w2)
         Thread *t = svc_thread((uint32_t)c->x[2]);
         if (!t) { c->x[0] = R_INVALID_HANDLE; return 1; }
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         c->x[1] = (uint64_t)(uint32_t)t->ideal;
         c->x[2] = t->mask;
         return 1;
@@ -1464,7 +1464,7 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
         Thread *t = svc_thread((uint32_t)c->x[0]);
         if (!t) { c->x[0] = R_INVALID_HANDLE; return 1; }
         set_core_mask(t, (int)(int32_t)c->x[1], c->x[2]);
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         return 1;
     }
     case 0x10: {   // GetCurrentProcessorNumber
@@ -1483,7 +1483,7 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
         return 1;
     case 0x1d:     // SignalProcessWideKey(key x0, count w1)
         k_signal_key(c->x[0], (int)(int32_t)c->x[1]);
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         return 1;
     case 0x1e:     // GetSystemTick
         c->x[0] = os_ticks();
@@ -1491,7 +1491,7 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
     case 0x25: {   // GetThreadId(out x1, handle w1)
         Thread *t = svc_thread((uint32_t)c->x[1]);
         if (!t) { c->x[0] = R_INVALID_HANDLE; return 1; }
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         c->x[1] = t->id;
         return 1;
     }
@@ -1499,19 +1499,19 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
         uint32_t reason = (uint32_t)c->x[0];
         log("svcBreak reason %#x info %#llx size %#llx", reason, (unsigned long long)c->x[1], (unsigned long long)c->x[2]);
         if (!(reason & 0x80000000u)) fatal("svcBreak reason %#x (lr %#llx)", reason, (unsigned long long)c->x[30]);
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         return 1;
     }
     case 0x27: {   // OutputDebugString(str x0, len x1)
         uint64_t n = std::min<uint64_t>(c->x[1], 1024);
         if (c->x[0] && n) log("svcOutputDebugString: %.*s", (int)n, (const char *)(uintptr_t)c->x[0]);
-        c->x[0] = R_OK;
+        c->x[0] = R_SUCCESS;
         return 1;
     }
     case 0x29: {   // GetInfo: in x1 type, x2 handle, x3 subtype; out w0 result, x1 value. See runtime/os/svc_getinfo.md
         uint32_t type = (uint32_t)c->x[1], handle = (uint32_t)c->x[2];
         uint64_t sub = c->x[3], v = 0;
-        uint32_t r = R_OK;
+        uint32_t r = R_SUCCESS;
         bool proc_type = !(type == 8 || type == 10 || type == 11);   // 8, 10, 11 take handle 0; the rest the process
         switch (type) {
         case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 12: case 13: case 14: case 15: case 16:
@@ -1554,7 +1554,7 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
         default: r = mem_get_info(type, &v); break;
         }
         c->x[0] = r;
-        if (r == R_OK) c->x[1] = v;
+        if (r == R_SUCCESS) c->x[1] = v;
         return 1;
     }
     default:

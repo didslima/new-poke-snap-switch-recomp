@@ -73,7 +73,7 @@ uint32_t cond_wait(uint64_t cv, uint64_t m, int64_t ns) {
     int32_t n = gld<int32_t>(m + MX_NEST_COUNT) - 1;
     gst<int32_t>(m + MX_NEST_COUNT, n);
     if (n == 0) gst<uint64_t>(m + MX_OWNER, 0);
-    uint32_t r = ns <= 0 && ns != NS_INFINITE ? R_TIMEOUT : R_OK;
+    uint32_t r = ns <= 0 && ns != NS_INFINITE ? R_TIMEOUT : R_SUCCESS;
     if (r == R_TIMEOUT) {   // TimeSpan 0: unlock and relock (sdk+0x33eb4c)
         cs_leave(m + MX_CS);
         cs_enter(m + MX_CS);
@@ -248,7 +248,7 @@ void ov_SignalLightEvent(Cpu *c) {
         gst32a(e + LE_WORD, 2);
         // Manual clear: every waiter woken here returns signalled, even if ClearLightEvent runs before it re-checks the
         // word (finding 11). Legacy: waiters re-check the word and can lose a Signal-then-Clear pulse.
-        keyq_wake_all(k, legacy(LG_EVENTS) ? R_OK : LIGHT_HANDOFF);
+        keyq_wake_all(k, legacy(LG_EVENTS) ? R_SUCCESS : LIGHT_HANDOFF);
     }
 }
 bool light_wait(uint64_t e, int64_t ns) {
@@ -395,7 +395,7 @@ void ov_ReleaseReadLock(Cpu *c) {
     uint32_t n = gld<uint32_t>(r + RW_READERS);
     if (!n) fatal("ReleaseReadLock(%#llx) without a read lock", (unsigned long long)r);
     gst<uint32_t>(r + RW_READERS, n - 1);
-    if (n == 1) keyq_wake_all(mkkey(K_RW, r), R_OK);
+    if (n == 1) keyq_wake_all(mkkey(K_RW, r), R_SUCCESS);
 }
 void ov_AcquireWriteLock(Cpu *c) { rw_write(c->x[0], false); }
 void ov_TryAcquireWriteLock(Cpu *c) { c->x[0] = rw_write(c->x[0], true); }
@@ -408,7 +408,7 @@ void ov_ReleaseWriteLock(Cpu *c) {
     gst<uint32_t>(r + RW_WRITE_COUNT, n);
     if (n == 0) {
         gst<uint64_t>(r + RW_OWNER, 0);
-        keyq_wake_all(mkkey(K_RW, r), R_OK);
+        keyq_wake_all(mkkey(K_RW, r), R_SUCCESS);
     }
 }
 void ov_IsReadLockHeld(Cpu *c) { c->x[0] = gld<uint32_t>(c->x[0] + RW_READERS) != 0; }
@@ -434,7 +434,7 @@ void timer_update(uint64_t t) {   // under G
     }
 }
 void timer_notify(uint64_t t) {   // under G
-    keyq_wake_all(mkkey(K_TIMER, t), R_OK);
+    keyq_wake_all(mkkey(K_TIMER, t), R_SUCCESS);
     mw_notify_locked(t);
 }
 void ov_InitializeTimerEvent(Cpu *c) {
@@ -661,7 +661,7 @@ void ov_FinalizeMultiWaitHolder(Cpu *c) {
 void ov_LinkMultiWaitHolder(Cpu *c) {
     Lock lk(G);
     link_locked(c->x[0], c->x[1]);
-    keyq_wake_all(mkkey(K_MULTI, c->x[0]), R_OK);   // a WaitAny already in progress re-checks the new holder (finding 13)
+    keyq_wake_all(mkkey(K_MULTI, c->x[0]), R_SUCCESS);   // a WaitAny already in progress re-checks the new holder (finding 13)
 }
 void ov_UnlinkMultiWaitHolder(Cpu *c) { Lock lk(G); unlink_locked(c->x[0]); }
 void ov_UnlinkAllMultiWaitHolder(Cpu *c) {
@@ -818,7 +818,7 @@ void mw_notify_locked(uint64_t obj) {
     auto it = g_obj_holders.find(obj);
     if (it == g_obj_holders.end()) return;
     for (uint64_t h : it->second)
-        if (uint64_t mw = gld<uint64_t>(h + MH_MULTIWAIT)) keyq_wake_all(mkkey(K_MULTI, mw), R_OK);
+        if (uint64_t mw = gld<uint64_t>(h + MH_MULTIWAIT)) keyq_wake_all(mkkey(K_MULTI, mw), R_SUCCESS);
 }
 void mw_notify(uint64_t obj) {
     // The caller just stored the object's signalled state. Without a full fence that store can still sit in the store

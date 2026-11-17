@@ -39,10 +39,18 @@ if(UNIX AND NOT APPLE)
   target_include_directories(snap_json_lite_test PRIVATE runtime/hle)
   target_compile_features(snap_json_lite_test PRIVATE cxx_std_20)
   add_test(NAME json_lite COMMAND snap_json_lite_test)
+
+  # The neutral OS interface with the POSIX headers included first (the R_OK macro collision of stage 2) and the HostCtx layout contract.
+  add_executable(snap_os_posix_header_test tests/platform/os_posix_header_test.cpp)
+  target_include_directories(snap_os_posix_header_test PRIVATE runtime)
+  target_compile_features(snap_os_posix_header_test PRIVATE cxx_std_20)
+  add_test(NAME os_posix_header COMMAND snap_os_posix_header_test)
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.
 add_test(NAME source_classification
   COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/tests/recomp/test_source_classification.py)
+add_test(NAME os_neutral_interfaces
+  COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/tests/platform/test_os_neutral.py)
 add_test(NAME source_selection
   COMMAND ${CMAKE_COMMAND} -DSNAP_TEST_ROOT=${PROJECT_SOURCE_DIR} -P ${PROJECT_SOURCE_DIR}/cmake/tests/check_selection.cmake)

@@ -160,7 +160,7 @@ uint32_t vamm_alloc_region(uint64_t out, uint64_t size) {
     g_regions[(uint64_t)(uintptr_t)p] = Region{size, 0};
     g_reserved_total += size;
     gst<uint64_t>(out, (uint64_t)(uintptr_t)p);
-    return R_OK;
+    return R_SUCCESS;
 }
 uint32_t vamm_alloc_pages(uint64_t a, uint64_t size) {
     if (!size || (a & (PAGE - 1))) return R_INVALID_RANGE;
@@ -184,7 +184,7 @@ uint32_t vamm_alloc_pages(uint64_t a, uint64_t size) {
                 r->committed += fresh;
                 g_committed_total += fresh;
                 if (waited) fprintf(stderr, "[os-mem] AllocateMemoryPages(%#llx) succeeded after %llu ms\n", (unsigned long long)size, (unsigned long long)waited);
-                return R_OK;
+                return R_SUCCESS;
             }
             err = GetLastError();
         }
@@ -208,7 +208,7 @@ uint32_t vamm_free_pages(uint64_t a, uint64_t size) {
     VirtualFree((void *)(uintptr_t)a, size, MEM_DECOMMIT);
     r->committed -= std::min(r->committed, gone);
     g_committed_total -= std::min(g_committed_total, gone);
-    return R_OK;
+    return R_SUCCESS;
 }
 uint32_t vamm_free_region(uint64_t a) {
     std::lock_guard<std::mutex> lk(g_mm);
@@ -232,7 +232,7 @@ uint32_t vamm_free_region(uint64_t a) {
     g_reserved_total -= it->second.size;
     g_committed_total -= std::min(g_committed_total, it->second.committed);
     g_regions.erase(it);
-    return R_OK;
+    return R_SUCCESS;
 }
 uint32_t vamm_alloc_memory(uint64_t out, uint64_t size) {   // reserve + commit
     uint32_t r = vamm_alloc_region(out, size);
@@ -302,7 +302,7 @@ uint32_t heap_set_size(uint64_t size) {
         VirtualFree((void *)(uintptr_t)(g_heap_base + size), g_heap_size - size, MEM_DECOMMIT);
     }
     g_heap_size = size;
-    return R_OK;
+    return R_SUCCESS;
 }
 uint32_t heap_alloc_block(uint64_t out, uint64_t size) {   // first fit, page aligned
     if (!size) return R_INVALID_RANGE;
@@ -320,7 +320,7 @@ uint32_t heap_alloc_block(uint64_t out, uint64_t size) {   // first fit, page al
     g_heap_blocks[at] = size;
     memset((void *)(uintptr_t)at, 0, size);
     gst<uint64_t>(out, at);
-    return R_OK;
+    return R_SUCCESS;
 }
 void ov_SetMemoryHeapSize(Cpu *c) { c->x[0] = heap_set_size(c->x[0]); }
 void ov_GetMemoryHeapAddress(Cpu *c) { std::lock_guard<std::mutex> lk(g_mm); c->x[0] = g_heap_base; }
@@ -394,7 +394,7 @@ uint32_t mem_get_info(uint32_t type, uint64_t *out) {
     default: return R_INVALID_ENUM_VALUE;
     }
     *out = v;
-    return R_OK;
+    return R_SUCCESS;
 }
 }  // namespace osk
 
