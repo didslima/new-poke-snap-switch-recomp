@@ -60,6 +60,12 @@ def functions():
 
 def lower_priority():
     """BelowNormal for this process (children inherit it)."""
+    if os.name != 'nt':
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+        return
     import ctypes
     k = ctypes.windll.kernel32
     k.SetPriorityClass(k.GetCurrentProcess(), 0x4000)
@@ -78,6 +84,14 @@ class MemSampler:
 
     @staticmethod
     def _avail():
+        if os.name != 'nt':
+            try:
+                for line in open('/proc/meminfo', encoding='utf-8'):
+                    if line.startswith('MemAvailable:'):
+                        return int(line.split()[1]) * 1024
+            except OSError:
+                pass
+            return 0
         import ctypes
         from ctypes import wintypes
 

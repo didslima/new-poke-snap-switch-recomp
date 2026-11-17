@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / 'recomp' / 'snap_build_linux.py'
 LINK_SRC = ROOT / 'tests' / 'platform' / 'aot_link_test.cpp'
+SDK_REAL_LINK_SRC = ROOT / 'tests' / 'platform' / 'aot_sdk_real_link_test.cpp'
 ABI_SRC = ROOT / 'runtime' / 'os' / 'abi.cpp'
 
 
@@ -136,6 +137,22 @@ class AotLinuxBuildTest(unittest.TestCase):
             ])
             out = subprocess.check_output([str(exe)], text=True)
             self.assertIn('aot_link_test: main=1 sdk=1 imports=1', out)
+
+    def test_real_abi3_sdk_archive_links_if_present(self):
+        real_sdk = ROOT / 'build' / 'linux-aot-abi3' / 'sdk' / 'lib' / 'libsnap_sdk.a'
+        if not real_sdk.is_file():
+            self.skipTest('build/linux-aot-abi3/sdk/lib/libsnap_sdk.a not generated in this workspace')
+        with tempfile.TemporaryDirectory() as td:
+            exe = Path(td) / 'aot_sdk_real_link_test'
+            cc = shutil.which('clang++') or 'clang++'
+            subprocess.check_call([
+                cc, '-std=c++20', '-O2', '-march=x86-64-v3',
+                '-I', str(ROOT / 'runtime'),
+                str(SDK_REAL_LINK_SRC), str(ABI_SRC), str(real_sdk),
+                '-o', str(exe),
+            ])
+            out = subprocess.check_output([str(exe)], text=True)
+            self.assertIn('aot_sdk_real_link_test: sdk_fn_count=36831', out)
 
     def test_missing_manifest_fails_clearly(self):
         with tempfile.TemporaryDirectory() as td:
