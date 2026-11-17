@@ -20,6 +20,14 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 if(UNIX AND NOT APPLE)
   find_package(Vulkan REQUIRED)   # headers only: runtime/nvn includes <vulkan/vulkan.h>
+  option(SNAP_ENABLE_SDL3 "Enable SDL3 input backend on Linux when SDL3 is available" ON)
+  set(SNAP_HAVE_SDL3 FALSE)
+  if(SNAP_ENABLE_SDL3)
+    find_package(SDL3 CONFIG QUIET)
+    if(TARGET SDL3::SDL3)
+      set(SNAP_HAVE_SDL3 TRUE)
+    endif()
+  endif()
 
   # Compiles every source the manifest calls shared or linux with the settings of host/build_snap.py (-march=x86-64-v3, no
   # strict aliasing, warnings off as there). A shared file that stops compiling on Linux fails this target.
@@ -29,6 +37,10 @@ if(UNIX AND NOT APPLE)
   target_compile_features(snap_portable_objects PRIVATE cxx_std_20)
   target_compile_options(snap_portable_objects PRIVATE -w -march=x86-64-v3 -fno-strict-aliasing)
   target_link_libraries(snap_portable_objects PRIVATE Vulkan::Headers)
+  if(SNAP_HAVE_SDL3)
+    target_compile_definitions(snap_portable_objects PRIVATE HLE_WITH_SDL3)
+    target_link_libraries(snap_portable_objects PRIVATE SDL3::SDL3)
+  endif()
   set_target_properties(snap_portable_objects PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
   set_source_files_properties(runtime/fma.c PROPERTIES COMPILE_OPTIONS "-mfma")
 
@@ -194,7 +206,8 @@ if(UNIX AND NOT APPLE)
     runtime/hle/hid.cpp runtime/hle/input_core.cpp runtime/hle/freecam.cpp
     runtime/hle/services_sys.cpp runtime/hle/services_net.cpp
     runtime/hle/access.cpp runtime/hle/btn_icons.cpp
-    runtime/hle/linux/hle_host_posix.cpp generated/unimplemented.cpp)
+    runtime/hle/linux/hle_host_posix.cpp runtime/hle/linux/input_backend_sdl3.cpp
+    generated/unimplemented.cpp)
 
   if(EXISTS "${SNAP_AOT_MAIN_LIB}" AND EXISTS "${SNAP_AOT_SDK_LIB}")
     snap_os_test(snap_boot_linux ${SNAP_LINUX_RUNNER_SOURCES}
@@ -250,11 +263,28 @@ if(UNIX AND NOT APPLE)
   target_compile_options(snap_hid_linux_test PRIVATE -w)
   add_test(NAME hid_linux COMMAND snap_hid_linux_test)
 
+  snap_os_test(snap_sdl3_backend_linux_test tests/platform/sdl3_backend_linux_test.cpp ${SNAP_LINUX_HLE_CORE_SOURCES} runtime/os/perf.cpp runtime/os/linux/os_host_posix.cpp)
+  target_compile_options(snap_sdl3_backend_linux_test PRIVATE -w)
+  add_test(NAME sdl3_backend_linux COMMAND snap_sdl3_backend_linux_test)
+
+  if(SNAP_HAVE_SDL3)
+    foreach(_t IN ITEMS snap_init_linux_test snap_hle_core_linux_test snap_fs_linux_test snap_hid_linux_test snap_sdl3_backend_linux_test)
+      target_compile_definitions(${_t} PRIVATE HLE_WITH_SDL3)
+      target_link_libraries(${_t} PRIVATE SDL3::SDL3)
+    endforeach()
+    if(EXISTS "${SNAP_AOT_MAIN_LIB}" AND EXISTS "${SNAP_AOT_SDK_LIB}")
+      target_compile_definitions(snap_boot_linux PRIVATE HLE_WITH_SDL3)
+      target_link_libraries(snap_boot_linux PRIVATE SDL3::SDL3)
+    endif()
+  endif()
+
   set_source_files_properties(
     runtime/hle/linux/hle_host_posix.cpp
+    runtime/hle/linux/input_backend_sdl3.cpp
     tests/platform/hle_core_linux_test.cpp
     tests/platform/fs_linux_test.cpp
     tests/platform/hid_linux_test.cpp
+    tests/platform/sdl3_backend_linux_test.cpp
     host/linux/init_linux.cpp
     tests/platform/init_linux_test.cpp
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")

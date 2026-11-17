@@ -19,6 +19,7 @@ shared   runtime/hle/hid.cpp
 shared   runtime/hle/hle_config.cpp
 windows  runtime/hle/hle_host_win32.cpp   # Win32 host helpers for HLE (stage 6B)
 linux    runtime/hle/linux/hle_host_posix.cpp   # POSIX/XDG host helpers and weak Stage 6B link seams for HLE
+linux    runtime/hle/linux/input_backend_sdl3.cpp   # Linux SDL3 input backend (NullBackend when built without SDL3)
 shared   runtime/hle/input_core.cpp
 shared   runtime/hle/overrides.cpp
 shared   runtime/hle/services_net.cpp
