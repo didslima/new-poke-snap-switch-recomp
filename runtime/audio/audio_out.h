@@ -60,7 +60,7 @@ struct SnapAudioOverride { const char* mangled; void* fn; };
 SNAP_AUDIO_API const SnapAudioOverride* snap_audio_overrides(int* count);
 
 // ---- Host controls -------------------------------------------------------------------------------------------------
-enum SnapAudioBackend { SNAP_AUDIO_BACKEND_AUTO = 0, SNAP_AUDIO_BACKEND_WASAPI = 1, SNAP_AUDIO_BACKEND_NULL = 2 };
+enum SnapAudioBackend { SNAP_AUDIO_BACKEND_AUTO = 0, SNAP_AUDIO_BACKEND_WASAPI = 1, SNAP_AUDIO_BACKEND_NULL = 2, SNAP_AUDIO_BACKEND_SDL3 = 3 };
 // channelMode = how many channels the GAME is told to produce (GetActiveAudioDeviceChannelCountForOutput). AUTO (the
 // default) means 6 when the output mode is speakers or spatial and 2 for stereo.
 enum SnapAudioChannelMode { SNAP_AUDIO_CH_STEREO = 0, SNAP_AUDIO_CH_AUTO = 1, SNAP_AUDIO_CH_SURROUND51 = 2 };
@@ -68,7 +68,7 @@ enum SnapAudioChannelMode { SNAP_AUDIO_CH_STEREO = 0, SNAP_AUDIO_CH_AUTO = 1, SN
 // for Windows Sonic or Dolby Atmos for Headphones; falls back to speakers, then stereo).
 enum SnapAudioOutputMode { SNAP_AUDIO_OUT_STEREO = 0, SNAP_AUDIO_OUT_SPEAKERS = 1, SNAP_AUDIO_OUT_SPATIAL = 2 };
 struct SnapAudioConfig {
-  int backend;             // SnapAudioBackend; env SNAP_AUDIO_BACKEND=wasapi|null overrides AUTO
+  int backend;             // SnapAudioBackend; env SNAP_AUDIO_BACKEND=wasapi|sdl3|null overrides AUTO
   int channelMode;         // what GetActiveAudioDeviceChannelCountForOutput reports (and the device stream uses)
   uint32_t sampleRate;     // device stream rate, 48000
   uint32_t deviceBufferMs; // requested WASAPI buffer (0 = engine default period)

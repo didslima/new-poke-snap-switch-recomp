@@ -34,8 +34,7 @@ class Backend {
 };
 
 Backend* make_null_backend();
-#if defined(_WIN32)
 Backend* make_wasapi_backend();
-#endif
+Backend* make_sdl3_audio_backend();
 
 }  // namespace snap_audio
