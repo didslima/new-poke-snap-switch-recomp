@@ -181,6 +181,15 @@ if(UNIX AND NOT APPLE)
   target_include_directories(snap_hooks_linux_test PRIVATE host)
   target_compile_options(snap_hooks_linux_test PRIVATE -w)
   add_test(NAME hooks_linux COMMAND ${CMAKE_COMMAND} -E env SNAP_MEMLOG=1 $<TARGET_FILE:snap_hooks_linux_test>)
+
+  # Stage 5b: Linux runner bootstrap target and isolated CLI + 256 MiB stack tests.
+  snap_os_test(snap_boot_linux host/linux/boot_linux.cpp host/linux/runner_linux.cpp runtime/os/linux/os_host_posix.cpp)
+  target_include_directories(snap_boot_linux PRIVATE host)
+
+  snap_os_test(snap_boot_linux_test tests/platform/boot_linux_test.cpp host/linux/runner_linux.cpp runtime/os/linux/os_host_posix.cpp)
+  target_include_directories(snap_boot_linux_test PRIVATE host)
+  add_test(NAME boot_linux COMMAND snap_boot_linux_test)
+  add_test(NAME boot_linux_help COMMAND snap_boot_linux --help)
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.
