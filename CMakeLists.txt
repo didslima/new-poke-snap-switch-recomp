@@ -188,16 +188,30 @@ if(UNIX AND NOT APPLE)
   set(SNAP_LINUX_RUNNER_SOURCES
     host/linux/boot_linux.cpp host/linux/runner_linux.cpp host/linux/crash_linux.cpp
     host/linux/preflight_linux.cpp host/elf_check.cpp)
+  set(SNAP_LINUX_HLE_CORE_SOURCES
+    runtime/hle/overrides.cpp runtime/hle/hle_config.cpp runtime/hle/settings.cpp
+    runtime/hle/services_sys.cpp runtime/hle/services_net.cpp
+    runtime/hle/access.cpp runtime/hle/btn_icons.cpp
+    runtime/hle/linux/hle_host_posix.cpp generated/unimplemented.cpp)
+
   if(EXISTS "${SNAP_AOT_MAIN_LIB}" AND EXISTS "${SNAP_AOT_SDK_LIB}")
     snap_os_test(snap_boot_linux ${SNAP_LINUX_RUNNER_SOURCES}
                  host/linux/init_linux.cpp host/linux/hooks_mods_stub.cpp
                  host/loader.cpp host/hooks.cpp host/guest_tls_hooks.cpp host/mods/drpfast.cpp
-                 runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES})
+                 runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES} ${SNAP_LINUX_HLE_CORE_SOURCES})
     target_compile_definitions(snap_boot_linux PRIVATE SNAP_LINUX_HAS_AOT=1)
     target_compile_options(snap_boot_linux PRIVATE -w)
     target_link_libraries(snap_boot_linux PRIVATE "${SNAP_AOT_MAIN_LIB}" "${SNAP_AOT_SDK_LIB}")
     add_test(NAME init_linux_real
-      COMMAND $<TARGET_FILE:snap_boot_linux> init
+      COMMAND ${CMAKE_COMMAND} -E env
+              "HOME=${CMAKE_BINARY_DIR}/test_init_real/home"
+              "XDG_CONFIG_HOME=${CMAKE_BINARY_DIR}/test_init_real/xdg_cfg"
+              "XDG_DATA_HOME=${CMAKE_BINARY_DIR}/test_init_real/xdg_data"
+              "SNAP_HLE_CONFIG=${CMAKE_BINARY_DIR}/test_init_real/hle.json"
+              "SNAP_ROMFS=${CMAKE_BINARY_DIR}/test_init_real/romfs"
+              "SNAP_SAVE_DIR=${CMAKE_BINARY_DIR}/test_init_real/save"
+              "SNAP_SAVE_ROOT=${CMAKE_BINARY_DIR}/test_init_real/save"
+              $<TARGET_FILE:snap_boot_linux> init
               --main "${PROJECT_SOURCE_DIR}/build/linux-aot/elf/main.elf"
               --sdk "${PROJECT_SOURCE_DIR}/build/linux-aot/elf/sdk.elf"
               --main-lib "${SNAP_AOT_MAIN_LIB}"
@@ -216,10 +230,21 @@ if(UNIX AND NOT APPLE)
   snap_os_test(snap_init_linux_test tests/platform/init_linux_test.cpp
                host/linux/init_linux.cpp host/linux/crash_linux.cpp host/linux/preflight_linux.cpp
                host/linux/hooks_mods_stub.cpp host/loader.cpp host/elf_check.cpp host/hooks.cpp
-               host/guest_tls_hooks.cpp host/mods/drpfast.cpp runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES})
+               host/guest_tls_hooks.cpp host/mods/drpfast.cpp runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES}
+               ${SNAP_LINUX_HLE_CORE_SOURCES})
   target_include_directories(snap_init_linux_test PRIVATE host)
   target_compile_options(snap_init_linux_test PRIVATE -w)
   add_test(NAME init_linux COMMAND snap_init_linux_test)
+
+  snap_os_test(snap_hle_core_linux_test tests/platform/hle_core_linux_test.cpp ${SNAP_LINUX_HLE_CORE_SOURCES})
+  target_compile_options(snap_hle_core_linux_test PRIVATE -w)
+  set_source_files_properties(
+    runtime/hle/linux/hle_host_posix.cpp
+    tests/platform/hle_core_linux_test.cpp
+    host/linux/init_linux.cpp
+    tests/platform/init_linux_test.cpp
+    PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
+  add_test(NAME hle_core_linux COMMAND snap_hle_core_linux_test)
 
   add_test(NAME preflight_linux
     COMMAND ${CMAKE_COMMAND} -E env SNAP_BOOT_LINUX_BIN=$<TARGET_FILE:snap_boot_linux>

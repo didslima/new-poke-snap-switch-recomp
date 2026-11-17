@@ -30,6 +30,7 @@ struct InitResult {
     bool ok = false;
     InitStage stage = InitStage::None;
     int tls_hooks_bound = 0;
+    size_t hle_overrides_bound = 0;
     Cpu *main_cpu = nullptr;
     uint64_t main_thread_type = 0;
     uint64_t tpidr = 0;

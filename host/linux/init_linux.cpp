@@ -8,6 +8,8 @@
 
 #include "crash_linux.h"
 #include "guest_tls_hooks.h"
+#include "hle/hle.h"
+#include "hle/hle_config.h"
 #include "loader.h"
 #include "os/os.h"
 #include "preflight_linux.h"
@@ -17,6 +19,11 @@ namespace {
 
 int svc_dispatch(Cpu *c, uint32_t imm) {
     return os_svc(c, imm) ? 1 : 0;
+}
+
+void hle_bind_one(const char *sym, GuestFn fn, void *) {
+    if (hle::find_override(sym) == fn) loader::add_override(sym, fn);
+    else loader::add_weak_override(sym, fn);
 }
 
 }  // namespace
@@ -72,6 +79,13 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
     // 2. Register host overrides before loader::load() so relocations and import tables bind to them.
     out.stage = InitStage::Overrides;
     loader::install_libc_overrides();
+    hle::init_trace_from_env();
+    hle::load_config("");
+    hle::bind_all(hle_bind_one, nullptr);
+    out.hle_overrides_bound = hle::overrides().size();
+    hle::set_log_sink([](const char *l, size_t n) { loader::trace("%.*s", (int)n, l); });
+    hle::os_hooks().init_system_event = [](void *ev, bool manual) { os_system_event_create((uint64_t)(uintptr_t)ev, manual ? 0 : 1); };
+    hle::os_hooks().signal_system_event = [](void *ev) { os_system_event_signal((uint64_t)(uintptr_t)ev); };
     size_t os_count = 0;
     const OsOverride *os_tab = os_override_table(&os_count);
     for (size_t i = 0; i < os_count; ++i) {

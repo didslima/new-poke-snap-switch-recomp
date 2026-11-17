@@ -50,9 +50,7 @@ std::string windows_ui_language_tag();                 // the Windows display la
 void activate_profiles();
 std::string tool_save_root(const std::string& profile, std::string* label);   // import/export target (see hle_config.cpp)
 void apply_defaults();                                 // derived paths from data_root; called by load_config
-#ifdef _WIN32
-std::string appdata_utf8();                            // %APPDATA% as UTF-8 (wide API; a non-ASCII user name is safe)
-#endif
+std::string appdata_utf8();                            // %APPDATA% as UTF-8 on Windows (hle_host_win32.cpp)
 bool migrate_legacy_data_root(const std::string& old_root, const std::string& new_root);   // copies old_root/save to new_root/save once (never moves)
 std::string default_data_root();                       // %APPDATA%\SnapRecomp (HOME/.local/share/SnapRecomp elsewhere)
 std::string default_input_path();                      // %SNAP_CONFIG_DIR%\input.json, else <data_root>\input.json

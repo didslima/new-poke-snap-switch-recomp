@@ -69,8 +69,12 @@ inline float ssaa_auto_scale(int windowH, float budgetH, float maxScale) {
 inline bool enhanced() {
   const char* p = getenv("SNAP_VISUALS");
   if (p && *p) {
-    if (!_stricmp(p, "enhanced")) return true;
-    if (!_stricmp(p, "original")) return false;
+    auto ieq = [](const char* a, const char* b) {
+      for (; *a && *b; ++a, ++b) { char ca = *a, cb = *b; if (ca >= 'A' && ca <= 'Z') ca += 32; if (cb >= 'A' && cb <= 'Z') cb += 32; if (ca != cb) return false; }
+      return *a == *b;
+    };
+    if (ieq(p, "enhanced")) return true;
+    if (ieq(p, "original")) return false;
   }
   const int l = saved_look().load(std::memory_order_relaxed);
   return l >= 0 ? l == 1 : kDefaultEnhanced;

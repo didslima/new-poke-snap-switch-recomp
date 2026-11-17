@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -192,8 +193,32 @@ int main() {
     char *dir = mkdtemp(dir_tmpl);
     CHECK(dir != nullptr);
     if (dir) {
-        const std::string main_p = std::string(dir) + "/main.elf";
-        const std::string sdk_p = std::string(dir) + "/sdk.elf";
+        struct EnvGuard {
+            std::string name;
+            bool had = false;
+            std::string old;
+            explicit EnvGuard(const char *n) : name(n) {
+                if (const char *v = std::getenv(n)) { had = true; old = v; }
+            }
+            ~EnvGuard() {
+                if (had) setenv(name.c_str(), old.c_str(), 1);
+                else unsetenv(name.c_str());
+            }
+        };
+        EnvGuard g_home("HOME"), g_xcfg("XDG_CONFIG_HOME"), g_xdata("XDG_DATA_HOME");
+        EnvGuard g_hcfg("SNAP_HLE_CONFIG"), g_romfs("SNAP_ROMFS"), g_sdir("SNAP_SAVE_DIR"), g_sroot("SNAP_SAVE_ROOT");
+
+        const std::string base(dir);
+        setenv("HOME", (base + "/home").c_str(), 1);
+        setenv("XDG_CONFIG_HOME", (base + "/xdg_cfg").c_str(), 1);
+        setenv("XDG_DATA_HOME", (base + "/xdg_data").c_str(), 1);
+        setenv("SNAP_HLE_CONFIG", (base + "/hle.json").c_str(), 1);
+        setenv("SNAP_ROMFS", (base + "/romfs").c_str(), 1);
+        setenv("SNAP_SAVE_DIR", (base + "/save").c_str(), 1);
+        setenv("SNAP_SAVE_ROOT", (base + "/save").c_str(), 1);
+
+        const std::string main_p = base + "/main.elf";
+        const std::string sdk_p = base + "/sdk.elf";
         CHECK(write_test_elf(main_p, false));
         CHECK(write_test_elf(sdk_p, true));
 
@@ -206,6 +231,8 @@ int main() {
         CHECK(res.ok);
         CHECK(res.stage == snap_linux::InitStage::ReadyBeforeInitializers);
         CHECK(res.tls_hooks_bound == 2);
+        CHECK(res.hle_overrides_bound > 100);
+        CHECK(loader::find_override("_ZN2nn2oe16GetOperationModeEv") != nullptr);
         CHECK(res.main_cpu != nullptr);
         CHECK(res.main_thread_type != 0);
         CHECK(res.tpidr != 0);
@@ -215,9 +242,8 @@ int main() {
         CHECK(os_current_cpu() == res.main_cpu);
         CHECK(os_current_thread_type() == res.main_thread_type);
 
-        std::remove(main_p.c_str());
-        std::remove(sdk_p.c_str());
-        rmdir(dir);
+        std::error_code ec;
+        std::filesystem::remove_all(base, ec);
     }
 
     std::printf("init_linux_test: %d checks, %d failures\n", g_checks.load(), g_fail.load());

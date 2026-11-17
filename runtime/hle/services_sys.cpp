@@ -15,25 +15,17 @@
 #include <thread>
 
 #include "hle_config.h"
+#include "hle_host.h"
 #include "input_core.h"
 #include "svc_common.h"
 
-#ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
-
 // [pace] runtime/nvn/nvn_pace.cpp: the guest vsync follows the same frame clock as the host limiter. Builds without the NVN
-// layer fall back to the stubs (wait returns 0 = keep the local 60 Hz loop).
+// layer fall back to the stubs (wait returns 0 = keep the local 60 Hz loop; Win32 uses /alternatename in hle_host_win32.cpp,
+// Linux uses weak symbols in hle_host_posix.cpp).
 extern "C" int snap_pace_vsync_wait(int64_t* last);
 extern "C" void snap_pace_vsync_note();
 extern "C" int snap_pace_vsync_wait_none(int64_t*) { return 0; }
 extern "C" void snap_pace_vsync_note_none() {}
-#ifdef _MSC_VER
-#pragma comment(linker, "/alternatename:snap_pace_vsync_wait=snap_pace_vsync_wait_none")
-#pragma comment(linker, "/alternatename:snap_pace_vsync_note=snap_pace_vsync_note_none")
-#endif
 
 namespace hle {
 
@@ -60,9 +52,7 @@ ErrorUiFn g_error_ui = nullptr;
 
 void default_error_ui(const char* title, const char* message) {
   log("%s: %s", title, message);
-#ifdef _WIN32
-  if (!config().headless) MessageBoxA(nullptr, message, title, MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);  // never hide behind a fullscreen game window
-#endif
+  if (!config().headless) hle::host::show_error_dialog(title, message);
 }
 
 void show_error(const std::string& message) {
@@ -226,26 +216,7 @@ LocalTime local_zone_at(int64_t t) {
   LocalTime z{0, false, {'U', 'T', 'C', 0, 0, 0, 0, 0}};
   const char* e = std::getenv("SNAP_TIME_ZONE");
   if (e && (e[0] == 'u' || e[0] == 'U')) return z;
-#ifdef _WIN32
-  __time64_t tt = (__time64_t)t;
-  struct tm lt;
-  if (_localtime64_s(&lt, &tt) == 0) {
-    int64_t days = days_from_civil(lt.tm_year + 1900, (unsigned)lt.tm_mon + 1, (unsigned)lt.tm_mday);
-    z.offset = days * 86400 + lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec - t;
-    z.dst = lt.tm_isdst > 0;
-    char nm[64] = {};
-    size_t n = 0;
-    _get_tzname(&n, nm, sizeof nm, z.dst ? 1 : 0);
-    std::memset(z.name, 0, sizeof z.name);
-    // Windows names ("Eastern Standard Time") do not fit the 8-char field: keep the initials ("EST")
-    int k = 0;
-    if (std::strchr(nm, ' ')) {
-      for (const char* q = nm; *q && k < 7; ++q) if (q == nm || q[-1] == ' ') z.name[k++] = *q;
-    } else {
-      std::strncpy(z.name, nm, 7);
-    }
-  }
-#endif
+  hle::host::local_zone_at(t, &z.offset, &z.dst, z.name);
   return z;
 }
 
