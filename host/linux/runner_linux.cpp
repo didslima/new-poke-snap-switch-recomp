@@ -4,6 +4,7 @@
 #include "crash_linux.h"
 #include "preflight_linux.h"
 #ifdef SNAP_LINUX_HAS_AOT
+#include "audio/audio_out.h"
 #include "init_linux.h"
 #endif
 
@@ -61,7 +62,18 @@ int bootstrap_runner_entry(void *ud) {
         return 128 + shutdown_signal();
     }
 #ifdef SNAP_LINUX_HAS_AOT
+    struct AudioShutdownGuard {
+        bool active = false;
+        ~AudioShutdownGuard() {
+            if (active) {
+                snap_audio_log_checks();
+                snap_audio_shutdown();
+            }
+        }
+    } audio_guard;
+
     if (opts->cmd == "init") {
+        audio_guard.active = true;
         InitResult res;
         if (!init_guest_runtime(*opts, true, res)) {
             std::fprintf(stderr, "boot_linux: init failed at stage '%s': %s\n",

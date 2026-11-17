@@ -305,6 +305,18 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(snap_audio_sdl3_linux_test PRIVATE Threads::Threads SDL3::SDL3)
     add_test(NAME audio_sdl3_linux
       COMMAND ${CMAKE_COMMAND} -E env SDL_AUDIO_DRIVER=dummy $<TARGET_FILE:snap_audio_sdl3_linux_test>)
+
+    snap_os_test(snap_audio_runtime_linux_test
+                 tests/audio/audio_runtime_linux_test.cpp
+                 host/linux/hooks_mods_stub.cpp host/loader.cpp host/elf_check.cpp host/hooks.cpp
+                 host/guest_tls_hooks.cpp host/mods/drpfast.cpp runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES}
+                 ${SNAP_LINUX_HLE_CORE_SOURCES} ${SNAP_LINUX_AUDIO_SOURCES})
+    target_include_directories(snap_audio_runtime_linux_test PRIVATE host)
+    target_compile_definitions(snap_audio_runtime_linux_test PRIVATE HLE_WITH_SDL3)
+    target_compile_options(snap_audio_runtime_linux_test PRIVATE -w)
+    target_link_libraries(snap_audio_runtime_linux_test PRIVATE SDL3::SDL3)
+    add_test(NAME audio_runtime_linux
+      COMMAND ${CMAKE_COMMAND} -E env SDL_AUDIO_DRIVER=dummy $<TARGET_FILE:snap_audio_runtime_linux_test>)
   endif()
 
   if(SNAP_HAVE_SDL3)
