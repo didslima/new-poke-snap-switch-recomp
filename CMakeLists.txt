@@ -194,6 +194,25 @@ if(UNIX AND NOT APPLE)
   snap_os_test(snap_crash_linux_test tests/platform/crash_linux_test.cpp host/linux/crash_linux.cpp)
   target_include_directories(snap_crash_linux_test PRIVATE host)
   add_test(NAME crash_linux COMMAND snap_crash_linux_test)
+
+  # Stage 5d-a: Linux AOT static libraries (libsnap_main.a / libsnap_sdk.a).
+  # Only defined when generated AOT C sources are present (SNAP_AOT_GEN_DIR); never makes the repo build fail when absent.
+  set(SNAP_AOT_GEN_DIR "${PROJECT_SOURCE_DIR}/generated/v262144" CACHE PATH "Directory containing generated main/ and sdk/ AOT C sources")
+  set(SNAP_AOT_BUILD_DIR "${CMAKE_BINARY_DIR}/aot" CACHE PATH "Output directory for Linux AOT objects and archives")
+  if(EXISTS "${SNAP_AOT_GEN_DIR}/main/manifest.json" AND EXISTS "${SNAP_AOT_GEN_DIR}/sdk/manifest.json")
+    set(SNAP_AOT_MAIN_LIB "${SNAP_AOT_BUILD_DIR}/main/lib/libsnap_main.a")
+    set(SNAP_AOT_SDK_LIB "${SNAP_AOT_BUILD_DIR}/sdk/lib/libsnap_sdk.a")
+    add_custom_target(snap_aot_main
+      COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/recomp/snap_build_linux.py
+              --gen ${SNAP_AOT_GEN_DIR}/main --out ${SNAP_AOT_BUILD_DIR}/main --lib snap_main --cc ${CMAKE_C_COMPILER}
+      COMMENT "Building Linux AOT archive libsnap_main.a")
+    add_custom_target(snap_aot_sdk
+      COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/recomp/snap_build_linux.py
+              --gen ${SNAP_AOT_GEN_DIR}/sdk --out ${SNAP_AOT_BUILD_DIR}/sdk --lib snap_sdk --cc ${CMAKE_C_COMPILER}
+      COMMENT "Building Linux AOT archive libsnap_sdk.a")
+  endif()
+  add_test(NAME aot_build_linux
+    COMMAND ${Python3_EXECUTABLE} -I ${PROJECT_SOURCE_DIR}/tests/platform/aot_build_linux_test.py)
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.
