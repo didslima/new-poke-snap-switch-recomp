@@ -89,6 +89,9 @@ bool mem_find_free(const void *addr, uint64_t *region_end, char *detail, size_t 
 MemErr mem_injected_error();
 // The lowest and the highest address (inclusive) a process may use.
 void mem_app_range(uint64_t *lowest, uint64_t *highest);
+// Whether all of [addr, addr + size) can be read right now without faulting (diagnostics that follow guest pointers into stacks that may be gone:
+// host/loader.cpp guest_chain). Win32: !IsBadReadPtr. POSIX: process_vm_readv on this process; where that call is refused the answer is false.
+bool mem_readable(const void *addr, size_t size);
 
 
 // Whether guest reservations ask for write tracking: only where the host can track writes, and not when the player turned it off

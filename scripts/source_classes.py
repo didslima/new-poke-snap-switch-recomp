@@ -67,6 +67,8 @@ _REVIEWED_SWITCHES = {
     'runtime/simd.h': {'_WIN32', '__declspec'},   # SIMD_SELECTANY: __declspec(selectany) on Windows, __attribute__((weak)) elsewhere
     # message strings only: nn::os::SwitchToFiber and the guest's ExitProcess are guest API names, not host calls (os_thread.cpp calls neither)
     'runtime/os/os_thread.cpp': {'SwitchToFiber', 'ExitProcess'},
+    # the guest's SVC names in the table that labels the SVC log (loader.cpp, {6, "QueryMemory"} ... {69, "CreateEvent"}); strings, not host calls
+    'host/loader.cpp': {'CreateEvent', 'CreateThread', 'ExitProcess', 'GetCurrentProcessorNumber', 'OutputDebugString', 'SetThreadPriority'},
 }
 
 

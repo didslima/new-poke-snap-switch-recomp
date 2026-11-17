@@ -107,6 +107,47 @@ if(UNIX AND NOT APPLE)
     target_link_options(snap_guest_tls_test_san PRIVATE -fsanitize=address,undefined)
     add_test(NAME guest_tls_sanitized COMMAND snap_guest_tls_test_san)
   endif()
+
+  # Stage 4b: guest TLS blocks (runtime/os/guest_tls_block.cpp), in three layers. None needs the game, a GPU or a window.
+  #   guest_tls_block   the module alone: lazy one-time capture (also racing), block memory and rollback through the memory seam, ownership
+  #   guest_tls_os      the hooks inside the real OS layer: guest threads, fibers, the order of hook, tpidr and entry, release at thread exit
+  #   guest_tls_loader  host/loader.cpp as compiled on Linux, with a stand-in main module: new_thread, init_guest_tls, the hook binding through
+  #                     the loader's thunk dispatch
+  snap_os_test(snap_guest_tls_block_test tests/platform/guest_tls_block_test.cpp runtime/os/guest_tls_block.cpp runtime/os/linux/os_host_posix.cpp)
+  add_test(NAME guest_tls_block COMMAND snap_guest_tls_block_test)
+  snap_os_test(snap_guest_tls_os_test tests/platform/guest_tls_os_test.cpp ${SNAP_OS_LAYER_SOURCES})
+  add_test(NAME guest_tls_os COMMAND snap_guest_tls_os_test)
+  snap_os_test(snap_guest_tls_loader_test tests/platform/guest_tls_loader_test.cpp host/loader.cpp host/elf_check.cpp host/guest_tls_hooks.cpp
+               runtime/os/guest_tls_block.cpp runtime/os/linux/os_host_posix.cpp)
+  target_include_directories(snap_guest_tls_loader_test PRIVATE host)
+  target_compile_options(snap_guest_tls_loader_test PRIVATE -w)
+  add_test(NAME guest_tls_loader COMMAND snap_guest_tls_loader_test)
+  set_tests_properties(guest_tls_block guest_tls_os guest_tls_loader PROPERTIES TIMEOUT 300)
+  if(SNAP_HAVE_ASAN_UBSAN)   # a double release, a write outside a block or a leak in the registry is a failure here
+    add_executable(snap_guest_tls_block_test_san tests/platform/guest_tls_block_test.cpp runtime/os/guest_tls_block.cpp runtime/os/linux/os_host_posix.cpp)
+    target_include_directories(snap_guest_tls_block_test_san PRIVATE runtime runtime/os)
+    target_compile_features(snap_guest_tls_block_test_san PRIVATE cxx_std_20)
+    target_compile_options(snap_guest_tls_block_test_san PRIVATE -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all)
+    target_link_options(snap_guest_tls_block_test_san PRIVATE -fsanitize=address,undefined)
+    target_link_libraries(snap_guest_tls_block_test_san PRIVATE Threads::Threads)
+    add_test(NAME guest_tls_block_sanitized COMMAND snap_guest_tls_block_test_san)
+    set_tests_properties(guest_tls_block_sanitized PROPERTIES TIMEOUT 300)
+  endif()
+  set(CMAKE_REQUIRED_FLAGS "-fsanitize=thread")
+  set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=thread")
+  check_cxx_source_compiles("int main() { return 0; }" SNAP_HAVE_TSAN)
+  unset(CMAKE_REQUIRED_FLAGS)
+  unset(CMAKE_REQUIRED_LINK_OPTIONS)
+  if(SNAP_HAVE_TSAN)   # the capture and the registry are shared between threads: a data race is a failure here
+    add_executable(snap_guest_tls_block_test_tsan tests/platform/guest_tls_block_test.cpp runtime/os/guest_tls_block.cpp runtime/os/linux/os_host_posix.cpp)
+    target_include_directories(snap_guest_tls_block_test_tsan PRIVATE runtime runtime/os)
+    target_compile_features(snap_guest_tls_block_test_tsan PRIVATE cxx_std_20)
+    target_compile_options(snap_guest_tls_block_test_tsan PRIVATE -O1 -g -fsanitize=thread)
+    target_link_options(snap_guest_tls_block_test_tsan PRIVATE -fsanitize=thread)
+    target_link_libraries(snap_guest_tls_block_test_tsan PRIVATE Threads::Threads)
+    add_test(NAME guest_tls_block_tsan COMMAND snap_guest_tls_block_test_tsan)
+    set_tests_properties(guest_tls_block_tsan PROPERTIES TIMEOUT 300)
+  endif()
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.

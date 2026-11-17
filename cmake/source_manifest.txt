@@ -22,6 +22,7 @@ shared   runtime/nvn/nvn_quirks.cpp
 shared   runtime/nvn/nvn_tex.cpp
 shared   runtime/os/abi.cpp
 shared   runtime/os/cheat_heap.cpp
+shared   runtime/os/guest_tls_block.cpp
 shared   runtime/os/os_kernel.cpp
 shared   runtime/os/os_memory.cpp
 shared   runtime/os/os_overrides.cpp
@@ -48,7 +49,7 @@ windows  host/launcher.cpp   # #include <bcrypt.h>, #include <commctrl.h>, #incl
 windows  host/launcher_ui.cpp   # #include <d3d11.h>, #include <dxgi.h>, #include <shellapi.h> ...
 windows  host/launcher_ui_test.cpp   # #include <windows.h>
 windows  host/launcher_upscalers.cpp   # #include <bcrypt.h>, #include <commctrl.h>, #include <shellapi.h> ...
-windows  host/loader.cpp   # #include <windows.h>, CreateEvent, CreateThread ...
+shared   host/loader.cpp
 windows  host/mods/abcap.cpp   # #include <windows.h>, CreateThread, DWORD ...
 windows  host/mods/crashlog.cpp   # #include <io.h>, #include <process.h>, #include <windows.h> ...
 windows  host/mods/crcfast.cpp   # #include <intrin.h> via crc32_clmul.h, __cpuid via crc32_clmul.h
@@ -142,6 +143,7 @@ windows  runtime/nvn/upscale/upscale_fsr.cpp   # #include <windows.h>, DWORD, Ge
 windows  runtime/nvn/upscale/upscale_xess.cpp   # #include <windows.h>, DWORD, GetProcAddress ...
 windows  runtime/os/hostprof.cpp   # #include <psapi.h>, #include <tlhelp32.h>, #include <windows.h> ...
 windows  runtime/os/os_ctx_win64.cpp   # #include <windows.h>, NOMINMAX, VirtualAlloc ... (Win64 context switch; Linux uses runtime/os/linux/os_ctx_sysv.cpp)
+linux    host/guest_tls_hooks.cpp   # binds the musl thread-pointer hooks for the Linux runner; not in host/build_snap.py's explicit list, so never compiled for Windows
 linux    runtime/os/linux/os_host_posix.cpp   # POSIX implementation of os_host.h; in a subdirectory so that host/build_snap.py's runtime/os/*.cpp glob never compiles it for Windows
 linux    runtime/os/linux/os_state_off.cpp   # save states are not supported on Linux: g_sphase stays 0, snap_state_* refuse (replaces os_state.cpp)
 linux    runtime/os/linux/os_ctx_sysv.cpp   # Linux x86-64 System V context switch; in a subdirectory so that host/build_snap.py's runtime/os/*.cpp glob never compiles it for Windows

@@ -11,6 +11,7 @@
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -355,6 +356,19 @@ void mem_app_range(uint64_t *lowest, uint64_t *highest) {
     // vm.mmap_min_addr (64 KiB by default), the same value Win32 reports.
     if (lowest) *lowest = 0x10000ull;
     if (highest) *highest = 0x7fffffffffffull;
+}
+bool mem_readable(const void *addr, size_t size) {
+    if (!size) return true;
+    char buf[256];
+    const char *p = (const char *)addr;
+    while (size) {
+        const size_t n = size < sizeof buf ? size : sizeof buf;
+        iovec l{buf, n}, r{(void *)p, n};
+        if (process_vm_readv(getpid(), &l, 1, &r, 1, 0) != (ssize_t)n) return false;
+        p += n;
+        size -= n;
+    }
+    return true;
 }
 
 }  // namespace host

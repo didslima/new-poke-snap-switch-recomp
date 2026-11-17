@@ -245,6 +245,7 @@ void mem_app_range(uint64_t *lowest, uint64_t *highest) {
     if (lowest) *lowest = (uint64_t)(uintptr_t)si.lpMinimumApplicationAddress;
     if (highest) *highest = (uint64_t)(uintptr_t)si.lpMaximumApplicationAddress;
 }
+bool mem_readable(const void *addr, size_t size) { return !IsBadReadPtr(addr, size); }
 
 }  // namespace host
 }  // namespace osk

@@ -3,8 +3,9 @@
 #include "loader.h"
 #include "elf_check.h"
 #include "hle/guest_tls.h"
+#include "os/guest_tls_block.h"
 
-#include <windows.h>
+#include "os/os_host.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -61,6 +62,20 @@ static void die(const char *msg) {
     exit(2);
 }
 
+// Read/write, zero-filled, committed guest memory: what VirtualAlloc(at, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) gave, from the host's virtual
+// memory primitives. `at` null: anywhere (64 KiB aligned); otherwise exactly there or null. The size is rounded up to whole pages. Nothing stays
+// reserved when the commit fails. These mappings live for the process (modules, tables, thread stacks), as before.
+static void *guest_vm(void *at, size_t size) {
+    size = (size + 0xfff) & ~(size_t)0xfff;
+    void *p = at ? osk::host::mem_reserve_at(at, size, false) : osk::host::mem_reserve(size, 0, false, nullptr);
+    if (!p) return nullptr;
+    if (!osk::host::mem_commit(p, size, nullptr)) {
+        osk::host::mem_release(p, size);
+        return nullptr;
+    }
+    return p;
+}
+
 // ------------------------------------------------------------------------------------------------ boot trace
 
 FILE *g_trace_file = nullptr;
@@ -69,12 +84,10 @@ uint64_t g_svc_counts[0x80];
 uint64_t g_exc_count = 0;
 void (*g_spin_gate_fn)(Cpu *, uint64_t) = nullptr;
 uint64_t (*g_ticks_fn)() = nullptr;
-static LARGE_INTEGER g_t0;
+static int64_t g_t0;
 double trace_now() {
-    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); QueryPerformanceCounter(&g_t0); return x; }();
-    LARGE_INTEGER n;
-    QueryPerformanceCounter(&n);
-    return (double)(n.QuadPart - g_t0.QuadPart) / (double)f.QuadPart;
+    static const int64_t f = [] { g_t0 = osk::host::counter(); return osk::host::counter_frequency(); }();
+    return (double)(osk::host::counter() - g_t0) / (double)f;
 }
 double g_last_trace_time = 0;
 void trace(const char *fmt, ...) {
@@ -213,7 +226,7 @@ static void map_module(GuestModule &m, const char *name, const char *path, uint6
         if (ph[i].type == 1 && (ph[i].flags & 1)) { m.text_off = ph[i].vaddr; m.text_size = ph[i].filesz; }
     }
     m.span = (hi + 0xFFFF) & ~0xFFFFull;
-    void *p = VirtualAlloc((void *)base, m.span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    void *p = guest_vm((void *)base, m.span);
     if (p != (void *)base) die("cannot map a module at its guest address");
     for (int i = 0; i < eh->phnum; i++)
         if (ph[i].type == 1) memcpy((uint8_t *)base + ph[i].vaddr, raw.data() + ph[i].off, ph[i].filesz);
@@ -244,7 +257,7 @@ static void map_module(GuestModule &m, const char *name, const char *path, uint6
 // Direct-indexed dispatch table: one slot per text word (main 22 MB, sdk 12 MB of host memory).
 static void build_dtab(GuestModule &m, const uint64_t *addrs, const GuestFn *ptrs, uint64_t n) {
     m.dtab_count = m.text_size >> 2;
-    m.dtab = (GuestFn *)VirtualAlloc(nullptr, m.dtab_count * sizeof(GuestFn), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    m.dtab = (GuestFn *)guest_vm(nullptr, m.dtab_count * sizeof(GuestFn));
     if (!m.dtab) die("cannot allocate a dispatch table");
     m.fn_count = n;
     for (uint64_t i = 0; i < n; i++) {
@@ -326,7 +339,7 @@ static void relocate(GuestModule &m, int who) {
 
 bool load(const char *main_elf, const char *sdk_elf) {
     // the thunk range (readable so that guest code can compare against it)
-    if (!VirtualAlloc((void *)THUNK_BASE, THUNK_SPAN, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) die("cannot map the thunk range");
+    if (!guest_vm((void *)THUNK_BASE, THUNK_SPAN)) die("cannot map the thunk range");
     map_module(g_main, "main", main_elf, GUEST_MAIN_BASE);
     map_module(g_sdk, "sdk", sdk_elf, GUEST_SDK_BASE);
     build_dtab(g_main, main_fn_addrs, main_fn_ptrs, main_fn_count);
@@ -392,42 +405,43 @@ GuestFn lookup_fn_bsearch(uint64_t pc) {
 
 // main's TLS image is read once, at the first thread (before any guest code runs, so it is the loaded bytes), and copied
 // into every guest thread's TLS block after that (runtime/hle/guest_tls.h says why it matters: the scan finds Pokemon).
+// The capture is the shared module's (runtime/os/guest_tls_block.h): once, thread safe, immutable.
+static const hle::GuestTlsImage *main_tls_image() {
+    const hle::GuestTlsImage *img = osk::guest_tls_main_image((const uint8_t *)g_main.base, g_main.span);
+    static std::atomic<bool> checked{false};
+    if (img && !checked.exchange(true) && *(const int32_t *)img->data() != -1)
+        trace("guest TLS: main image at +%#llx is not the 2.0.1 one (slot word %08x)", (unsigned long long)hle::kMainTlsImageVaddr, *(const uint32_t *)img->data());
+    return img;
+}
+// Fill a fresh (zeroed) TLS block made by the caller (host/boot.cpp's tp_init_hook): the image only, nothing else is written.
 void init_guest_tls(uint64_t tp) {
-    static uint8_t image[hle::kMainTlsImageSize];
-    static bool have;
-    if (!have && g_main.base && hle::kMainTlsImageVaddr + hle::kMainTlsImageSize <= g_main.span) {
-        memcpy(image, (const void *)(g_main.base + hle::kMainTlsImageVaddr), sizeof image);
-        have = true;
-        if (*(const int32_t *)image != -1) trace("guest TLS: main image at +%#llx is not the 2.0.1 one (slot word %08x)",
-                                                 (unsigned long long)hle::kMainTlsImageVaddr, *(const uint32_t *)image);
-    }
-    if (have) hle::guest_tls_init((uint8_t *)tp, image, sizeof image);
+    if (const hle::GuestTlsImage *img = main_tls_image()) hle::guest_tls_init((uint8_t *)tp, img->data(), img->size());
 }
 
 GuestThread *new_thread(size_t stack_size) {
     auto *t = new GuestThread();
-    t->c = (Cpu *)_aligned_malloc(sizeof(Cpu), 64);
+    t->c = (Cpu *)osk::host::heap_aligned_alloc(sizeof(Cpu), 64);
     memset(t->c, 0, sizeof(Cpu));
-    uint8_t *stack = (uint8_t *)VirtualAlloc(nullptr, stack_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    uint8_t *tls = (uint8_t *)VirtualAlloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);   // no PT_TLS in the ELFs
-    uint8_t *tlr = (uint8_t *)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);    // Thread Local Region
-    uint8_t *tt = (uint8_t *)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);     // ThreadType
-    if (!stack || !tls || !tlr || !tt) die("cannot allocate a guest thread");
+    uint8_t *stack = (uint8_t *)guest_vm(nullptr, stack_size);
+    uint8_t *tlr = (uint8_t *)guest_vm(nullptr, 0x1000);    // Thread Local Region
+    uint8_t *tt = (uint8_t *)guest_vm(nullptr, 0x1000);     // ThreadType
+    // no PT_TLS in the ELFs: the TLS block is the shared module's (reserve + commit, zeroed, main's .tdata image at tp + 0x10), owned by this ThreadType
+    const uint64_t tls_tp = tt ? osk::guest_tls_block_create(main_tls_image(), (uint64_t)(uintptr_t)tt) : 0;
+    if (!stack || !tls_tp || !tlr || !tt) die("cannot allocate a guest thread");
     t->stack_lo = (uint64_t)stack;
     t->stack_hi = (uint64_t)stack + stack_size;
     // runtime/os/os_layout.h: TLR+0x1f0 = ELF thread pointer, TLR+0x1f8 = ThreadType*; ThreadType state byte at +0x40
-    *(uint64_t *)(tlr + 0x1f0) = (uint64_t)(tls + 0x8000);
+    *(uint64_t *)(tlr + 0x1f0) = tls_tp;
     *(uint64_t *)(tlr + 0x1f8) = (uint64_t)tt;
     tt[0x40] = 3;                                   // TS_STARTED
     *(uint64_t *)(tt + 0x50) = (uint64_t)stack;     // stack, stack size
     *(uint64_t *)(tt + 0x58) = stack_size;
-    t->c->tpidr = (uint64_t)(tls + 0x8000);
+    t->c->tpidr = tls_tp;
     t->c->tpidrro = (uint64_t)tlr;
     t->c->sp = (t->stack_hi - 64) & ~15ull;
     t->c->excl_addr = ~0ull;
     rt_fpcr_sync(t->c);
     g_cur = t;
-    init_guest_tls(t->c->tpidr);
     return t;
 }
 
@@ -591,7 +605,7 @@ std::vector<std::string> guest_chain(Cpu *c, uint64_t pc, int depth) {
     uint64_t fp = c->x[29];
     for (int i = 0; i < depth; i++) {
         if (!fp_ok(c, fp)) break;
-        if (IsBadReadPtr((void *)fp, 16)) break;   // another thread's stack read by the stall dump can be gone (thread exited)
+        if (!osk::host::mem_readable((void *)fp, 16)) break;   // another thread's stack read by the stall dump can be gone (thread exited)
         uint64_t lr = ((uint64_t *)fp)[1], next = ((uint64_t *)fp)[0];
         if (lr == 0 || lr == HOST_SENTINEL) { out.push_back(lr ? "host:sentinel" : "(end)"); break; }
         out.push_back(symbolize(lr));
@@ -739,10 +753,8 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
 void rt_spin_gate(Cpu *c, uint64_t head) { if (g_spin_gate_fn) g_spin_gate_fn(c, head); }
 uint64_t rt_ticks(void) {
     if (g_ticks_fn) return g_ticks_fn();
-    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
-    LARGE_INTEGER n;
-    QueryPerformanceCounter(&n);
-    uint64_t q = (uint64_t)n.QuadPart, fq = (uint64_t)f.QuadPart;   // cntpct_el0: 19.2 MHz
+    static const int64_t f = osk::host::counter_frequency();
+    uint64_t q = (uint64_t)osk::host::counter(), fq = (uint64_t)f;   // cntpct_el0: 19.2 MHz
     return (q / fq) * 19200000ull + (q % fq) * 19200000ull / fq;
 }
 
