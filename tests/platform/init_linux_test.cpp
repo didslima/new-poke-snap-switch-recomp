@@ -15,6 +15,7 @@
 
 #include "hle/guest_tls.h"
 #include "linux/init_linux.h"
+#include "audio/audio_out.h"
 #include "loader.h"
 #include "os/os.h"
 
@@ -232,6 +233,15 @@ int main() {
         CHECK(res.stage == snap_linux::InitStage::ReadyBeforeInitializers);
         CHECK(res.tls_hooks_bound == 2);
         CHECK(res.hle_overrides_bound > 100);
+        CHECK(res.audio_overrides_bound == 16);
+        {
+            int audio_n = 0;
+            const SnapAudioOverride *audio_tab = snap_audio_overrides(&audio_n);
+            CHECK(audio_tab != nullptr && audio_n == 16);
+            for (int i = 0; i < audio_n; ++i) {
+                CHECK(loader::find_override(audio_tab[i].mangled) != nullptr);
+            }
+        }
         CHECK(loader::find_override("_ZN2nn2oe16GetOperationModeEv") != nullptr);
         CHECK(loader::find_override("_ZN2nn2fs8MountRomEPKcPvm") != nullptr);
         CHECK(loader::find_override("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj") != nullptr);

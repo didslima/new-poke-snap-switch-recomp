@@ -2,12 +2,12 @@
 // snap_audio_overrides() returns host-C-ABI functions; the lifted code calls overrides with its arguments in c->x[0..7]
 // and the result in c->x[0]. All parameters are integers or pointers except the last of SetAudioDeviceOutputVolume
 // (float in s0). The mangled name tells which: a trailing 'f' parameter code. The result is returned as a 64-bit value.
-#include <windows.h>
-
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 #include "audio/audio_out.h"
@@ -75,7 +75,7 @@ FILE *trace_out() {   // SNAP_AUDIO_TRACE=<path> appends to a file, anything els
 void patch_trace(const char *fmt, unsigned a, unsigned b) {
     fprintf(stderr, fmt, a, b);
     if (const char *d = getenv("SNAP_AUDIO_CAPTURE")) {
-        std::string f = std::string(d) + "\\trace.log";
+        std::string f = (std::filesystem::path(d) / "trace.log").string();
         if (FILE *x = fopen(f.c_str(), "ab")) { fprintf(x, fmt, a, b); fclose(x); }
     }
 }
@@ -108,7 +108,7 @@ void apply_category_volumes(Cpu *c) {
     const uint64_t mgr = *(volatile uint64_t *)kMgrPtrAddr;
     const uint64_t st = *(volatile uint64_t *)kSettingsGot;
     if (!mgr || !st || !*(volatile uint64_t *)(mgr + 8)) return;   // game audio not up yet
-    const uint64_t now = GetTickCount64();
+    const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
     const bool tick = now - lastTick >= 1000;
     bool any = false;
     for (int cat = 0; cat < 3; ++cat) {

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "audio/audio_out.h"
 #include "crash_linux.h"
 #include "guest_tls_hooks.h"
 #include "hle/hle.h"
@@ -13,6 +14,8 @@
 #include "loader.h"
 #include "os/os.h"
 #include "preflight_linux.h"
+
+int snap_bind_audio();
 
 namespace snap_linux {
 namespace {
@@ -86,6 +89,9 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
     hle::set_log_sink([](const char *l, size_t n) { loader::trace("%.*s", (int)n, l); });
     hle::os_hooks().init_system_event = [](void *ev, bool manual) { os_system_event_create((uint64_t)(uintptr_t)ev, manual ? 0 : 1); };
     hle::os_hooks().signal_system_event = [](void *ev) { os_system_event_signal((uint64_t)(uintptr_t)ev); };
+    out.audio_overrides_bound = snap_bind_audio();
+    snap_audio_set_os_hooks([](void *ev) { os_system_event_signal(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ev))); });
+    snap_audio_set_event_init_hook([](void *ev) { os_system_event_create(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ev)), 1); });
     size_t os_count = 0;
     const OsOverride *os_tab = os_override_table(&os_count);
     for (size_t i = 0; i < os_count; ++i) {

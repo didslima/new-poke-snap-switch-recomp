@@ -210,11 +210,19 @@ if(UNIX AND NOT APPLE)
     runtime/hle/linux/hle_host_posix.cpp runtime/hle/linux/input_backend_sdl3.cpp
     generated/unimplemented.cpp)
 
+  set(SNAP_LINUX_AUDIO_SOURCES
+    host/abi_audio.cpp
+    runtime/audio/audio_out.cpp
+    runtime/audio/audio_null.cpp
+    runtime/audio/linux/audio_host_posix.cpp
+    runtime/audio/linux/audio_sdl3.cpp)
+
   if(EXISTS "${SNAP_AOT_MAIN_LIB}" AND EXISTS "${SNAP_AOT_SDK_LIB}")
     snap_os_test(snap_boot_linux ${SNAP_LINUX_RUNNER_SOURCES}
                  host/linux/init_linux.cpp host/linux/hooks_mods_stub.cpp
                  host/loader.cpp host/hooks.cpp host/guest_tls_hooks.cpp host/mods/drpfast.cpp
-                 runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES} ${SNAP_LINUX_HLE_CORE_SOURCES})
+                 runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES} ${SNAP_LINUX_HLE_CORE_SOURCES}
+                 ${SNAP_LINUX_AUDIO_SOURCES})
     target_compile_definitions(snap_boot_linux PRIVATE SNAP_LINUX_HAS_AOT=1)
     target_compile_options(snap_boot_linux PRIVATE -w)
     target_link_libraries(snap_boot_linux PRIVATE "${SNAP_AOT_MAIN_LIB}" "${SNAP_AOT_SDK_LIB}")
@@ -247,7 +255,7 @@ if(UNIX AND NOT APPLE)
                host/linux/init_linux.cpp host/linux/crash_linux.cpp host/linux/preflight_linux.cpp
                host/linux/hooks_mods_stub.cpp host/loader.cpp host/elf_check.cpp host/hooks.cpp
                host/guest_tls_hooks.cpp host/mods/drpfast.cpp runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES}
-               ${SNAP_LINUX_HLE_CORE_SOURCES})
+               ${SNAP_LINUX_HLE_CORE_SOURCES} ${SNAP_LINUX_AUDIO_SOURCES})
   target_include_directories(snap_init_linux_test PRIVATE host)
   target_compile_options(snap_init_linux_test PRIVATE -w)
   add_test(NAME init_linux COMMAND snap_init_linux_test)
