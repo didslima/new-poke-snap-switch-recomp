@@ -7,8 +7,8 @@
 //   SNAP_SHINY_TRACE=<key>  log the draw state of draws sampling that key (hex key, or "all" = one line per texture)
 //   SNAP_SHINY_DIR=<dir>    pack folder (default %APPDATA%\SnapRecomp\mods\shiny-pokemon), holds shiny_table.txt + twin .nutexb files
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_shiny.h"
-#include <windows.h>
 #include <algorithm>
 #include <cinttypes>
 #include <cmath>
@@ -177,7 +177,7 @@ uint64_t Seed() {
     const std::string f = C().dir + "\\profile_seed.txt";
     unsigned long long seed = 0, launch = 0;
     if (FILE* fp = fopen(f.c_str(), "r")) { if (fscanf(fp, "%llx %llu", &seed, &launch) != 2) seed = launch = 0; fclose(fp); }
-    if (!seed) seed = ((uint64_t)GetTickCount64() << 20) ^ (uint64_t)GetCurrentProcessId() ^ 0xA5F152C3D0B7ull;
+    if (!seed) seed = (nvn::os_host::monotonic_ms() << 20) ^ nvn::os_host::current_process_id() ^ 0xA5F152C3D0B7ull;
     if (FILE* fp = fopen(f.c_str(), "w")) { fprintf(fp, "%llx %llu\n", seed, launch + 1); fclose(fp); }
     return seed ^ (launch * 0x9E3779B97F4A7C15ull);
   }();
@@ -218,7 +218,7 @@ bool ShinyActive() { return C().on || C().trace; }
 
 void ShinyBufferInit(uint64_t va, uint64_t size) {
   std::lock_guard<std::mutex> g(g_bufMu);
-  BufRec r; r.size = size; r.seq = ++g_bufSeq; r.tid = GetCurrentThreadId(); r.present = g_presentCount;
+  BufRec r; r.size = size; r.seq = ++g_bufSeq; r.tid = (uint32_t)nvn::os_host::current_thread_id(); r.present = g_presentCount;
   g_bufs[va] = r;
 }
 void ShinyBufferFinalize(uint64_t va, uint64_t size) {

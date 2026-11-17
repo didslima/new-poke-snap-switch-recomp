@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 // Static texture upload: Maxwell block-linear deswizzle, ASTC CPU decode / BC7 transcode (with a disk cache).
-#include <windows.h>   // [perf] SetThreadPriority for the upload prefetch workers
 #include <immintrin.h>
 #include <atomic>
 #include <chrono>
@@ -20,6 +19,7 @@
 #include <string>
 #include <vector>
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_tex.h"
 #include "os/perf.h"   // SNAP_PERF instrumentation
 
@@ -267,7 +267,7 @@ bool PrepRun(Prep& pr) {   // state stays 1 (running); the worker publishes the 
   return true;
 }
 void PrepWorker() {
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  nvn::os_host::set_current_thread_below_normal();
   for (;;) {
     std::shared_ptr<Prep> pr;
     {

@@ -8,9 +8,6 @@
 //    puts the guest-API fields of the saved objects back (descriptor pool slots, sync values, window slot, command buffer recordings),
 //    and re-registers revived memory pools in the synthetic address space. GPU truth (image layouts, mirrors, timelines) keeps its value.
 // Queues and windows are not parked: a load is refused when the set of either changed.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 
 #include <cstdio>
 #include <cstring>
@@ -25,6 +22,7 @@
 #endif
 #include "nvn_hdphoto.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_shiny.h"
 
 #include <atomic>
@@ -95,7 +93,7 @@ void DestroyKindNow(StateKind k, void *o) {   // the GPU is idle
     case SK_SYNC: delete static_cast<SyncImpl *>(o); break;
     case SK_BUFFER: {
       auto *i = static_cast<BufferImpl *>(o);
-      if (i->ownPool && i->pool) { void *mem = i->pool->storage; DestroyPool(i->pool); _aligned_free(mem); }
+      if (i->ownPool && i->pool) { void *mem = i->pool->storage; DestroyPool(i->pool); nvn::os_host::aligned_free(mem); }
       delete i;
       break;
     }

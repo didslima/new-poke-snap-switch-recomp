@@ -4,7 +4,6 @@
 // All entry points except PerfFrameMark are called with Host::queueMutex held (SubmitLists / PresentWindow); it takes the lock itself.
 // The performance overlay's Detailed mode (runtime/ui/ui_fps.cpp) turns the same GPU timing on at run time (snap_perf_overlay_timing)
 // and reads GPU busy ms and the presenting thread's CPU ms per frame (snap_perf_overlay_info); no CSV is written then.
-#include <intrin.h>
 
 #include <algorithm>
 #include <atomic>
@@ -15,6 +14,7 @@
 #include "nvn_aa.h"
 #include "nvn_dev.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "os/perf.h"
 #include "upscale/upscaler.h"
 
@@ -165,18 +165,21 @@ void PerfFrameMark(QueueImpl* q, uint64_t presentNo) {
     // CPU: the presenting thread's cycle count per frame (the SNAP_PERF cpu_mcycles source), in ms via the TSC rate measured
     // against QueryPerformanceCounter (QueryThreadCycleTime counts TSC ticks)
     // presents can come from different guest worker threads: a delta counts only when the previous present was on this thread too
-    static ULONG64 prevCyc = 0; static DWORD prevTid = 0;
-    const DWORD tid = GetCurrentThreadId();
+    static uint64_t prevCyc = 0; static uint64_t prevTid = 0;
+    const uint64_t tid = nvn::os_host::current_thread_id();
     if (tid != prevTid) { prevTid = tid; prevCyc = 0; }
-    static uint64_t tsc0 = 0; static LARGE_INTEGER qpc0{}, qpf{};
+    static uint64_t tsc0 = 0, ns0 = 0;
     static double tscPerMs = 0;
-    ULONG64 cyc = 0; QueryThreadCycleTime(GetCurrentThread(), &cyc);
-    const uint64_t tsc = __rdtsc(); LARGE_INTEGER qpc; QueryPerformanceCounter(&qpc);
-    if (!qpf.QuadPart) { QueryPerformanceFrequency(&qpf); tsc0 = tsc; qpc0 = qpc; }
-    const double ms = (double)(qpc.QuadPart - qpc0.QuadPart) * 1000.0 / (double)qpf.QuadPart;
-    if (ms > 200.0) { tscPerMs = (double)(tsc - tsc0) / ms; if (ms > 5000.0) { tsc0 = tsc; qpc0 = qpc; } }
-    if (prevCyc && tscPerMs > 0 && cyc >= prevCyc) g_ovCpuMs.store((double)(cyc - prevCyc) / tscPerMs);
-    prevCyc = cyc;
+    uint64_t cyc = 0;
+    if (nvn::os_host::thread_cycle_time(&cyc)) {
+      const uint64_t tsc = nvn::os_host::rdtsc();
+      const uint64_t nowNs = nvn::os_host::monotonic_ns();
+      if (!ns0) { tsc0 = tsc; ns0 = nowNs; }
+      const double ms = (double)(nowNs - ns0) * 1e-6;
+      if (ms > 200.0) { tscPerMs = (double)(tsc - tsc0) / ms; if (ms > 5000.0) { tsc0 = tsc; ns0 = nowNs; } }
+      if (prevCyc && tscPerMs > 0 && cyc >= prevCyc) g_ovCpuMs.store((double)(cyc - prevCyc) / tscPerMs);
+      prevCyc = cyc;
+    }
     if (busy >= 0 && cbs > 0) g_ovGpuMs.store(busy);
   }
   if (g_pf) fflush(g_pf);

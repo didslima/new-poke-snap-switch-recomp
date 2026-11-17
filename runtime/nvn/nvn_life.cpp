@@ -7,9 +7,6 @@
 //    timeline passes the last submit made before they were retired, on every queue (stamped at the next present). Before they are
 //    freed, texture / sampler pool slots that still point at them are nulled and the queue's persistent draw state forgets them.
 //  - SNAP_NVN_STATS=1: one "[nvnstats]" line every 300 presents with the counters below (measurement only, no behavior change).
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -19,6 +16,7 @@
 #include <unordered_set>
 
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 
 namespace nvn {
 
@@ -254,7 +252,7 @@ void ScrubSlots(const std::unordered_set<const void*>& deadTex, const std::unord
           uint32_t q = s.seq.load(std::memory_order_relaxed);
           for (;;) {
             if (!(q & 1) && s.seq.compare_exchange_weak(q, q + 1, std::memory_order_acquire, std::memory_order_relaxed)) break;
-            YieldProcessor();
+            nvn::os_host::cpu_yield();
             q = s.seq.load(std::memory_order_relaxed);
           }
           std::atomic_thread_fence(std::memory_order_release);

@@ -319,6 +319,15 @@ if(UNIX AND NOT APPLE)
       COMMAND ${CMAKE_COMMAND} -E env SDL_AUDIO_DRIVER=dummy $<TARGET_FILE:snap_audio_runtime_linux_test>)
   endif()
 
+  add_executable(snap_nvn_os_host_linux_test
+    tests/nvn/nvn_os_host_linux_test.cpp
+    runtime/nvn/linux/nvn_os_host_posix.cpp)
+  target_include_directories(snap_nvn_os_host_linux_test PRIVATE runtime/nvn)
+  target_compile_features(snap_nvn_os_host_linux_test PRIVATE cxx_std_20)
+  target_compile_options(snap_nvn_os_host_linux_test PRIVATE -Wall -Wextra)
+  target_link_libraries(snap_nvn_os_host_linux_test PRIVATE Threads::Threads)
+  add_test(NAME nvn_os_host_linux COMMAND snap_nvn_os_host_linux_test)
+
   if(SNAP_HAVE_SDL3)
     foreach(_t IN ITEMS snap_init_linux_test snap_hle_core_linux_test snap_fs_linux_test snap_hid_linux_test snap_sdl3_backend_linux_test snap_profiles_linux_test)
       target_compile_definitions(${_t} PRIVATE HLE_WITH_SDL3)
