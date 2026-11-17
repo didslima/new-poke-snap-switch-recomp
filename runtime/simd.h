@@ -693,8 +693,13 @@ SI uint32_t simd_crc(const uint32_t *t, uint32_t acc, uint64_t v, int bytes) {
 // crc32x per 8 bytes and was about half of the ResourceUncompress threads' CPU at course start; the byte loop is a serial
 // 8-lookup chain, slice-by-8 is about 4.5x faster. SNAP_CRC_SLICE=0 restores the byte loop. The tables and mode live in
 // selectany globals filled on first use, so the header needs no runtime file.
-__declspec(selectany) int simd_crc_slice_mode = -1;
-__declspec(selectany) uint32_t simd_crc32_s8[8][256];
+#if defined(_WIN32)
+#define SIMD_SELECTANY __declspec(selectany)
+#else
+#define SIMD_SELECTANY __attribute__((weak))
+#endif
+SIMD_SELECTANY int simd_crc_slice_mode = -1;
+SIMD_SELECTANY uint32_t simd_crc32_s8[8][256];
 SN int simd_crc_slice_init(void) {
     const char *e = getenv("SNAP_CRC_SLICE");
     for (int i = 0; i < 256; i++) simd_crc32_s8[0][i] = simd_crc32_tab[i];

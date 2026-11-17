@@ -12,33 +12,62 @@
 namespace hle {
 
 struct Json {
+  struct Member;
   enum Type { Null, Bool, Num, Str, Arr, Obj } type = Null;
   bool b = false;
   double n = 0;
   std::string s;
   std::vector<Json> a;
-  std::vector<std::pair<std::string, Json>> o;
+  std::vector<Member> o;
 
-  const Json* get(const std::string& k) const {
-    if (type != Obj) return nullptr;
-    for (auto& kv : o) if (kv.first == k) return &kv.second;
-    return nullptr;
-  }
-  std::string str(const std::string& def = "") const { return type == Str ? s : def; }
-  double num(double def = 0) const { return type == Num ? n : def; }
-  bool boolean(bool def = false) const { return type == Bool ? b : def; }
-  Json& set(const std::string& k, Json v) {
-    type = Obj;
-    for (auto& kv : o) if (kv.first == k) { kv.second = std::move(v); return kv.second; }
-    o.emplace_back(k, std::move(v));
-    return o.back().second;
-  }
-  static Json string(std::string v) { Json j; j.type = Str; j.s = std::move(v); return j; }
-  static Json number(double v) { Json j; j.type = Num; j.n = v; return j; }
-  static Json boolean_(bool v) { Json j; j.type = Bool; j.b = v; return j; }
-  static Json array() { Json j; j.type = Arr; return j; }
-  static Json object() { Json j; j.type = Obj; return j; }
+  Json();
+  Json(const Json&);
+  Json(Json&&) noexcept;
+  Json& operator=(const Json&);
+  Json& operator=(Json&&) noexcept;
+  ~Json();
+  const Json* get(const std::string& k) const;
+  std::string str(const std::string& def = "") const;
+  double num(double def = 0) const;
+  bool boolean(bool def = false) const;
+  Json& set(const std::string& k, Json v);
+  static Json string(std::string v);
+  static Json number(double v);
+  static Json boolean_(bool v);
+  static Json array();
+  static Json object();
 };
+
+struct Json::Member {
+  std::string first;
+  Json second;
+};
+
+inline Json::Json() = default;
+inline Json::Json(const Json&) = default;
+inline Json::Json(Json&&) noexcept = default;
+inline Json& Json::operator=(const Json&) = default;
+inline Json& Json::operator=(Json&&) noexcept = default;
+inline Json::~Json() = default;
+inline const Json* Json::get(const std::string& k) const {
+  if (type != Obj) return nullptr;
+  for (auto& kv : o) if (kv.first == k) return &kv.second;
+  return nullptr;
+}
+inline std::string Json::str(const std::string& def) const { return type == Str ? s : def; }
+inline double Json::num(double def) const { return type == Num ? n : def; }
+inline bool Json::boolean(bool def) const { return type == Bool ? b : def; }
+inline Json& Json::set(const std::string& k, Json v) {
+  type = Obj;
+  for (auto& kv : o) if (kv.first == k) { kv.second = std::move(v); return kv.second; }
+  o.push_back({k, std::move(v)});
+  return o.back().second;
+}
+inline Json Json::string(std::string v) { Json j; j.type = Str; j.s = std::move(v); return j; }
+inline Json Json::number(double v) { Json j; j.type = Num; j.n = v; return j; }
+inline Json Json::boolean_(bool v) { Json j; j.type = Bool; j.b = v; return j; }
+inline Json Json::array() { Json j; j.type = Arr; return j; }
+inline Json Json::object() { Json j; j.type = Obj; return j; }
 
 class JsonParser {
  public:
@@ -84,7 +113,7 @@ class JsonParser {
         ++p_; ws();
         Json v;
         if (!value(v)) return false;
-        j.o.emplace_back(std::move(k), std::move(v)); ws();
+        j.o.push_back({std::move(k), std::move(v)}); ws();
         if (p_ < end_ && *p_ == ',') { ++p_; continue; }
         if (p_ < end_ && *p_ == '}') { ++p_; return true; }
         return fail("expected ',' or '}'");
