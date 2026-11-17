@@ -190,6 +190,7 @@ if(UNIX AND NOT APPLE)
     host/linux/preflight_linux.cpp host/elf_check.cpp)
   set(SNAP_LINUX_HLE_CORE_SOURCES
     runtime/hle/overrides.cpp runtime/hle/hle_config.cpp runtime/hle/settings.cpp
+    runtime/hle/fs.cpp runtime/hle/fs_core.cpp
     runtime/hle/services_sys.cpp runtime/hle/services_net.cpp
     runtime/hle/access.cpp runtime/hle/btn_icons.cpp
     runtime/hle/linux/hle_host_posix.cpp generated/unimplemented.cpp)
@@ -236,15 +237,21 @@ if(UNIX AND NOT APPLE)
   target_compile_options(snap_init_linux_test PRIVATE -w)
   add_test(NAME init_linux COMMAND snap_init_linux_test)
 
-  snap_os_test(snap_hle_core_linux_test tests/platform/hle_core_linux_test.cpp ${SNAP_LINUX_HLE_CORE_SOURCES})
+  snap_os_test(snap_hle_core_linux_test tests/platform/hle_core_linux_test.cpp ${SNAP_LINUX_HLE_CORE_SOURCES} runtime/os/perf.cpp runtime/os/linux/os_host_posix.cpp)
   target_compile_options(snap_hle_core_linux_test PRIVATE -w)
+  add_test(NAME hle_core_linux COMMAND snap_hle_core_linux_test)
+
+  snap_os_test(snap_fs_linux_test tests/platform/fs_linux_test.cpp ${SNAP_LINUX_HLE_CORE_SOURCES} runtime/os/perf.cpp runtime/os/linux/os_host_posix.cpp)
+  target_compile_options(snap_fs_linux_test PRIVATE -w)
+  add_test(NAME fs_linux COMMAND snap_fs_linux_test)
+
   set_source_files_properties(
     runtime/hle/linux/hle_host_posix.cpp
     tests/platform/hle_core_linux_test.cpp
+    tests/platform/fs_linux_test.cpp
     host/linux/init_linux.cpp
     tests/platform/init_linux_test.cpp
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
-  add_test(NAME hle_core_linux COMMAND snap_hle_core_linux_test)
 
   add_test(NAME preflight_linux
     COMMAND ${CMAKE_COMMAND} -E env SNAP_BOOT_LINUX_BIN=$<TARGET_FILE:snap_boot_linux>

@@ -14,21 +14,13 @@
 #include <unordered_map>
 
 #include "hle_config.h"
+#include "hle_host.h"
 #include "save_gen.h"
 
 // runtime/os releases the caller's virtual core around blocking reads. These no-op weak defaults keep builds without
 // runtime/os (tests/hle) linking; snap_boot links the real ones from os_kernel.cpp.
 extern "C" __attribute__((weak)) void os_io_begin(void) {}
 extern "C" __attribute__((weak)) void os_io_end(void) {}
-
-#ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <unistd.h>
-#endif
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -51,104 +43,21 @@ class HostFile {
  public:
   ~HostFile() { close(); }
   bool open(const stdfs::path& p, bool write) {
-#ifdef _WIN32
-    DWORD access = GENERIC_READ | (write ? GENERIC_WRITE : 0);
-    h_ = CreateFileW(p.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
-    return h_ != INVALID_HANDLE_VALUE;
-#else
-    fd_ = ::open(p.c_str(), write ? O_RDWR : O_RDONLY);
-    return fd_ >= 0;
-#endif
+    h_ = hle::host::file_open(from_path(p), write);
+    return h_ != nullptr;
   }
   void close() {
-#ifdef _WIN32
-    if (h_ != INVALID_HANDLE_VALUE) { CloseHandle(h_); h_ = INVALID_HANDLE_VALUE; }
-#else
-    if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
-#endif
+    if (h_) { hle::host::file_close(h_); h_ = nullptr; }
   }
-  int64_t size() {
-#ifdef _WIN32
-    LARGE_INTEGER s;
-    return GetFileSizeEx(h_, &s) ? s.QuadPart : -1;
-#else
-    off_t cur = lseek(fd_, 0, SEEK_CUR); (void)cur;
-    return lseek(fd_, 0, SEEK_END);
-#endif
-  }
+  int64_t size() { return hle::host::file_size(h_); }
   // returns bytes read, -1 on error
-  int64_t read_at(int64_t off, void* buf, size_t n) {
-    size_t done = 0;
-    char* b = static_cast<char*>(buf);
-    while (done < n) {
-#ifdef _WIN32
-      DWORD chunk = (DWORD)std::min<size_t>(n - done, 1u << 30), got = 0;
-      OVERLAPPED ov{};
-      ov.Offset = (DWORD)((off + (int64_t)done) & 0xffffffff);
-      ov.OffsetHigh = (DWORD)((off + (int64_t)done) >> 32);
-      if (!ReadFile(h_, b + done, chunk, &got, &ov)) {
-        if (GetLastError() == ERROR_HANDLE_EOF) break;
-        return -1;
-      }
-      if (got == 0) break;
-      // [perf] pass 5: mark the filled pages written from user mode, so GetWriteWatch (dirty-page buffer sync, runtime\nvn\nvn_vk.cpp)
-      // reports them after the data is final. A test (perf pass 5, results.md) showed buffered reads are seen anyway but
-      // unbuffered/DMA reads racing a watch reset leave pages stale; an atomic OR with 0 per page changes no byte.
-      for (uintptr_t p = (uintptr_t)(b + done) & ~(uintptr_t)3, e = (uintptr_t)(b + done + got); p < e; p = (p | 4095) + 1)   // one aligned dword per page (same page as the buffer bytes)
-        InterlockedOr((volatile LONG*)p, 0);
-      done += got;
-#else
-      ssize_t got = pread(fd_, b + done, n - done, off + (off_t)done);
-      if (got < 0) return -1;
-      if (got == 0) break;
-      done += (size_t)got;
-#endif
-    }
-    return (int64_t)done;
-  }
-  bool write_at(int64_t off, const void* buf, size_t n) {
-    const char* b = static_cast<const char*>(buf);
-    size_t done = 0;
-    while (done < n) {
-#ifdef _WIN32
-      DWORD chunk = (DWORD)std::min<size_t>(n - done, 1u << 30), got = 0;
-      OVERLAPPED ov{};
-      ov.Offset = (DWORD)((off + (int64_t)done) & 0xffffffff);
-      ov.OffsetHigh = (DWORD)((off + (int64_t)done) >> 32);
-      if (!WriteFile(h_, b + done, chunk, &got, &ov)) return false;
-      done += got;
-#else
-      ssize_t got = pwrite(fd_, b + done, n - done, off + (off_t)done);
-      if (got <= 0) return false;
-      done += (size_t)got;
-#endif
-    }
-    return true;
-  }
-  bool set_size(int64_t size) {
-#ifdef _WIN32
-    LARGE_INTEGER li;
-    li.QuadPart = size;
-    return SetFilePointerEx(h_, li, nullptr, FILE_BEGIN) && SetEndOfFile(h_);
-#else
-    return ftruncate(fd_, size) == 0;
-#endif
-  }
-  bool flush() {
-#ifdef _WIN32
-    return FlushFileBuffers(h_) != 0;
-#else
-    return fsync(fd_) == 0;
-#endif
-  }
+  int64_t read_at(int64_t off, void* buf, size_t n) { return hle::host::file_read_at(h_, off, buf, n); }
+  bool write_at(int64_t off, const void* buf, size_t n) { return hle::host::file_write_at(h_, off, buf, n); }
+  bool set_size(int64_t size) { return hle::host::file_set_size(h_, size); }
+  bool flush() { return hle::host::file_flush(h_); }
 
  private:
-#ifdef _WIN32
-  HANDLE h_ = INVALID_HANDLE_VALUE;
-#else
-  int fd_ = -1;
-#endif
+  void* h_ = nullptr;
 };
 
 // Flushes a file to disk by path (used for commit durability). Best effort.
@@ -159,13 +68,7 @@ static void flush_path(const stdfs::path& p) {
 
 // Atomically replaces `to` with `from` (same directory/volume), writing through.
 static bool replace_file(const stdfs::path& from, const stdfs::path& to) {
-#ifdef _WIN32
-  return MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-#else
-  std::error_code ec;
-  stdfs::rename(from, to, ec);
-  return !ec;
-#endif
+  return hle::host::atomic_replace_file(from_path(from), from_path(to));
 }
 
 // True when nothing exists at `p` (not even a dangling link). An unreadable status counts as present.
@@ -184,18 +87,10 @@ static bool remove_checked(const stdfs::path& p) {
 // file held by another program, a permission or I/O error) returns TargetLocked, which the game's result mapper also handles
 // (main 0x60362c, game error 0x11), instead of telling the player the disk is full.
 static uint32_t commit_result(const std::error_code& ec) {
-#ifdef _WIN32
-  if (ec.category() == std::system_category() && (ec.value() == ERROR_DISK_FULL || ec.value() == ERROR_HANDLE_DISK_FULL)) return kResultUsableSpaceNotEnough;
-#endif
-  if (ec == std::errc::no_space_on_device || ec == std::errc::file_too_large) return kResultUsableSpaceNotEnough;
-  return kResultTargetLocked;
+  return hle::host::is_disk_full_error(ec) ? kResultUsableSpaceNotEnough : kResultTargetLocked;
 }
 static std::error_code last_os_error() {
-#ifdef _WIN32
-  return std::error_code((int)GetLastError(), std::system_category());
-#else
-  return std::error_code(errno, std::generic_category());
-#endif
+  return hle::host::last_os_error();
 }
 
 bool split_path(const std::string& path, std::string* mount, std::string* rel) {
@@ -591,19 +486,16 @@ struct Fs::Impl {
   std::map<std::string, void*> locks;  // save root -> open ".snap.lock" handle holding an exclusive byte lock (one running game per save folder)
 
   ~Impl() {
-#ifdef _WIN32
-    for (auto& kv : locks) CloseHandle((HANDLE)kv.second);
-#endif
+    for (auto& kv : locks) hle::host::release_save_lock(kv.second);
   }
   // Drops the folder lock once no save mount uses it any more (unmount, remount).
   void release_lock(const std::string& key) {
-#ifdef _WIN32
     if (key.empty()) return;
     for (auto& kv : mounts) if (kv.second->save && kv.second->save->lock_key == key) return;
-    if (auto it = locks.find(key); it != locks.end()) { CloseHandle((HANDLE)it->second); locks.erase(it); }
-#else
-    (void)key;
-#endif
+    if (auto it = locks.find(key); it != locks.end()) {
+      hle::host::release_save_lock(it->second);
+      locks.erase(it);
+    }
   }
   std::shared_ptr<Mount> find_mount(const std::string& name) {
     auto it = mounts.find(name);
@@ -679,7 +571,6 @@ uint32_t Fs::mount_save(const std::string& name, const uint64_t uid[2]) {
   std::error_code ec;
   // Same name mounted again: the old mount stays untouched until the new one can no longer fail (lock, directory); only then is it
   // dropped (its open handles die with it; Save::open wipes working/ anyway). The new mount takes over the same folder lock.
-#ifdef _WIN32
   // One running game per save folder. Save::open deletes working/ and every newer generation, which would wreck a second live
   // process on the same folder, so refuse before touching anything. Per save root (parallel test runs use their own roots);
   // the lock dies with the process, so a crash never leaves a stale one.
@@ -689,26 +580,15 @@ uint32_t Fs::mount_save(const std::string& name, const uint64_t uid[2]) {
     const std::string key = from_path(root);
     m->save->lock_key = key;
     if (!p_->locks.count(key)) {
-      // No FILE_SHARE_DELETE: while a game holds the lock, nothing can delete or rename it away (profile Clear/Delete, cleanup
-      // scripts), so a second copy can never create a fresh lock file and mount the same folder.
-      HANDLE h = CreateFileW((root / ".snap.lock").c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-      OVERLAPPED ov{};
-      if (h == INVALID_HANDLE_VALUE) {
-        DWORD e = GetLastError();   // no guard, no mount: Save::open would wipe a running copy's working/ and newer generations
-        log("fs: cannot open the save lock file in %s (error %lu); not mounting the save folder", key.c_str(), e);
-        return (e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION || e == ERROR_ACCESS_DENIED) ? kResultTargetLocked : kResultUsableSpaceNotEnough;
-      } else if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
-        DWORD e = GetLastError();
-        CloseHandle(h);
-        log("fs: save folder %s is in use by another running copy of the game (lock error %lu); not mounting it", key.c_str(), e);
-        return e == ERROR_LOCK_VIOLATION ? kResultTargetLocked : kResultUsableSpaceNotEnough;
-      } else {
-        p_->locks[key] = h;
+      void* lock_h = nullptr;
+      const int lock_rc = hle::host::try_acquire_save_lock(from_path(root / ".snap.lock"), &lock_h);
+      if (lock_rc != 0) {
+        log("fs: save folder %s is locked or unavailable (rc=%d); not mounting it", key.c_str(), lock_rc);
+        return lock_rc == 1 ? kResultTargetLocked : kResultUsableSpaceNotEnough;
       }
+      p_->locks[key] = lock_h;
     }
   }
-#endif
   stdfs::create_directories(m->save->root, ec);
   if (ec) { log("fs: cannot create save directory %s: %s", from_path(m->save->root).c_str(), ec.message().c_str()); return kResultUsableSpaceNotEnough; }
   if (auto old = p_->mounts.find(name); old != p_->mounts.end()) {
@@ -1164,17 +1044,12 @@ uint32_t Fs::commit(const std::string& mount) {
 }
 
 bool Fs::drain_for_exit(int ms) {
-#ifdef _WIN32
-  const ULONGLONG end = GetTickCount64() + (ULONGLONG)(ms > 0 ? ms : 0);
+  const uint64_t end = hle::host::monotonic_ms() + static_cast<uint64_t>(ms > 0 ? ms : 0);
   while (!p_->mu.try_lock()) {
-    if (GetTickCount64() >= end) return false;
-    Sleep(5);
+    if (hle::host::monotonic_ms() >= end) return false;
+    hle::host::sleep_ms(5);
   }
   return true;
-#else
-  (void)ms;
-  return true;
-#endif
 }
 
 uint32_t Fs::get_free_space(int64_t* out, const std::string& mount) {

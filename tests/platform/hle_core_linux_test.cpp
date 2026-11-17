@@ -26,6 +26,7 @@ namespace fs = std::filesystem;
 
 extern "C" int snap_pace_vsync_wait(int64_t*);
 extern "C" void snap_pace_vsync_note();
+extern "C" void os_get_stats(void*) {}
 
 static std::atomic<int> g_fail{0}, g_checks{0};
 #define CHECK(cond) do { g_checks++; if (!(cond)) { std::fprintf(stderr, "CHECK FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond); g_fail++; } } while (0)

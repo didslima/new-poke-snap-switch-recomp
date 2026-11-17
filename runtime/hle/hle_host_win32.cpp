@@ -8,6 +8,7 @@
 #include <knownfolders.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +25,7 @@ extern "C" void snap_pace_vsync_note_none();
 #pragma comment(linker, "/alternatename:snap_pace_vsync_wait=snap_pace_vsync_wait_none")
 #pragma comment(linker, "/alternatename:snap_pace_vsync_note=snap_pace_vsync_note_none")
 #pragma comment(linker, "/alternatename:snap_ui_pick_profile=snap_ui_pick_profile_none")
+#pragma comment(linker, "/alternatename:snap_photoexport_drain_for_exit=snap_photoexport_drain_none")
 #endif
 
 namespace hle {
@@ -186,5 +188,117 @@ void lock_file_end(void* handle) {
   }
   delete lk;
 }
+
+void* file_open(const std::string& path, bool write) {
+  const std::wstring wp = std::filesystem::u8path(path).wstring();
+  const DWORD access = GENERIC_READ | (write ? GENERIC_WRITE : 0);
+  HANDLE h = CreateFileW(wp.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
+  return h == INVALID_HANDLE_VALUE ? nullptr : static_cast<void*>(h);
+}
+
+void file_close(void* handle) {
+  if (handle) CloseHandle(static_cast<HANDLE>(handle));
+}
+
+int64_t file_size(void* handle) {
+  if (!handle) return -1;
+  LARGE_INTEGER s;
+  return GetFileSizeEx(static_cast<HANDLE>(handle), &s) ? s.QuadPart : -1;
+}
+
+int64_t file_read_at(void* handle, int64_t off, void* buf, size_t n) {
+  if (!handle) return -1;
+  HANDLE h = static_cast<HANDLE>(handle);
+  size_t done = 0;
+  char* b = static_cast<char*>(buf);
+  while (done < n) {
+    const DWORD chunk = (DWORD)std::min<size_t>(n - done, 1u << 30);
+    DWORD got = 0;
+    OVERLAPPED ov{};
+    ov.Offset = (DWORD)((off + (int64_t)done) & 0xffffffff);
+    ov.OffsetHigh = (DWORD)((off + (int64_t)done) >> 32);
+    if (!ReadFile(h, b + done, chunk, &got, &ov)) {
+      if (GetLastError() == ERROR_HANDLE_EOF) break;
+      return -1;
+    }
+    if (got == 0) break;
+    // Mark filled pages written from user mode for GetWriteWatch dirty-page tracking.
+    for (uintptr_t p = (uintptr_t)(b + done) & ~(uintptr_t)3, e = (uintptr_t)(b + done + got); p < e; p = (p | 4095) + 1)
+      InterlockedOr((volatile LONG*)p, 0);
+    done += got;
+  }
+  return (int64_t)done;
+}
+
+bool file_write_at(void* handle, int64_t off, const void* buf, size_t n) {
+  if (!handle) return false;
+  HANDLE h = static_cast<HANDLE>(handle);
+  const char* b = static_cast<const char*>(buf);
+  size_t done = 0;
+  while (done < n) {
+    const DWORD chunk = (DWORD)std::min<size_t>(n - done, 1u << 30);
+    DWORD got = 0;
+    OVERLAPPED ov{};
+    ov.Offset = (DWORD)((off + (int64_t)done) & 0xffffffff);
+    ov.OffsetHigh = (DWORD)((off + (int64_t)done) >> 32);
+    if (!WriteFile(h, b + done, chunk, &got, &ov)) return false;
+    done += got;
+  }
+  return true;
+}
+
+bool file_set_size(void* handle, int64_t size) {
+  if (!handle) return false;
+  HANDLE h = static_cast<HANDLE>(handle);
+  LARGE_INTEGER li;
+  li.QuadPart = size;
+  return SetFilePointerEx(h, li, nullptr, FILE_BEGIN) && SetEndOfFile(h);
+}
+
+bool file_flush(void* handle) {
+  return handle && FlushFileBuffers(static_cast<HANDLE>(handle)) != 0;
+}
+
+int try_acquire_save_lock(const std::string& lock_path, void** out_handle) {
+  if (out_handle) *out_handle = nullptr;
+  const std::wstring wp = std::filesystem::u8path(lock_path).wstring();
+  HANDLE h = CreateFileW(wp.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    const DWORD e = GetLastError();
+    return (e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION || e == ERROR_ACCESS_DENIED) ? 1 : 2;
+  }
+  OVERLAPPED ov{};
+  if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
+    const DWORD e = GetLastError();
+    CloseHandle(h);
+    return e == ERROR_LOCK_VIOLATION ? 1 : 2;
+  }
+  if (out_handle) *out_handle = static_cast<void*>(h);
+  else CloseHandle(h);
+  return 0;
+}
+
+void release_save_lock(void* handle) {
+  if (handle) CloseHandle(static_cast<HANDLE>(handle));
+}
+
+bool is_disk_full_error(const std::error_code& ec) {
+  if (ec.category() == std::system_category() && (ec.value() == ERROR_DISK_FULL || ec.value() == ERROR_HANDLE_DISK_FULL)) return true;
+  return ec == std::errc::no_space_on_device || ec == std::errc::file_too_large;
+}
+
+std::error_code last_os_error() {
+  return std::error_code((int)GetLastError(), std::system_category());
+}
+
+uint64_t monotonic_ms() { return (uint64_t)GetTickCount64(); }
+
+void sleep_ms(int ms) {
+  if (ms > 0) Sleep((DWORD)ms);
+}
+
+[[noreturn]] void exit_process(int code) { ExitProcess((UINT)code); }
 
 }  // namespace hle::host

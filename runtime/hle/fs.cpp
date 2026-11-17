@@ -12,15 +12,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
-#ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 #include "fs_core.h"
 #include "hle.h"
 #include "hle_config.h"
+#include "hle_host.h"
 
 // Taps for the DRP entry mod loader (runtime/mods/mods.cpp installs them only when mod packs exist): it learns which archive
 // a read buffer came from. Null otherwise.
@@ -59,15 +55,13 @@ void fs_mount_save_data(Cpu* c) {  // Result MountSaveData(const char* name, con
   uint64_t uid[2];
   std::memcpy(uid, ptr<void>(arg(c, 1)), sizeof uid);
   uint32_t rc = instance().mount_save(cstr(arg(c, 0)), uid);
-#ifdef _WIN32
   if (rc == fs::kResultTargetLocked) {   // another copy of the game owns this save folder: say so and stop, never touch its files
     const char* msg = "Another copy of New Pokemon Snap is already running with this save folder. Close it, or start this copy with a different profile or save folder (SNAP_SAVE_DIR). This copy will now close without changing any save.";
     log("fs: %s", msg);
-    if (!config().headless) MessageBoxA(nullptr, msg, "Pokemon Snap", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+    if (!config().headless) hle::host::show_error_dialog("Pokemon Snap", msg);
     std::fflush(nullptr);
-    ExitProcess(3);
+    hle::host::exit_process(3);
   }
-#endif
   ret(c, rc);
 }
 
@@ -234,7 +228,6 @@ void register_fs(std::vector<Entry>& out) {
 extern "C" void snap_screenshot_drain_for_exit(int ms);   // runtime/hle/services_sys.cpp
 extern "C" void snap_photoexport_drain_for_exit(int ms);   // host/mods/photoexport.cpp (no-op where that file is not linked)
 extern "C" void snap_photoexport_drain_none(int) {}
-#pragma comment(linker, "/alternatename:snap_photoexport_drain_for_exit=snap_photoexport_drain_none")
 extern "C" void snap_fs_drain_for_exit(int ms) { snap_screenshot_drain_for_exit(ms < 2000 ? ms : 2000); snap_photoexport_drain_for_exit(ms < 2000 ? ms : 2000); hle::fs::instance().drain_for_exit(ms); }
 // Save states (runtime/nvn/nvn_state.cpp calls these from its hooks): open handles at the save, and the fix-up at a load.
 extern "C" void snap_fs_state_save() { hle::fs::instance().state_save(); }

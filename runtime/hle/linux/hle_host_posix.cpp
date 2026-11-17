@@ -6,29 +6,36 @@
 
 #include "../hle_host.h"
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
 #include <cctype>
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../hle.h"
 #include "../input_core.h"
 #include "../profiles.h"
 
-// Weak ELF fallbacks for optional NVN pacing hooks (overridden by strong symbols when NVN is linked).
+// Weak ELF fallbacks for optional NVN pacing and photo-export drain hooks.
 extern "C" __attribute__((weak)) int snap_pace_vsync_wait(int64_t*) { return 0; }
 extern "C" __attribute__((weak)) void snap_pace_vsync_note() {}
+extern "C" __attribute__((weak)) void snap_photoexport_drain_for_exit(int) {}
 
-// Weak Stage 6B link seams for unported HLE subsystems (filesystem, HID, profiles, input_core).
-// None of these register fake overrides or claim the subsystem is available; Stage 6C replaces them.
+// Weak Stage 6B/6C-A link seams for unported HLE subsystems (HID, profiles, input_core).
+// register_fs is now strongly defined by runtime/hle/fs.cpp.
 namespace hle {
-__attribute__((weak)) void register_fs(std::vector<Entry>&) {}
 __attribute__((weak)) void register_hid(std::vector<Entry>&) {}
 }  // namespace hle
 
@@ -170,5 +177,145 @@ uint64_t process_id() { return (uint64_t)getpid(); }
 // if cross-process file locking is needed later on Linux, implement with flock()/fcntl().
 void* lock_file_begin(const std::string&, int) { return reinterpret_cast<void*>(1); }
 void lock_file_end(void*) {}
+
+namespace {
+inline void* fd_to_handle(int fd) {
+  return fd < 0 ? nullptr : reinterpret_cast<void*>(static_cast<intptr_t>(fd) + 1);
+}
+inline int handle_to_fd(void* handle) {
+  return handle ? static_cast<int>(reinterpret_cast<intptr_t>(handle) - 1) : -1;
+}
+}  // namespace
+
+void* file_open(const std::string& path, bool write) {
+  const std::filesystem::path p = std::filesystem::u8path(path);
+  int fd = -1;
+  do {
+    fd = ::open(p.c_str(), (write ? O_RDWR : O_RDONLY) | O_CLOEXEC);
+  } while (fd < 0 && errno == EINTR);
+  return fd_to_handle(fd);
+}
+
+void file_close(void* handle) {
+  const int fd = handle_to_fd(handle);
+  if (fd >= 0) ::close(fd);
+}
+
+int64_t file_size(void* handle) {
+  const int fd = handle_to_fd(handle);
+  if (fd < 0) return -1;
+  struct stat st{};
+  return ::fstat(fd, &st) == 0 ? static_cast<int64_t>(st.st_size) : -1;
+}
+
+int64_t file_read_at(void* handle, int64_t off, void* buf, size_t n) {
+  const int fd = handle_to_fd(handle);
+  if (fd < 0 || off < 0) return -1;
+  size_t done = 0;
+  char* b = static_cast<char*>(buf);
+  while (done < n) {
+    const ssize_t got = ::pread(fd, b + done, n - done, static_cast<off_t>(off + static_cast<int64_t>(done)));
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    if (got == 0) break;
+    done += static_cast<size_t>(got);
+  }
+  return static_cast<int64_t>(done);
+}
+
+bool file_write_at(void* handle, int64_t off, const void* buf, size_t n) {
+  const int fd = handle_to_fd(handle);
+  if (fd < 0 || off < 0) return false;
+  size_t done = 0;
+  const char* b = static_cast<const char*>(buf);
+  while (done < n) {
+    const ssize_t got = ::pwrite(fd, b + done, n - done, static_cast<off_t>(off + static_cast<int64_t>(done)));
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (got == 0) return false;
+    done += static_cast<size_t>(got);
+  }
+  return true;
+}
+
+bool file_set_size(void* handle, int64_t size) {
+  const int fd = handle_to_fd(handle);
+  if (fd < 0 || size < 0) return false;
+  int rc = 0;
+  do {
+    rc = ::ftruncate(fd, static_cast<off_t>(size));
+  } while (rc != 0 && errno == EINTR);
+  return rc == 0;
+}
+
+bool file_flush(void* handle) {
+  const int fd = handle_to_fd(handle);
+  if (fd < 0) return false;
+  int rc = 0;
+  do {
+    rc = ::fsync(fd);
+  } while (rc != 0 && errno == EINTR);
+  return rc == 0;
+}
+
+int try_acquire_save_lock(const std::string& lock_path, void** out_handle) {
+  if (out_handle) *out_handle = nullptr;
+  const std::filesystem::path p = std::filesystem::u8path(lock_path);
+  int fd = -1;
+  do {
+    fd = ::open(p.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+  } while (fd < 0 && errno == EINTR);
+  if (fd < 0) {
+    return (errno == EACCES || errno == EPERM) ? 1 : 2;
+  }
+  int rc = 0;
+  do {
+    rc = ::flock(fd, LOCK_EX | LOCK_NB);
+  } while (rc != 0 && errno == EINTR);
+  if (rc != 0) {
+    const int err = errno;
+    ::close(fd);
+    return (err == EWOULDBLOCK || err == EAGAIN) ? 1 : 2;
+  }
+  if (out_handle) *out_handle = fd_to_handle(fd);
+  else ::close(fd);
+  return 0;
+}
+
+void release_save_lock(void* handle) {
+  const int fd = handle_to_fd(handle);
+  if (fd >= 0) ::close(fd);
+}
+
+bool is_disk_full_error(const std::error_code& ec) {
+  if (ec == std::errc::no_space_on_device || ec == std::errc::file_too_large) return true;
+#ifdef EDQUOT
+  if (ec.category() == std::generic_category() && ec.value() == EDQUOT) return true;
+#endif
+  return false;
+}
+
+std::error_code last_os_error() {
+  return std::error_code(errno, std::generic_category());
+}
+
+uint64_t monotonic_ms() {
+  struct timespec ts{};
+  ::clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<uint64_t>(ts.tv_sec) * 1000ull + static_cast<uint64_t>(ts.tv_nsec) / 1000000ull;
+}
+
+void sleep_ms(int ms) {
+  if (ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+[[noreturn]] void exit_process(int code) {
+  std::fflush(nullptr);
+  std::_Exit(code);
+}
 
 }  // namespace hle::host

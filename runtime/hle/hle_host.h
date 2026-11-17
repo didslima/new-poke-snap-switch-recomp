@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <system_error>
 
 namespace hle::host {
 
@@ -25,5 +26,24 @@ bool shift_held_at_launch();
 uint64_t process_id();
 void* lock_file_begin(const std::string& path, int timeout_ms);
 void lock_file_end(void* handle);
+
+// Filesystem host primitives (used by fs.cpp and fs_core.cpp).
+void* file_open(const std::string& path, bool write);
+void file_close(void* handle);
+int64_t file_size(void* handle);
+int64_t file_read_at(void* handle, int64_t off, void* buf, size_t n);
+bool file_write_at(void* handle, int64_t off, const void* buf, size_t n);
+bool file_set_size(void* handle, int64_t size);
+bool file_flush(void* handle);
+
+// Save folder exclusive lock: 0 = acquired (out_handle set), 1 = target locked, 2 = space/other error.
+int try_acquire_save_lock(const std::string& lock_path, void** out_handle);
+void release_save_lock(void* handle);
+
+bool is_disk_full_error(const std::error_code& ec);
+std::error_code last_os_error();
+uint64_t monotonic_ms();
+void sleep_ms(int ms);
+[[noreturn]] void exit_process(int code);
 
 }  // namespace hle::host
