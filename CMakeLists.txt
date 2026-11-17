@@ -182,9 +182,29 @@ if(UNIX AND NOT APPLE)
   target_compile_options(snap_hooks_linux_test PRIVATE -w)
   add_test(NAME hooks_linux COMMAND ${CMAKE_COMMAND} -E env SNAP_MEMLOG=1 $<TARGET_FILE:snap_hooks_linux_test>)
 
-  # Stage 5b/5c/5d-b1: Linux runner bootstrap target, signal handling, preflight, and isolated tests.
-  snap_os_test(snap_boot_linux host/linux/boot_linux.cpp host/linux/runner_linux.cpp host/linux/crash_linux.cpp
-               host/linux/preflight_linux.cpp host/elf_check.cpp runtime/os/linux/os_host_posix.cpp)
+  # Stage 5b/5c/5d-b1/5d-b2: Linux runner, signal handling, preflight, and optional AOT loader integration.
+  set(SNAP_AOT_MAIN_LIB "${PROJECT_SOURCE_DIR}/build/linux-aot-abi3/main/lib/libsnap_main.a" CACHE FILEPATH "Linux AOT libsnap_main.a")
+  set(SNAP_AOT_SDK_LIB "${PROJECT_SOURCE_DIR}/build/linux-aot-abi3/sdk/lib/libsnap_sdk.a" CACHE FILEPATH "Linux AOT libsnap_sdk.a")
+  set(SNAP_LINUX_RUNNER_SOURCES
+    host/linux/boot_linux.cpp host/linux/runner_linux.cpp host/linux/crash_linux.cpp
+    host/linux/preflight_linux.cpp host/elf_check.cpp)
+  if(EXISTS "${SNAP_AOT_MAIN_LIB}" AND EXISTS "${SNAP_AOT_SDK_LIB}")
+    snap_os_test(snap_boot_linux ${SNAP_LINUX_RUNNER_SOURCES}
+                 host/linux/init_linux.cpp host/linux/hooks_mods_stub.cpp
+                 host/loader.cpp host/hooks.cpp host/guest_tls_hooks.cpp host/mods/drpfast.cpp
+                 runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES})
+    target_compile_definitions(snap_boot_linux PRIVATE SNAP_LINUX_HAS_AOT=1)
+    target_compile_options(snap_boot_linux PRIVATE -w)
+    target_link_libraries(snap_boot_linux PRIVATE "${SNAP_AOT_MAIN_LIB}" "${SNAP_AOT_SDK_LIB}")
+    add_test(NAME init_linux_real
+      COMMAND $<TARGET_FILE:snap_boot_linux> init
+              --main "${PROJECT_SOURCE_DIR}/build/linux-aot/elf/main.elf"
+              --sdk "${PROJECT_SOURCE_DIR}/build/linux-aot/elf/sdk.elf"
+              --main-lib "${SNAP_AOT_MAIN_LIB}"
+              --sdk-lib "${SNAP_AOT_SDK_LIB}")
+  else()
+    snap_os_test(snap_boot_linux ${SNAP_LINUX_RUNNER_SOURCES} runtime/os/linux/os_host_posix.cpp)
+  endif()
   target_include_directories(snap_boot_linux PRIVATE host)
 
   snap_os_test(snap_boot_linux_test tests/platform/boot_linux_test.cpp host/linux/runner_linux.cpp host/linux/crash_linux.cpp
@@ -192,6 +212,14 @@ if(UNIX AND NOT APPLE)
   target_include_directories(snap_boot_linux_test PRIVATE host)
   add_test(NAME boot_linux COMMAND snap_boot_linux_test)
   add_test(NAME boot_linux_help COMMAND snap_boot_linux --help)
+
+  snap_os_test(snap_init_linux_test tests/platform/init_linux_test.cpp
+               host/linux/init_linux.cpp host/linux/crash_linux.cpp host/linux/preflight_linux.cpp
+               host/linux/hooks_mods_stub.cpp host/loader.cpp host/elf_check.cpp host/hooks.cpp
+               host/guest_tls_hooks.cpp host/mods/drpfast.cpp runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES})
+  target_include_directories(snap_init_linux_test PRIVATE host)
+  target_compile_options(snap_init_linux_test PRIVATE -w)
+  add_test(NAME init_linux COMMAND snap_init_linux_test)
 
   add_test(NAME preflight_linux
     COMMAND ${CMAKE_COMMAND} -E env SNAP_BOOT_LINUX_BIN=$<TARGET_FILE:snap_boot_linux>

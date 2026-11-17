@@ -3,6 +3,9 @@
 #include "runner_linux.h"
 #include "crash_linux.h"
 #include "preflight_linux.h"
+#ifdef SNAP_LINUX_HAS_AOT
+#include "init_linux.h"
+#endif
 
 #include <cerrno>
 #include <cstdio>
@@ -57,17 +60,28 @@ int bootstrap_runner_entry(void *ud) {
         std::fprintf(stderr, "boot_linux: shutdown requested by signal %d before startup\n", shutdown_signal());
         return 128 + shutdown_signal();
     }
-    // Stage 5D will execute the confirmed initialization sequence here:
-    //   1. loader::load(opts->main_elf.c_str(), opts->sdk_elf.c_str())
-    //   2. os_init(&oc) with tp_init_var / tp_destroy_var
-    //   3. snap_host::install_guest_tls_hooks(oc)
-    //   4. loader::new_thread() for the main guest thread
-    //   5. os_adopt_main_thread(c, 0, -1)
-    //   6. run_initializers() / nninitStartup / nnMain
+#ifdef SNAP_LINUX_HAS_AOT
+    if (opts->cmd == "init") {
+        InitResult res;
+        if (!init_guest_runtime(*opts, true, res)) {
+            std::fprintf(stderr, "boot_linux: init failed at stage '%s': %s\n",
+                         init_stage_name(res.stage), res.error.c_str());
+            return 1;
+        }
+        return 0;
+    }
+#else
+    if (opts->cmd == "init") {
+        std::fprintf(stderr,
+                     "boot_linux: 'init' requires AOT libraries (libsnap_main.a / libsnap_sdk.a) "
+                     "which were not linked in this build\n");
+        return 2;
+    }
+#endif
+    // Stage 5D-C / 6+ will wire run_initializers() and nnMain() here.
     std::fprintf(stderr,
-                 "boot_linux: bootstrap ready (cmd=%s, main=%s, sdk=%s); "
-                 "ELF loading and guest execution are not wired in stage 5B/5C (deferred to 5D)\n",
-                 opts->cmd.c_str(), opts->main_elf.c_str(), opts->sdk_elf.c_str());
+                 "boot_linux: command '%s' is not wired yet (stage 5D-B2 stops before run_initializers/nnMain)\n",
+                 opts->cmd.c_str());
     return 2;
 }
 

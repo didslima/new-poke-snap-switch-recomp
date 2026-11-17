@@ -132,6 +132,9 @@ const std::unordered_set<std::string> &known_runtime_providers() {
         "rt_hook_setjmp",
         "rt_hook_longjmp",
         "rt_hook_get_exception_info",
+        // shared host/mods/drpfast.cpp
+        "rt_drp_decrypt",
+        "rt_drp_decrypt_check",
         // libc / compiler builtins provided by host libc
         "memcpy",
         "memmove",
@@ -146,6 +149,18 @@ const std::unordered_set<std::string> &known_runtime_providers() {
         "sqrtf",
     };
     return s;
+}
+
+bool is_disabled_mod_hook(const std::string &sym) {
+    static const std::unordered_set<std::string> s = {
+        "rt_mod_entry", "rt_gm_arena7_size", "rt_gm_ao_simple", "rt_gm_ao_hbao", "rt_gm_pass",
+        "rt_gm_lod_ratio", "rt_gm_lod_ratio_sub", "rt_gm_anim_rate", "rt_gm_font_atlas_info",
+        "rt_gm_font_atlas_dims", "rt_gm_font_glyph1", "rt_gm_font_glyph2", "rt_gm_font_fix",
+        "rt_gm_neo_speed", "rt_gm_film_c", "rt_gm_skip_wait", "rt_gm_route_ui_event",
+        "rt_gm_route_ui_setstate", "rt_gm_ui_enter", "rt_gm_ui_event", "rt_gm_ui_pad",
+        "rt_gm_ui_pointer", "rt_ui_opt_event", "rt_ui_opt_state",
+    };
+    return s.count(sym) > 0;
 }
 
 bool is_windows_only_symbol(const std::string &sym) {
@@ -442,6 +457,7 @@ ArtifactCheck validate_aot_archive(const std::string &path, const char *module_n
 
     // 5. Undefined external symbol classification
     const auto &providers = known_runtime_providers();
+    size_t disabled_mods = 0;
     for (const auto &u : undefined) {
         if (u == want_abi || u.rfind("f_", 0) == 0 || u.rfind("imp_", 0) == 0) continue;
         if (is_windows_only_symbol(u)) {
@@ -449,9 +465,16 @@ ArtifactCheck validate_aot_archive(const std::string &path, const char *module_n
             r.detail = "Windows-only symbol referenced: " + u;
             return r;
         }
+        if (is_disabled_mod_hook(u)) {
+            disabled_mods++;
+            continue;
+        }
         if (!providers.count(u) && !defined.count(u)) {
             r.unprovided_symbols.push_back(u);
         }
+    }
+    if (disabled_mods > 0) {
+        r.warnings.push_back(std::to_string(disabled_mods) + " Windows mod/UI inline hook(s) disabled via explicit no-op stubs");
     }
 
     if (!r.unprovided_symbols.empty()) {
