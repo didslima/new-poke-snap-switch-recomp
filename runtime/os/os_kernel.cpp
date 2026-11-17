@@ -2,15 +2,6 @@
 // with priority inheritance, ticks and the SVC helpers. Written for this project; the structure (one global lock G,
 // one condition variable per thread, wake order by priority then arrival) follows TotK Recomp runtime/kernel.c
 // @ 7a37fc3 (MIT, Copyright (c) 2026 Valiantsin Dzerakh). Design notes: docs/horizon-os.md.
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <process.h>
-
 #include <immintrin.h>
 
 #include <algorithm>
@@ -22,12 +13,9 @@
 #include <string>
 #include <thread>
 
+#include "os_host.h"
 #include "os_internal.h"
 #include "perf.h"
-
-#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
-#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
-#endif
 
 using namespace oslay;
 
@@ -71,12 +59,9 @@ void fatal(const char *fmt, ...) {
 }
 
 // ---- time
-static int64_t qpc_freq() {
-    static const int64_t f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return (int64_t)x.QuadPart; }();
-    return f;
-}
+static int64_t qpc_freq() { return host::counter_frequency(); }
 static int64_t qpc_start() {
-    static const int64_t s = [] { LARGE_INTEGER x; QueryPerformanceCounter(&x); return (int64_t)x.QuadPart; }();
+    static const int64_t s = host::counter();
     return s;
 }
 int64_t tick_to_ns(int64_t tick) {   // TickManager::ConvertToTimeSpan sdk+0x3451e0
@@ -105,47 +90,31 @@ Deadline deadline_after(int64_t ns) {
 }
 bool is_infinite(Deadline d) { return d == Deadline::max(); }
 
-static void precise_sleep(int64_t ns) {
-    struct Timer { HANDLE h = nullptr; ~Timer() { if (h) CloseHandle(h); } };
-    static thread_local Timer tm;
-    if (!tm.h) tm.h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    while (ns > 0) {
-        int64_t step = std::min<int64_t>(ns, 1000000000ll * 3600);   // one hour per wait
-        if (tm.h) {
-            LARGE_INTEGER due;
-            due.QuadPart = -std::max<int64_t>(step / 100, 1);
-            SetWaitableTimer(tm.h, &due, 0, nullptr, nullptr, FALSE);
-            WaitForSingleObject(tm.h, INFINITE);
-        } else {
-            Sleep((DWORD)std::max<int64_t>(step / 1000000, 1));
-        }
-        ns -= step;
-    }
-}
+static void precise_sleep(int64_t ns) { host::sleep_precise_ns(ns); }
 
 // ---- guest-visible allocations
 Cpu *alloc_cpu() {
-    Cpu *c = (Cpu *)_aligned_malloc(sizeof(Cpu), 64);
+    Cpu *c = (Cpu *)host::heap_aligned_alloc(sizeof(Cpu), 64);
     if (!c) fatal("out of memory (Cpu)");
     memset(c, 0, sizeof(Cpu));
     c->excl_addr = ~0ull;
     return c;
 }
 static uint8_t *new_tlr() {
-    uint8_t *p = (uint8_t *)_aligned_malloc(TLR_SIZE, TLR_SIZE);
+    uint8_t *p = (uint8_t *)host::heap_aligned_alloc(TLR_SIZE, TLR_SIZE);
     if (!p) fatal("out of memory (TLR)");
     memset(p, 0, TLR_SIZE);
     return p;
 }
 uint64_t alloc_guest(size_t size) {
-    void *p = _aligned_malloc(size, 16);
+    void *p = host::heap_aligned_alloc(size, 16);
     if (!p) fatal("out of memory");
     memset(p, 0, size);
     return (uint64_t)(uintptr_t)p;
 }
 
-void free_cpu(Cpu *c) { _aligned_free(c); }
-void free_guest(uint64_t p) { _aligned_free((void *)(uintptr_t)p); }
+void free_cpu(Cpu *c) { host::heap_aligned_free(c); }
+void free_guest(uint64_t p) { host::heap_aligned_free((void *)(uintptr_t)p); }
 void set_default_thread_name(uint64_t tt) {   // SetInitialThreadNameUnsafe
     uint64_t entry = gld<uint64_t>(tt + TT_FUNCTION);
     char name[32];
@@ -245,7 +214,7 @@ static Thread *adopt_helper() {
         register_thread(t);
     }
     t_self = t;
-    t->host_tid = GetCurrentThreadId();
+    t->host_tid = host::thread_id();
     t_helper.t = t;
     return t;
 }
@@ -306,7 +275,7 @@ static thread_local uint64_t tl_last_wake_ns;   // SNAP_CRIT: when this thread l
 static void crit_g_hold() {
     if (tl_last_wake_ns && snap_perf::g_crit_active.load(std::memory_order_relaxed)) {
         snap_perf::CritRec r{};
-        r.t0 = tl_last_wake_ns; r.t1 = snap_perf::now_ns(); r.tid = GetCurrentThreadId(); r.type = 3;
+        r.t0 = tl_last_wake_ns; r.t1 = snap_perf::now_ns(); r.tid = host::thread_id(); r.type = 3;
         snap_perf::crit_push(r);
     }
     tl_last_wake_ns = 0;
@@ -316,7 +285,7 @@ void wake(Thread *t, uint32_t result) {
         Thread *w = t_self;
         snprintf(t->waker_name, sizeof t->waker_name, "%s", tname(w));
         t->waker_prio = w ? w->eff_prio : -1;
-        t->waker_tid = GetCurrentThreadId();
+        t->waker_tid = host::thread_id();
         t->wake_ns = snap_perf::now_ns();
         tl_last_wake_ns = t->wake_ns;
     }
@@ -916,18 +885,15 @@ Thread *thread_create(uint64_t tt, uint64_t entry, uint64_t arg, int prio, int i
 }
 
 static void set_host_name(uint64_t tt) {
-    using Fn = HRESULT(WINAPI *)(HANDLE, PCWSTR);
-    static Fn fn = (Fn)(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription");
-    if (!fn) return;
     uint64_t p = gld<uint64_t>(tt + TT_NAME_POINTER);
-    wchar_t w[40] = L"guest:";
+    char n[40] = "guest:";
     if (p) {
         const char *s = (const char *)(uintptr_t)p;
         size_t i = 6;
-        for (size_t j = 0; j < 31 && s[j] && i < 39; j++) w[i++] = (wchar_t)(unsigned char)s[j];
-        w[i] = 0;
+        for (size_t j = 0; j < 31 && s[j] && i < 39; j++) n[i++] = s[j];
+        n[i] = 0;
     }
-    fn(GetCurrentThread(), w);
+    host::set_current_thread_name(n);
 }
 
 // Perf pass 11 (2026-11-14): SNAP_OS_FREE_THREADS=<name>[,<name>...] lets guest threads whose name starts with one of the names
@@ -954,10 +920,10 @@ static bool free_core_name(uint64_t tt) {
     return false;
 }
 
-static unsigned __stdcall host_entry(void *arg) {
+static void host_entry(void *arg) {
     Thread *t = (Thread *)arg;
     t_self = t;
-    t->host_tid = GetCurrentThreadId();
+    t->host_tid = host::thread_id();
     set_host_name(t->tt);
     t->free_core = free_core_name(t->tt);
     Cpu *c = t->cpu;
@@ -991,22 +957,20 @@ static unsigned __stdcall host_entry(void *arg) {
     }
     g_stats.threads_exited++;
     if (g_cfg.trace) log("thread %#x exit", t->handle);
-    return 0;
 }
 
 void thread_start(Thread *t) {
     if (t->started.exchange(1)) return;
     gst8a(t->tt + TT_STATE, TS_STARTED);
-    size_t ss = std::min<size_t>(g_cfg.host_stack, 0xfff00000u);
     // Created suspended so host_thread is set before the thread can run and exit: a DestroyThread racing the start
     // would otherwise skip the host join and free t under host_entry (finding 8a).
-    uintptr_t h = _beginthreadex(nullptr, (unsigned)ss, host_entry, t, STACK_SIZE_PARAM_IS_A_RESERVATION | CREATE_SUSPENDED, nullptr);
+    host::HostThread *h = host::thread_create_suspended(g_cfg.host_stack, host_entry, t);
     if (!h) fatal("cannot create a host thread for ThreadType %#llx", (unsigned long long)t->tt);
     {
         std::lock_guard<std::mutex> lk(G);
         t->host_thread = (void *)h;
     }
-    ResumeThread((HANDLE)h);
+    host::thread_resume(h);
 }
 
 void thread_wait_exit(Thread *t) {
@@ -1026,8 +990,7 @@ void thread_destroy(Thread *t) {
             while (t->joiners > 0) block_on_key(me, lk, mkkey(K_JOINERS, t->tt), W_JOIN, Deadline::max());
         }
         if (t->host_thread) {
-            WaitForSingleObject((HANDLE)t->host_thread, INFINITE);
-            CloseHandle((HANDLE)t->host_thread);
+            host::thread_join((host::HostThread *)t->host_thread);
             t->host_thread = nullptr;
         }
     }
@@ -1039,7 +1002,7 @@ void thread_destroy(Thread *t) {
     }
     mw_forget_object(t->tt);
     free_cpu(t->cpu);
-    _aligned_free(t->tlr);
+    host::heap_aligned_free(t->tlr);
     if (t->owns_tt) free_guest(t->tt);
     delete t;
 }
@@ -1083,7 +1046,7 @@ void yield_thread(Thread *t) {
                 }
         }
     }
-    SwitchToThread();
+    host::yield();
 }
 
 // YieldToAnyThread (svcSleepThread(-2), long spin-gate streaks; finding 2): hand the core straight to its best waiter
@@ -1109,7 +1072,7 @@ void yield_any(Thread *t) {
             }
         }
     }
-    SwitchToThread();
+    host::yield();
 }
 
 int guest_core_number(const Thread *t) {
@@ -1170,9 +1133,9 @@ static int64_t g_paused_total = 0, g_pause_start = 0;
 // guest time go backwards (finding 5).
 extern "C" void os_time_pause(int on) {
     std::lock_guard<std::mutex> lk(g_pause_mu);
-    LARGE_INTEGER n; QueryPerformanceCounter(&n);
-    if (on) { if (!g_pause_start) g_pause_start = n.QuadPart; }
-    else if (g_pause_start) { g_paused_total += n.QuadPart - g_pause_start; g_pause_start = 0; }
+    const int64_t n = host::counter();
+    if (on) { if (!g_pause_start) g_pause_start = n; }
+    else if (g_pause_start) { g_paused_total += n - g_pause_start; g_pause_start = 0; }
 }
 // Guest time skew (host/mods/introskip.cpp, "Skip course intro"): moves guest time forward by `seconds` at once, so the game's next frame delta
 // is that much longer and its timers, camera and effects run through the span in one step. Never backwards; the caller keeps each step short
@@ -1183,32 +1146,30 @@ extern "C" void os_time_skew(double seconds) {
     g_paused_total -= (int64_t)(seconds * (double)qpc_freq());
 }
 extern "C" uint64_t os_ticks(void) {
-    LARGE_INTEGER n;
+    int64_t n;
     {
         std::lock_guard<std::mutex> lk(g_pause_mu);
-        QueryPerformanceCounter(&n);
-        if (g_pause_start) n.QuadPart = g_pause_start;
-        n.QuadPart -= g_paused_total;
+        n = host::counter();
+        if (g_pause_start) n = g_pause_start;
+        n -= g_paused_total;
     }
-    uint64_t d = (uint64_t)(n.QuadPart - qpc_start());
+    uint64_t d = (uint64_t)(n - qpc_start());
     uint64_t f = (uint64_t)qpc_freq();   // split so no 128-bit division (__udivti3) is needed; (d % f) * 19.2e6 < 2^63
     return g_cfg.tick_base + d / f * OS_TICK_FREQUENCY + d % f * OS_TICK_FREQUENCY / f;
 }
 namespace osk {
 // save states: the guest clock is QPC minus the paused span; a load sets the span so the clock continues from the saved reading
 int64_t state_time_get() {
-    LARGE_INTEGER n;
     std::lock_guard<std::mutex> lk(g_pause_mu);
-    QueryPerformanceCounter(&n);
-    if (g_pause_start) n.QuadPart = g_pause_start;
-    return (int64_t)n.QuadPart - g_paused_total;
+    int64_t n = host::counter();
+    if (g_pause_start) n = g_pause_start;
+    return n - g_paused_total;
 }
 void state_time_set(int64_t v) {
-    LARGE_INTEGER n;
     std::lock_guard<std::mutex> lk(g_pause_mu);
-    QueryPerformanceCounter(&n);
-    if (g_pause_start) g_pause_start = n.QuadPart;
-    g_paused_total = (int64_t)n.QuadPart - v;
+    const int64_t n = host::counter();
+    if (g_pause_start) g_pause_start = n;
+    g_paused_total = n - v;
 }
 }  // namespace osk
 
@@ -1257,10 +1218,7 @@ extern "C" void os_init(const OsConfig *in) {
     g_cores.assign(c.num_cores > 0 ? (size_t)c.num_cores : 0, nullptr);
     (void)qpc_freq();
     (void)qpc_start();
-    // 1 ms system timer resolution for timed waits (SleepConditionVariableSRW); sleeps use high-resolution timers.
-    using TB = UINT(WINAPI *)(UINT);
-    if (HMODULE m = LoadLibraryW(L"winmm.dll"))
-        if (TB tb = (TB)(void *)GetProcAddress(m, "timeBeginPeriod")) tb(1);
+    host::timers_init();   // Win32: 1 ms system timer resolution for timed waits (SleepConditionVariableSRW)
     state_init();
 }
 
@@ -1300,7 +1258,7 @@ extern "C" void os_adopt_main_thread(Cpu *c, uint64_t tt, int prio) {
     c->thread = t;
     c->excl_addr = ~0ull;
     t_self = t;
-    t->host_tid = GetCurrentThreadId();
+    t->host_tid = host::thread_id();
     t_helper.t = nullptr;
     Lock lk(G);
     acquire_core(t, lk);
@@ -1333,7 +1291,7 @@ extern "C" void os_dump_threads(void (*emit)(void *ud, uint64_t tt, uint64_t id,
     // objects (finding 12: a rehash or a DestroyThread can free them under the walk); print only the atomic counters.
     bool locked = G.try_lock();
     for (int i = 0; !locked && i < 500; i++) {
-        Sleep(1);
+        host::sleep_ms(1);
         locked = G.try_lock();
     }
     if (!locked) {
@@ -1389,7 +1347,7 @@ extern "C" void os_spin_gate(Cpu *c, uint64_t head) {
     ++streak;
     if ((n & 63) == 0) {   // a spinner may wait for a thread that has no core: offer ours
         g_stats.spin_yields++;
-        if (!t) SwitchToThread();
+        if (!t) host::yield();
         else if (streak >= 4096 && !legacy(LG_YIELD_ANY)) {
             // A long spin may wait for a lower-priority thread that has no core (finding 2): let it run.
             streak = 0;
@@ -1546,7 +1504,11 @@ extern "C" int os_svc(Cpu *c, uint32_t imm) {
         }
         case 18: v = 0x0100F4300BF2C000ull; break;                                        // ProgramId
         case 20: {                                                                        // UserExceptionContextAddress
-            static uint8_t *uctx = (uint8_t *)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            static uint8_t *uctx = [] {   // one zeroed read/write page for the process lifetime
+                host::MemErr e;
+                void *p = host::mem_reserve(0x1000, 0x1000, false, &e);
+                return p && host::mem_commit(p, 0x1000, &e) ? (uint8_t *)p : nullptr;
+            }();
             v = (uint64_t)(uintptr_t)uctx;
             break;
         }

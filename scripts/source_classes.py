@@ -65,6 +65,8 @@ _INCLUDE_ROOTS = ('runtime', 'host', 'runtime/nvn', 'runtime/ui', 'runtime/ui/th
 # tokens do not make the files that include it Windows-only. Add an entry only after reading both sides of the branch.
 _REVIEWED_SWITCHES = {
     'runtime/simd.h': {'_WIN32', '__declspec'},   # SIMD_SELECTANY: __declspec(selectany) on Windows, __attribute__((weak)) elsewhere
+    # message strings only: nn::os::SwitchToFiber and the guest's ExitProcess are guest API names, not host calls (os_thread.cpp calls neither)
+    'runtime/os/os_thread.cpp': {'SwitchToFiber', 'ExitProcess'},
 }
 
 

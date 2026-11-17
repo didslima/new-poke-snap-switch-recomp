@@ -22,8 +22,12 @@ shared   runtime/nvn/nvn_quirks.cpp
 shared   runtime/nvn/nvn_tex.cpp
 shared   runtime/os/abi.cpp
 shared   runtime/os/cheat_heap.cpp
+shared   runtime/os/os_kernel.cpp
+shared   runtime/os/os_memory.cpp
 shared   runtime/os/os_overrides.cpp
 shared   runtime/os/os_sync.cpp
+shared   runtime/os/os_thread.cpp
+shared   runtime/os/perf.cpp
 shared   runtime/ui/third_party/imgui/imgui.cpp
 shared   runtime/ui/third_party/imgui/imgui_draw.cpp
 shared   runtime/ui/third_party/imgui/imgui_impl_vulkan.cpp
@@ -138,12 +142,11 @@ windows  runtime/nvn/upscale/upscale_fsr.cpp   # #include <windows.h>, DWORD, Ge
 windows  runtime/nvn/upscale/upscale_xess.cpp   # #include <windows.h>, DWORD, GetProcAddress ...
 windows  runtime/os/hostprof.cpp   # #include <psapi.h>, #include <tlhelp32.h>, #include <windows.h> ...
 windows  runtime/os/os_ctx_win64.cpp   # #include <windows.h>, NOMINMAX, VirtualAlloc ... (Win64 context switch; Linux uses runtime/os/linux/os_ctx_sysv.cpp)
+linux    runtime/os/linux/os_host_posix.cpp   # POSIX implementation of os_host.h; in a subdirectory so that host/build_snap.py's runtime/os/*.cpp glob never compiles it for Windows
+linux    runtime/os/linux/os_state_off.cpp   # save states are not supported on Linux: g_sphase stays 0, snap_state_* refuse (replaces os_state.cpp)
 linux    runtime/os/linux/os_ctx_sysv.cpp   # Linux x86-64 System V context switch; in a subdirectory so that host/build_snap.py's runtime/os/*.cpp glob never compiles it for Windows
-windows  runtime/os/os_kernel.cpp   # #include <process.h>, #include <windows.h>, DWORD ...
-windows  runtime/os/os_memory.cpp   # #include <windows.h>, DWORD, DWORD64 ...
+windows  runtime/os/os_host_win32.cpp   # #include <windows.h>, ... (Win32 implementation of os_host.h; Linux uses runtime/os/linux/os_host_posix.cpp)
 windows  runtime/os/os_state.cpp   # #include <dbghelp.h>, #include <windows.h>, BOOL ...
-windows  runtime/os/os_thread.cpp   # #include <windows.h>, ExitProcess, GetCurrentProcess ...
-windows  runtime/os/perf.cpp   # #include <tlhelp32.h>, #include <windows.h>, DWORD ...
 windows  runtime/os/sampler.cpp   # #include <intrin.h>, #include <psapi.h>, #include <tlhelp32.h> ...
 windows  runtime/ui/third_party/imgui/imgui_impl_dx11.cpp   # Direct3D 11 backend of Dear ImGui
 windows  runtime/ui/third_party/imgui/imgui_impl_win32.cpp   # Win32 backend of Dear ImGui

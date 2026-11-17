@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import source_classes as sc  # noqa: E402
 
 # the interface headers every OS-layer file and the host include
-NEUTRAL_HEADERS = ['runtime/os/os.h', 'runtime/os/os_internal.h', 'runtime/os/os_layout.h', 'runtime/os/perf.h', 'runtime/hle/guest_tls.h']
+NEUTRAL_HEADERS = ['runtime/os/os.h', 'runtime/os/os_host.h', 'runtime/os/os_internal.h', 'runtime/os/os_layout.h', 'runtime/os/perf.h', 'runtime/hle/guest_tls.h']
 # macros of <unistd.h> / <fcntl.h> that an identifier of ours must not be spelled like (os_internal.h once declared `constexpr uint32_t R_OK`)
 POSIX_MACROS = ('R_OK', 'W_OK', 'X_OK', 'F_OK')
 

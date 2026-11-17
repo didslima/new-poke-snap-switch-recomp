@@ -1,17 +1,12 @@
 // nn::os threads, TLS slots, fibers and time as host overrides (written for this project).
-// Fibers: each guest fiber has its own Cpu and a Win32 host fiber, because lifted code keeps its call frames on the
+// Fibers: each guest fiber has its own Cpu and a host context (os_ctx_*.cpp), because lifted code keeps its call frames on the
 // host stack; the guest stack the game passes to InitializeFiber is still the fiber's guest sp. Thread-level
 // registers (tpidrro_el0, tpidr_el0, FPCR/FPSR) follow the thread, not the fiber, as with Horizon's
 // DispatchFiberContext (sdk+0x3483ec saves x19-x30, sp and q8-q15 only).
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
 #include <algorithm>
+#include <cstdio>
 
+#include "os_host.h"
 #include "os_internal.h"
 
 using namespace oslay;
@@ -221,7 +216,7 @@ void do_switch(Cpu *c, uint64_t target) {
         fatal("SwitchToFiber(%#llx): state %u", (unsigned long long)target, gld<uint8_t>(target + FB_STATE));
     // Claim it. Another thread may still be leaving it (it published the fiber before its switch finished).
     for (bool exp = false; !to->running.compare_exchange_weak(exp, true, std::memory_order_acquire); exp = false)
-        SwitchToThread();
+        host::yield();
     gst<uint8_t>(target + FB_STATE, FS_RUNNING);
     gst<uint64_t>(tt + TT_CURRENT_FIBER, target);
     Cpu *tc = to->cpu;
@@ -236,7 +231,7 @@ void do_switch(Cpu *c, uint64_t target) {
     t->leaving = from;
     if (!to->host) {
         to->host = ctx_new_fiber(g_cfg.fiber_host_stack, fiber_proc, to);
-        if (!to->host) fatal("fiber host stack allocation failed (%lu)", GetLastError());
+        if (!to->host) fatal("fiber host stack allocation failed (%lu)", host::last_error());
     }
     g_stats.fiber_switches++;
     snap_ctx_switch(from->host, to->host);
@@ -349,7 +344,7 @@ void ov_QuickExit(Cpu *) {
     log("guest QuickExit / ExitProcess");
     fflush(nullptr);
     if (snap_fs_drain_for_exit) snap_fs_drain_for_exit(3000);   // let a save commit / photo export in flight finish (bounded) before the process ends
-    TerminateProcess(GetCurrentProcess(), 0);
+    host::terminate_process();
 }
 void ov_nnosInitialize(Cpu *) {}   // the host runtime is initialised by os_init before any guest code runs
 }  // namespace

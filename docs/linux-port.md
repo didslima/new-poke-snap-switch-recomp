@@ -208,15 +208,59 @@ Not run, pending CI or a maintainer with a Windows toolchain: the Windows build 
 
 Results (Linux x86-64 container, kernel 7.3.3, clang 21): `ctx_sysv` and `ctx_sysv_repeat` (30 suites in one process) pass; 150 separate runs and 40 runs pinned to one CPU (`taskset -c 0`) had 0 failures; the suite also passes built with `clang -O0`, `clang -O3 -march=x86-64-v3`, `g++ -O0` and `g++ -O2` (10 repetitions each). Mutation check, to show that the tests can fail: removing the `ldmxcsr`, the `fldcw`, the restore of `r12`, `r13`, `r14`, `r15`, `rbx` or `rbp`, a frame misaligned by 8, a wrong default MXCSR or CW, no guard page, or no `rdi` setup in the trampoline each made the suite fail (13 variants, all detected; the register variants fail with a crash or a check, depending on which register). Not tested: AddressSanitizer (its fake stacks need annotations), other architectures, CET shadow stacks (hypothesis: user-space shadow stacks are opt-in and off for ordinary binaries), `MAP_NORESERVE` under `vm.overcommit_memory=2`.
 
-### Part B: blocked, with evidence
+### Part B: done (POSIX host primitives under the OS layer)
 
-Part B was not started in code. The reasons are checked facts, not time:
+Part B moves the Win32 calls of the OS layer behind a small interface and gives Linux its own side of it, so that the real scheduler, threads, fibers and virtual memory run on Linux with the System V context switch of part A. Decisions taken (approved): a neutral header with one implementation per platform (not `#if` inside the OS files); save states off on Linux; full copies instead of write tracking.
 
-1. **Nothing can be validated yet.** The only OS-layer test, `tests/os/os_test.cpp` (1395 lines, standard C++), needs `os_kernel.cpp`, `os_thread.cpp`, `os_memory.cpp`, `os_state.cpp` and `perf.cpp` to link. These contain Win32 calls (distinct API names, counted by scanning): `os_kernel.cpp` 20, `os_memory.cpp` 12, `os_thread.cpp` 5, `os_state.cpp` 12, `perf.cpp` 8. Until all of them have a Linux counterpart, no scheduler/thread/memory behaviour can be run, so a port would be unverifiable.
-2. **The Windows build cannot be compiled here.** `os_kernel.cpp`, `os_memory.cpp` and `os_thread.cpp` are Windows-only files; a seam (a primitives header with a Win32 side and a POSIX side) means editing them. A silent change of their Windows behaviour could not be detected in this environment.
-3. **Three decisions are yours** (below): the shape of the host primitives, the policy for the save-state gates, and the write-watch mechanism.
+**Files.**
 
-**The five `state_*` functions (read from the tree, not guessed).**
+| File | Class | What |
+|---|---|---|
+| `runtime/os/os_host.h` | shared | The interface (`osk::host`): time, threads, profiling, aligned heap, virtual memory. Only primitives with a caller |
+| `runtime/os/os_host_win32.cpp` | windows | The Win32 calls `os_kernel.cpp`, `os_memory.cpp`, `os_thread.cpp` and `perf.cpp` made directly before, moved unchanged. `host/build_snap.py` already compiles `runtime/os/*.cpp`, so it is picked up there with no change to the script |
+| `runtime/os/linux/os_host_posix.cpp` | linux | The POSIX side. In `runtime/os/linux/` so that the non-recursive Windows glob never compiles it |
+| `runtime/os/linux/os_state_off.cpp` | linux | Save states off (below). Stands where `os_state.cpp` stands on Windows |
+| `os_kernel.cpp`, `os_memory.cpp`, `os_thread.cpp`, `perf.cpp` | shared (were `windows`) | Consume `os_host.h`; no Win32 name is left in them (the scanner checks) |
+
+`tests/os/build.bat` and `tests/hle/run_tests.ps1` name `os_host_win32.cpp` now (they link `os_kernel`/`perf` and would not link without it). `tests/os/os_test.cpp` has a four-line `_aligned_malloc` shim for non-Windows hosts.
+
+**What each primitive does and where Windows and POSIX differ.**
+
+| Primitive | Win32 (unchanged) | POSIX |
+|---|---|---|
+| `counter`, `counter_frequency` | `QueryPerformanceCounter` / `Frequency` | `CLOCK_MONOTONIC`, 1e9 |
+| `sleep_precise_ns` | per-thread high-resolution waitable timer, `Sleep` fallback | `clock_nanosleep` on `CLOCK_MONOTONIC`, restarted from the remaining time after `EINTR` |
+| `sleep_ms`, `timers_init` | `Sleep`; `timeBeginPeriod(1)` | `clock_nanosleep`; nothing to request |
+| `thread_create_suspended` / `resume` / `join` | `_beginthreadex(..., STACK_SIZE_PARAM_IS_A_RESERVATION \| CREATE_SUSPENDED)`, `ResumeThread`, `WaitForSingleObject` + `CloseHandle` | `pthread_create` with the stack size rounded to a page; the thread waits on a mutex/condition variable until `thread_resume`; `pthread_join` and the handle freed. A thread that ends at once is still joined |
+| `set_current_thread_name` | `SetThreadDescription` (about 38 characters) | `pthread_setname_np`, cut to 15 characters (kernel limit) |
+| `yield` | `SwitchToThread` | `sched_yield` (best effort on both) |
+| `terminate_process` | `TerminateProcess` | `_exit(0)`: no `atexit`, other threads stopped |
+| `current_thread_cycles` | `QueryThreadCycleTime` (cycles) | `CLOCK_THREAD_CPUTIME_ID` (ns): the profiler column is a relative load, the unit differs |
+| `for_each_thread`, `thread_description` | Toolhelp snapshot + `GetThreadTimes`; `GetThreadDescription` | `/proc/self/task/<tid>/schedstat` (ns) or `stat` (ticks); `/proc/self/task/<tid>/comm` |
+| `heap_aligned_alloc` / `free` | `_aligned_malloc` / `_aligned_free` | `posix_memalign` / `free` |
+| virtual memory | `VirtualAlloc` / `VirtualFree` / `VirtualQuery`, `VirtualAlloc2` for aligned reserves | `mmap(PROT_NONE, MAP_NORESERVE)` + `mprotect` + `mmap(MAP_FIXED)` over the range; the state Windows keeps is kept by the host (below) |
+
+**Virtual memory is not `VirtualAlloc` with other names.** Windows knows the state of every page and refuses what does not fit; Linux does not. Three differences were handled on purpose, each with tests:
+
+1. *Commit state.* A reservation is `PROT_NONE`; commit is `mprotect(RW)` on it (zero-filled, lazily backed); decommit maps a fresh anonymous `PROT_NONE` range over it (contents dropped, later access faults, committing again gives zeros). `mem_count` needs to know how many bytes are committed (the VAMM counts only fresh pages), so the host keeps the set of committed ranges.
+2. *Reservations.* The host also keeps the reservations. A commit outside one fails with a non-transient error (Windows: `ERROR_INVALID_ADDRESS`; plain `mprotect` would say `ENOMEM`, which the VAMM reads as memory pressure and would retry for 5 s). A decommit or release of memory that is not a reservation is ignored, as `VirtualFree` fails there: `mmap(MAP_FIXED)` would otherwise replace unrelated memory. A release needs the base of a reservation and frees all of it.
+3. *Granularity.* Reservations are at least 64 KiB aligned (the Windows allocation granularity the guest sizes were tuned for); commit and decommit round outwards to 4 KiB pages like `VirtualAlloc`.
+
+Transient errors (retried by the VAMM with a back-off): `ENOMEM` and `EAGAIN` on POSIX, the commit-limit family on Windows. The fault injection `SNAP_FAULT_VAMM` uses `mem_injected_error()`.
+
+**Scheduler, threads, fibers.** `os_kernel.cpp` creates host threads with `thread_create_suspended(host_stack, host_entry, t)`, stores the handle under the scheduler lock, then resumes (the same order as before: a `DestroyThread` racing the start still joins). `os_thread.cpp` switches fibers with `snap_ctx_switch` and `ctx_new_fiber` from `runtime/os/linux/os_ctx_sysv.cpp` (part A) and re-reads the thread-local `Thread*` with `self_fresh()` after every switch (a fiber may resume on another host thread). No scheduler logic was changed or simplified. `os_test.cpp` was written for exactly this and runs unchanged on the Linux sources: threads, priorities and priority inheritance, cores and migration, mutexes, condition variables, events and multi-wait, TLS slots, fibers (4008 switches), the guest clock, the VAMM and the memory heap.
+
+**Save states are off on Linux.** `runtime/os/linux/os_state_off.cpp` defines what `os_state.cpp` defines on Windows, with a different meaning:
+
+- `g_sphase` is defined and nothing ever sets it, so it is 0 for the whole run. `os_kernel.cpp` calls the gates only when it is not 0.
+- `state_gate_wait` and `state_gate_acq` are tripwires: if one is ever reached the process stops with `state_gate_... reached on Linux` (`fatal`), it does not carry on as if a drain had happened.
+- `state_init` starts no thread. `SNAP_CHECKPOINT` and `SNAP_STATE_TEST` are logged as ignored.
+- `snap_state_request` refuses and logs (`save states are not supported on Linux`) and records the failed operation; `snap_state_info` says there is no state and nothing is busy; `snap_state_idle` is 1; `snap_state_count` is 0. No success is ever reported.
+- Windows is not affected: `os_state.cpp` is unchanged. The rest of the OS layer keeps its `state_*` hooks (`state_time_get`, `state_kick_cores`, the VAMM limbo, the fiber table); they are plain code that nothing calls without a save request.
+
+**Write watch and `SNAP_SYNC_FULL=1`.** `host::write_watch_supported()` is false on Linux. Guest reservations then never ask for write tracking, whatever the environment says; on Windows `SNAP_SYNC_FULL=1` or `SNAP_WRITE_WATCH=0` already dropped the flag. The decision is the pure function `host::write_watch_wanted(supported, SNAP_SYNC_FULL, SNAP_WRITE_WATCH)`, tested over its whole table, and `snap_os_write_watch_active()` (new `extern "C"`) reports the result. **The consumer is not changed here:** `nvn_vk.cpp` (`SyncPoolRange`) still decides from the two environment variables alone and is a `windows` file; the Linux NVN stage must also ask `snap_os_write_watch_active()` (or `write_watch_supported()`), otherwise it would use write tracking on memory that has none. The contract of `SyncPoolRange` (copy the whole range when nothing is tracked) is the existing one and is not touched. No soft-dirty and no `userfaultfd`: that evaluation stays for stage 7, with measurements under real NVN load.
+
+**Reference: the five `state_*` functions (read from the tree before part B).**
 
 | Function | Defined in | Called from, when | What it is |
 |---|---|---|---|
@@ -228,7 +272,7 @@ Part B was not started in code. The reasons are checked facts, not time:
 
 `g_sphase` (`os_state.cpp:51`) is written only inside `os_state.cpp` (lines 150, 205, 554, 563, 606, 708, 716) and nothing can set it without a save-state request (`snap_state_request`, from `ui_savestate.cpp` or the route/hotkey code). Invariant: while it is 0 both gates are inert, so with no way to request a save state the scheduler behaves exactly as on Windows in the idle phase. That is the only behaviour a first Linux version would have to preserve; the gates cannot be separated from the capture machinery without porting it, because `gate_block` and the unclean-grant counters live there. Consequence: any Linux definition of `g_sphase`, `state_gate_wait`, `state_gate_acq` and `state_init` would be a deliberate "save states disabled" configuration whose gates are unreachable, and `snap_state_request` and friends (called by the shared `ui_savestate.cpp`) would have to say that save states are unsupported instead of returning success. That is a policy decision, recorded as decision 2.
 
-**Write watch.** The consumer is `nvn_vk.cpp` (`SyncPoolRange`, lines 847-952): `GetWriteWatch(RESET, storage, size, ...)` per range, or one snapshot without reset per replay epoch. It already has a correct fallback: on failure it sets `ww = -1` and copies whole ranges; `SNAP_SYNC_FULL=1` or `SNAP_WRITE_WATCH=0` reserve without the flag and force that path. So full copies are semantically safe and only slower. Contract needed from a Linux mechanism: report the 4 KiB pages written in a range since the last query, with an optional reset of that range only, covering writes made by the kernel too (`fs_core.cpp:95` marks pages it filled from user mode, because on Windows kernel writes are not seen; a superset is harmless), and registration at reserve time.
+**Reference: write watch (facts gathered before part B).** The consumer is `nvn_vk.cpp` (`SyncPoolRange`, lines 847-952): `GetWriteWatch(RESET, storage, size, ...)` per range, or one snapshot without reset per replay epoch. It already has a correct fallback: on failure it sets `ww = -1` and copies whole ranges; `SNAP_SYNC_FULL=1` or `SNAP_WRITE_WATCH=0` reserve without the flag and force that path. So full copies are semantically safe and only slower. Contract needed from a Linux mechanism: report the 4 KiB pages written in a range since the last query, with an optional reset of that range only, covering writes made by the kernel too (`fs_core.cpp:95` marks pages it filled from user mode, because on Windows kernel writes are not seen; a superset is harmless), and registration at reserve time.
 
 Facts measured on this machine (kernel 7.3.3, inside the container, unprivileged; one probe program, not a general proof):
 
@@ -238,45 +282,56 @@ Facts measured on this machine (kernel 7.3.3, inside the container, unprivileged
 | Soft-dirty (`/proc/self/clear_refs`, pagemap bit 55) | yes (probe: only the written page reported) | **no**: clearing is per process, not per range | yes | needs `CONFIG_MEM_SOFT_DIRTY` | a pagemap read per query; a global reset would clear the state of every range and of any other user (checkpoint tools); cannot reproduce `GetWriteWatch(RESET)` per range |
 | `userfaultfd` write-protect, async (`UFFD_FEATURE_WP_ASYNC`, `UFFD_USER_MODE_ONLY`) + `PAGEMAP_SCAN` | yes (2 written pages reported at the right offsets; a kernel `read()` into a protected page succeeded, no `EFAULT`, and the page was reported) | **yes** (`PM_SCAN_WP_MATCHING` re-protects only the scanned range; the reset call itself was not exercised by the probe) | yes | kernel 6.7 or newer; unprivileged here (`vm.unprivileged_userfaultfd = 0`, `USER_MODE_ONLY` accepted); a seccomp profile may forbid it elsewhere | one ioctl per query, no fault-handler thread; the mapping must be registered at reserve time; the closest match to the Windows API. Not tested: behaviour with the NVN workload, `mprotect`/`munmap` of registered ranges, fork |
 
-No choice is made here. Both kernel-assisted options need the NVN layer (stage 7) to exercise them, so only the contract and the facts are recorded.
-
-**Decisions requested before part B can start:**
-
-1. **Host primitives.** How the OS layer reaches the host: a small neutral header (`os_host.h`) with `thread_start(entry, arg, reserved stack, suspended)`, `thread_resume`, `thread_yield`, `sleep`, `monotonic counter and frequency`, `set_priority`, `set_name`, `timer resolution request`, and the memory primitives (reserve, commit, decommit, release, query, aligned reserve), with the existing Win32 calls moved behind it unchanged and a POSIX side next to it. Alternative: `#if defined(_WIN32)` inside the three files. The first changes the Windows files in a reviewable, mechanical way; neither can be verified on Windows here.
-2. **State gates.** Accept a Linux "save states disabled" definition of `g_sphase`, the two gates and `state_init` (unreachable gates, honest "unsupported" answers from `snap_state_*`), or port `os_state.cpp` first.
-3. **Write watch.** Full copies first (existing, safe), then uffd-wp async with `PAGEMAP_SCAN` once the NVN stage can measure it, or soft-dirty (not recommended: no per-range reset).
-
-Suggested order once decided: (1) the primitives header and its POSIX tests (threads with reserved stacks, monotonic clock, sleep, memory reserve/commit/decommit), (2) `os_memory.cpp`, (3) `os_kernel.cpp` and `os_thread.cpp` against `os_ctx_sysv.cpp`, (4) the `state_*` decision, (5) `perf.cpp` or an explicit exclusion, (6) build `tests/os/os_test.cpp` on Linux and run it repeatedly.
+Part B chose full copies (above). Both kernel-assisted options need the NVN layer (stage 7) to exercise them, so only the contract and the facts are recorded.
 
 ### Tests of stage 3
 
-| ctest name | Result in this branch |
-|---|---|
-| `ctx_sysv`, `ctx_sysv_repeat` | pass |
-| `os_posix_header`, `os_neutral_interfaces`, `source_classification`, `source_selection`, `json_lite`, `portable_sources_compile` | pass (8 of 8 in the full run) |
+| ctest name | What it checks | Needs |
+|---|---|---|
+| `ctx_sysv`, `ctx_sysv_repeat` | Part A: the System V context switch alone (registers, MXCSR, x87, alignment, other thread, stack guard) | clang |
+| `os_host`, `os_host_repeat` | `tests/platform/os_host_test.cpp`: the POSIX primitives alone. Real accesses with `SIGSEGV` caught or observed in a child: a thread does not run before `thread_resume`, runs after it, is joined; a stack overflow faults at the reservation; names cut to 15 characters; the monotonic clock never goes back; sleeps last at least what was asked; `terminate_process` runs no `atexit` and ends with other threads running; reserved memory has no access, committed memory is read/write and zero-filled, decommitted memory faults and comes back zeroed; alignment of reservations; commit of overlapping and unaligned ranges; commit outside a reservation fails and is not transient; decommit and release of memory that is not a reservation leave it alone; a release frees the whole reservation; a 3000-step random commit/decommit sequence checked against a model and against real protections; 8 threads on one reservation; the policy table of `write_watch_wanted`; CPU time of another thread (a thread that burns 120 ms of CPU shows at least 80 ms, an idle one less than 40 ms) | clang |
+| `os_state_off` | `tests/platform/os_state_off_test.cpp`, linked with the real OS layer: `os_init` with `SNAP_CHECKPOINT` and `SNAP_STATE_TEST` set starts no thread (thread count unchanged, also after 1.5 s) and logs the refusal; `g_sphase` stays 0; the `snap_state_*` entry points refuse and report no state, nothing busy, no counter; a save and a load request change nothing but the recorded failure; both gates abort the process with their message (children) | clang |
+| `os_scheduler` | `tests/os/os_test.cpp` unchanged, on `os_kernel`, `os_thread`, `os_sync`, `os_memory`, `os_overrides`, `perf`, `os_ctx_sysv`, `os_host_posix`, `os_state_off`: 8038 checks (scheduler, threads, fibers, sync objects, VAMM, heap, clock) | clang |
+| `os_scheduler_vamm_fault` | The same program with `SNAP_FAULT_VAMM=0:7 OS_TEST_ONLY=vamm`: a VAMM retry back-off (127 ms) must not hold the virtual core, so a thread pinned to the same core runs during it | clang |
+| `os_scheduler_sync_full` | The same program with `SNAP_SYNC_FULL=1` | clang |
+| `os_posix_header`, `os_neutral_interfaces` | The OS interface headers (now including `os_host.h`) scan clean and do not collide with POSIX macros | clang, Python |
+| `source_classification`, `source_selection`, `json_lite`, `portable_sources_compile` | Stage 1 and 2 tests; the manifest has 4 more `shared` and 3 more `linux`/`windows` entries (see `cmake/source_manifest.txt`) | as before |
 
-Not run: the Windows build, the batch-built suites (`tests/os/os_test.cpp` and others), the game. `os_test` on Linux is blocked by part B.
+**Do the tests detect a wrong implementation?** Each of these was applied to a copy of the sources and the relevant test run (all were detected, each by the check named): decommit that does not drop the contents (`zero`); decommit and release without the reservation check (memory outside the reservation was overwritten or unmapped); commit without the reservation check; commit errors always transient; a thread that starts running before `thread_resume`; a sleep of half the time; alignment below 64 KiB; a `mem_count` that ignores holes; a stack not sized to the request; a `thread_join` that only detaches; `sleep_ms` that does not sleep (`os_scheduler_vamm_fault` fails: the retry ends before the second thread starts, so nothing runs during the back-off); a monotonic clock that jumps back (`os_test` "ticks went backwards"); a gate that returns instead of aborting; a `state_init` that starts a thread; a save request that reports success. Not detected, by design: `yield` that does nothing (a best-effort hint on both platforms; no test can tell it from a scheduler that had nothing else to run).
+
+Run on this machine (Linux x86-64 container, kernel 7.3.3, clang 21): the full ctest, 14 of 14 pass; `os_test` 10 more times in a row, 10 of 10 with 8038 checks and 0 failed.
+
+Not run: the Windows build and every Windows-side test (`tests/os/build.bat`, `tests/hle/run_tests.ps1`, the game). The Windows files were changed (below) and have only been read, not compiled.
+
+### Windows side: what was inspected and what could not be validated
+
+Read, against the code each function replaced (git `HEAD` of `os_kernel.cpp`, `os_memory.cpp`, `os_thread.cpp`, `perf.cpp`): the arguments, the order of calls, the error handling and the thread-start sequence of every Win32 call that moved into `os_host_win32.cpp` (`_beginthreadex` flags and stack clamp, the high-resolution timer loop, `timeBeginPeriod`, `SetThreadDescription` and its 39-character name, Toolhelp sampling, `VirtualAlloc2` with the 16-try fallback, the commit-limit error set, `MEM_DECOMMIT` of the whole region, `VirtualFree(MEM_RELEASE)` with size 0, `VirtualQuery` page counting). `os_svc` case 20 now reserves 4 KiB at 64 KiB alignment and commits it, where it used to reserve and commit in one `VirtualAlloc`; the result is the same one zeroed read/write page for the process lifetime. The shared files lost `<windows.h>`; the headers of the C and C++ functions they use are included explicitly (`<cstdio>` was added to `os_thread.cpp` for `fflush`).
+
+**Not validated, pending CI or a maintainer with Windows:** that the five touched files and `os_host_win32.cpp` compile and link with the Windows toolchain; that `tests/os/build.bat` and `tests/hle/run_tests.ps1` (which now name `os_host_win32.cpp`) still build; `os_test.exe` on Windows; the game. `host/build_snap.py` was not edited.
 
 ## Known limits
 
 Observed:
 
-- The game does not build on Linux. The 128 `windows` files need later stages (see below); there is no Linux runner, no Vulkan/SDL3 backend and no OS-layer port in this branch.
-- (Stage 1 limit, fixed in stage 2) `runtime/os/os_sync.cpp`, `os_overrides.cpp` and `cheat_heap.cpp` did not compile on Linux because `osk::R_OK` collided with the POSIX `R_OK` macro. See "Stage 2" below; the three files are `shared` now.
-- No Windows toolchain exists in this environment. The Windows build was **not** run: it is unchanged by construction (`host/build_snap.py` was not edited; the only shared files touched are the two above).
-- Existing C++ test programs (`tests/hle`, `tests/os`, `tests/audio`, `tests/nvn`) are built by Windows batch files from `windows` sources and were not run here.
-- The `linux_nvn_host*` tests (which lost focus under Wayland in the earlier port) do not exist in this branch yet; they belong to the Vulkan stage and must be kept with their coverage when they arrive.
+- The game does not build on Linux. The 128-odd `windows` files still need later stages; there is no Linux runner and no Vulkan/SDL3 backend in this branch. What runs on Linux today is the OS layer (scheduler, threads, fibers, VAMM and heap) under its own test program, not the game.
+- Save states do not exist on Linux (`os_state_off.cpp`): a request is refused and says so. The UI and the route code that call `snap_state_*` get honest answers.
+- Write tracking does not exist on Linux: guest reservations are plain and `runtime/nvn/nvn_vk.cpp` must copy whole ranges. `nvn_vk.cpp` does not know that yet (stage 7 has to ask `snap_os_write_watch_active()`).
+- POSIX differences that are documented and not hidden: `yield` is `sched_yield`; thread CPU times come from `schedstat` (or `stat`, 10 ms ticks, where the kernel has no `schedstat`); the profiler's "mcycles" column is nanoseconds of CPU time on Linux; thread names are cut to 15 characters.
+- Virtual memory limits that Windows does not have: every commit/decommit that splits a mapping adds a kernel mapping, and a process may have `vm.max_map_count` of them (65530 by default). Heavy fragmentation of a reservation could reach it; the error is `ENOMEM`, which the VAMM treats as transient and retries for the configured time before failing. Under `vm.overcommit_memory=2` (strict accounting) `MAP_NORESERVE` is ignored and large reservations may be refused. Neither was exercised beyond the random-sequence test.
+- `os_scheduler` pinned to one CPU (`taskset -c 0`) is not a supported condition: no check failed, but the run did not finish in 240 s (`sched yield any` took 70 s instead of 80 ms; the stress and migration tests also took several seconds longer). The test spins and yields waiting for other threads, and `sched_yield` on one CPU hands the CPU over less readily than `SwitchToThread`. This is a hypothesis; it was not investigated, and it was not run on Windows for comparison. `os_host_test` passes on one CPU.
+- No Windows toolchain exists in this environment: nothing Windows was built or run. The Windows-side changes are listed under "Windows side".
+- The `linux_nvn_host*` tests (which lost focus under Wayland in the earlier port) do not exist in this branch yet; they belong to the Vulkan stage and must be kept with their coverage when they arrive. None of the stage 3 tests needs a window, a GPU or focus.
 
 Hypotheses (not checked):
 
-- The two shared-code edits behave the same on the Windows toolchain.
+- The shared-code edits and the five Windows-side file edits behave the same on the Windows toolchain.
 - Classes will shift as stages land; `windows` is expected to shrink.
 
 ## What the next stages depend on
 
 | Stage | Needs from this one |
 |---|---|
-| 3 OS layer (`os_ctx`, `os_state`) | `runtime/os/*` entries to move from `windows` once ported; the contracts in "Stage 2" (`os_ctx`, memory, scheduler threads) |
-| 4 TLS | `host/loader.cpp` (`windows`); the TLS contract in "Stage 2" |
+| 3 OS layer (`os_ctx`, `os_state`) | Done in parts A and B. Left in `runtime/os`: `hostprof.cpp` and `sampler.cpp` (profilers, `windows`), `os_state.cpp` (Windows only; Linux has `os_state_off.cpp`) |
+| 4 TLS | `host/loader.cpp` (`windows`); the TLS contract in "Stage 2"; `host::heap_aligned_alloc` for thread blocks, `host::mem_reserve`/`mem_commit` for stacks |
 | 5 Linux runner | A `linux` class for the new files |
-| 7 Vulkan backend | `runtime/nvn/*` (most are `windows`: `VK_USE_PLATFORM_WIN32_KHR` comes in through `nvn_internal.h`) |
+| 7 Vulkan backend | `runtime/nvn/*` (most are `windows`: `VK_USE_PLATFORM_WIN32_KHR` comes in through `nvn_internal.h`); `SyncPoolRange` must consult `snap_os_write_watch_active()` (full copies when 0); the uffd-wp evaluation, with measurements |

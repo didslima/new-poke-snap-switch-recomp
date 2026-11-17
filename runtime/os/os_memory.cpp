@@ -1,18 +1,15 @@
 // nn::os memory as host overrides (written for this project): the virtual address memory manager (VAMM:
 // AllocateAddressRegion / AllocateMemoryPages / ...) and the memory heap (SetMemoryHeapSize / AllocateMemoryBlock).
-// Guest addresses are host addresses, so both are thin layers over VirtualAlloc. The sdk implementation keeps its state
+// Guest addresses are host addresses, so both are thin layers over the host's virtual memory (osk::host::mem_*). The sdk implementation keeps its state
 // in OsResourceManager (GOT sdk+0xc88838), which nothing constructs on the host; every entry point that reads it
 // is replaced here or in os_thread.cpp (see docs/horizon-os.md, "boot").
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 
+#include "os_host.h"
 #include "os_internal.h"
 
 using namespace osk;
@@ -29,11 +26,9 @@ constexpr uint64_t HEAP_RESERVE = 16ull << 30;     // address space reserved for
 // [perf] Guest reservations carry MEM_WRITE_WATCH so the NVN layer can copy only the pages the game wrote into its mirrored
 // buffers (GetWriteWatch, runtime/nvn/nvn_vk.cpp SyncPoolRange; perf pass 4). The flag can only be set at reserve time.
 // SNAP_SYNC_FULL=1 or SNAP_WRITE_WATCH=0 reserve without it (old behavior; the NVN layer then copies whole ranges).
-DWORD ww_flag() {
-    static const DWORD f = [] {
-        const char *a = getenv("SNAP_SYNC_FULL"), *b = getenv("SNAP_WRITE_WATCH");
-        return ((a && *a == '1') || (b && *b == '0')) ? (DWORD)0 : (DWORD)MEM_WRITE_WATCH;
-    }();
+// Where the host cannot track writes (host::write_watch_supported() is false, the case on Linux for now) reservations are always plain.
+bool ww_flag() {
+    static const bool f = host::write_watch_wanted(host::write_watch_supported(), getenv("SNAP_SYNC_FULL"), getenv("SNAP_WRITE_WATCH"));
     return f;
 }
 
@@ -71,21 +66,20 @@ uint64_t retry_ms() {
     static const uint64_t v = [] { const char *e = getenv("SNAP_VAMM_RETRY_MS"); return e && *e ? strtoull(e, nullptr, 0) : 5000ull; }();
     return v;
 }
-bool fault_now() {
+bool fault_now(host::MemErr *err = nullptr) {
     static long long s = 0, n = 0;
     static std::atomic<long long> hits{0};
     static const bool on = [] { const char *e = getenv("SNAP_FAULT_VAMM"); return e && sscanf(e, "%lld:%lld", &s, &n) == 2 && n > 0; }();
     if (!on) return false;
-    static const ULONGLONG t0 = GetTickCount64();
-    if (GetTickCount64() - t0 < (ULONGLONG)s * 1000) return false;
+    static const int64_t t0 = host::counter();
+    if (host::counter() - t0 < s * host::counter_frequency()) return false;
     if (hits.fetch_add(1) >= n) return false;
-    SetLastError(ERROR_COMMITMENT_LIMIT);
+    const host::MemErr e = host::mem_injected_error();
+    if (err) *err = e;
     return true;
 }
-bool vamm_wait(const char *what, uint64_t size, uint64_t &waited, DWORD err) {   // true = retry after a pause
-    const bool transient = err == ERROR_COMMITMENT_LIMIT || err == ERROR_NOT_ENOUGH_MEMORY || err == ERROR_OUTOFMEMORY ||
-                           err == ERROR_NO_SYSTEM_RESOURCES || err == ERROR_COMMITMENT_MINIMUM;
-    const uint64_t lim = transient ? retry_ms() : 0;
+bool vamm_wait(const char *what, uint64_t size, uint64_t &waited, const host::MemErr &err) {   // true = retry after a pause
+    const uint64_t lim = err.transient ? retry_ms() : 0;
     if (waited == 0) {
         uint64_t res, com;
         size_t nreg;
@@ -93,7 +87,7 @@ bool vamm_wait(const char *what, uint64_t size, uint64_t &waited, DWORD err) {  
             std::lock_guard<std::mutex> lk(g_mm);
             res = g_reserved_total, com = g_committed_total, nreg = g_regions.size();
         }
-        fprintf(stderr, "[os-mem] %s(%#llx) failed: error %lu (reserved %#llx, committed %#llx, %zu regions)%s\n", what, (unsigned long long)size, err,
+        fprintf(stderr, "[os-mem] %s(%#llx) failed: error %lu (reserved %#llx, committed %#llx, %zu regions)%s\n", what, (unsigned long long)size, err.code,
                 (unsigned long long)res, (unsigned long long)com, nreg, lim ? ": retrying" : "");
     }
     if (waited >= lim) {
@@ -103,7 +97,7 @@ bool vamm_wait(const char *what, uint64_t size, uint64_t &waited, DWORD err) {  
     static thread_local uint64_t step = 1;
     if (waited == 0) step = 1;
     os_io_begin();   // the backoff does not hold a virtual core (finding 9; SNAP_SCHED_LEGACY=hostblock keeps it)
-    Sleep((DWORD)step);
+    host::sleep_ms((unsigned)step);
     os_io_end();
     waited += step;
     step = std::min<uint64_t>(step * 2, 100);
@@ -122,39 +116,20 @@ uint64_t vamm_align_for(uint64_t size) {
     if (size < (1ull << 30)) return 32ull << 20;
     return 1ull << 30;
 }
-struct VaAddrReq { PVOID lo, hi; SIZE_T align; };
-struct VaExtParam { DWORD64 type; PVOID ptr; };   // MEM_EXTENDED_PARAMETER: type 1 = MemExtendedParameterAddressRequirements
-void *reserve_aligned(uint64_t size, uint64_t align) {
-    const DWORD flags = MEM_RESERVE | ww_flag();
-    if (align <= (64ull << 10)) return VirtualAlloc(nullptr, size, flags, PAGE_NOACCESS);
-    typedef PVOID (WINAPI *VA2)(HANDLE, PVOID, SIZE_T, ULONG, ULONG, VaExtParam *, ULONG);
-    static const VA2 va2 = [] { HMODULE m = GetModuleHandleA("kernelbase.dll"); return m ? (VA2)(void *)GetProcAddress(m, "VirtualAlloc2") : nullptr; }();
-    if (va2) {
-        VaAddrReq req = {nullptr, nullptr, (SIZE_T)align};
-        VaExtParam ep = {1, &req};
-        return va2(GetCurrentProcess(), nullptr, size, flags, PAGE_NOACCESS, &ep, 1);
-    }
-    for (int tries = 0; tries < 16; tries++) {   // no VirtualAlloc2: reserve size+align, release, re-reserve at the aligned address
-        void *q = VirtualAlloc(nullptr, size + align, MEM_RESERVE, PAGE_NOACCESS);
-        if (!q) return nullptr;
-        const uint64_t at = ((uint64_t)(uintptr_t)q + align - 1) & ~(align - 1);
-        VirtualFree(q, 0, MEM_RELEASE);
-        if (void *p = VirtualAlloc((void *)(uintptr_t)at, size, flags, PAGE_NOACCESS)) return p;
-    }
-    return nullptr;
-}
+void *reserve_aligned(uint64_t size, uint64_t align, host::MemErr *err) { return host::mem_reserve(size, align, ww_flag(), err); }
 uint32_t vamm_alloc_region(uint64_t out, uint64_t size) {
     if (!size) return R_INVALID_RANGE;
     size = page_up(size);
     void *p = nullptr;
     const uint64_t align = vamm_align_for(size);
     for (uint64_t waited = 0;;) {
-        p = fault_now() ? nullptr : reserve_aligned(size, align);
+        host::MemErr err;
+        p = fault_now(&err) ? nullptr : reserve_aligned(size, align, &err);
         if (p) {
             if (waited) fprintf(stderr, "[os-mem] AllocateAddressRegion(%#llx) succeeded after %llu ms\n", (unsigned long long)size, (unsigned long long)waited);
             break;
         }
-        if (!vamm_wait("AllocateAddressRegion", size, waited, GetLastError())) return R_OUT_OF_ADDRESS_SPACE;
+        if (!vamm_wait("AllocateAddressRegion", size, waited, err)) return R_OUT_OF_ADDRESS_SPACE;
     }
     std::lock_guard<std::mutex> lk(g_mm);
     g_regions[(uint64_t)(uintptr_t)p] = Region{size, 0};
@@ -166,27 +141,20 @@ uint32_t vamm_alloc_pages(uint64_t a, uint64_t size) {
     if (!size || (a & (PAGE - 1))) return R_INVALID_RANGE;
     size = page_up(size);
     for (uint64_t waited = 0;;) {
-        DWORD err = 0;
+        host::MemErr err;
         {
             std::lock_guard<std::mutex> lk(g_mm);
             Region *r = region_of(a, size);
             if (!r) return R_INVALID_RANGE;
             // Count only pages that were not committed yet (committing twice is legal and keeps the contents).
-            uint64_t fresh = 0;
-            for (uint64_t p = a; p < a + size;) {
-                MEMORY_BASIC_INFORMATION mi;
-                if (!VirtualQuery((void *)(uintptr_t)p, &mi, sizeof mi)) break;
-                uint64_t end = std::min<uint64_t>(a + size, (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize);
-                if (mi.State != MEM_COMMIT) fresh += end - p;
-                p = end;
-            }
-            if (!fault_now() && VirtualAlloc((void *)(uintptr_t)a, size, MEM_COMMIT, PAGE_READWRITE)) {
+            size_t have = 0, fresh = 0;
+            host::mem_count((void *)(uintptr_t)a, size, &have, &fresh);
+            if (!fault_now(&err) && host::mem_commit((void *)(uintptr_t)a, size, &err)) {
                 r->committed += fresh;
                 g_committed_total += fresh;
                 if (waited) fprintf(stderr, "[os-mem] AllocateMemoryPages(%#llx) succeeded after %llu ms\n", (unsigned long long)size, (unsigned long long)waited);
                 return R_SUCCESS;
             }
-            err = GetLastError();
         }
         if (!vamm_wait("AllocateMemoryPages", size, waited, err)) return R_OUT_OF_MEMORY;   // waits without g_mm: frees can proceed
     }
@@ -197,15 +165,9 @@ uint32_t vamm_free_pages(uint64_t a, uint64_t size) {
     std::lock_guard<std::mutex> lk(g_mm);
     Region *r = region_of(a, size);
     if (!r) return R_INVALID_RANGE;
-    uint64_t gone = 0;
-    for (uint64_t p = a; p < a + size;) {
-        MEMORY_BASIC_INFORMATION mi;
-        if (!VirtualQuery((void *)(uintptr_t)p, &mi, sizeof mi)) break;
-        uint64_t end = std::min<uint64_t>(a + size, (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize);
-        if (mi.State == MEM_COMMIT) gone += end - p;
-        p = end;
-    }
-    VirtualFree((void *)(uintptr_t)a, size, MEM_DECOMMIT);
+    size_t gone = 0, rest = 0;
+    host::mem_count((void *)(uintptr_t)a, size, &gone, &rest);
+    host::mem_decommit((void *)(uintptr_t)a, size);
     r->committed -= std::min(r->committed, gone);
     g_committed_total -= std::min(g_committed_total, gone);
     return R_SUCCESS;
@@ -223,11 +185,11 @@ uint32_t vamm_free_region(uint64_t a) {
         return R_INVALID_RANGE;
     }
     if (g_limbo_on && g_limbo_bytes + it->second.size <= LIMBO_MAX) {
-        VirtualFree((void *)(uintptr_t)a, 0, MEM_DECOMMIT);
+        host::mem_decommit((void *)(uintptr_t)a, it->second.size);
         g_limbo[a] = it->second.size;
         g_limbo_bytes += it->second.size;
     } else {
-        VirtualFree((void *)(uintptr_t)a, 0, MEM_RELEASE);
+        host::mem_release((void *)(uintptr_t)a, it->second.size);
     }
     g_reserved_total -= it->second.size;
     g_committed_total -= std::min(g_committed_total, it->second.committed);
@@ -287,19 +249,19 @@ uint32_t heap_set_size(uint64_t size) {
     if (size % HEAP_UNIT || size > HEAP_RESERVE) return R_INVALID_RANGE;
     std::lock_guard<std::mutex> lk(g_mm);
     if (!g_heap_base) {
-        void *p = VirtualAlloc(nullptr, HEAP_RESERVE, MEM_RESERVE | ww_flag(), PAGE_NOACCESS);
+        void *p = host::mem_reserve(HEAP_RESERVE, PAGE, ww_flag(), nullptr);
         if (!p) return R_OUT_OF_ADDRESS_SPACE;
         g_heap_base = (uint64_t)(uintptr_t)p;
     }
     if (size > g_heap_size) {
-        if (!VirtualAlloc((void *)(uintptr_t)(g_heap_base + g_heap_size), size - g_heap_size, MEM_COMMIT, PAGE_READWRITE))
+        if (!host::mem_commit((void *)(uintptr_t)(g_heap_base + g_heap_size), size - g_heap_size, nullptr))
             return R_OUT_OF_MEMORY;
     } else if (size < g_heap_size) {
         if (!g_heap_blocks.empty()) {
             auto last = std::prev(g_heap_blocks.end());
             if (last->first + last->second > g_heap_base + size) return R_INVALID_STATE;   // blocks still in use
         }
-        VirtualFree((void *)(uintptr_t)(g_heap_base + size), g_heap_size - size, MEM_DECOMMIT);
+        host::mem_decommit((void *)(uintptr_t)(g_heap_base + size), g_heap_size - size);
     }
     g_heap_size = size;
     return R_SUCCESS;
@@ -342,7 +304,7 @@ uint64_t g_alias_base = 0, g_stack_base = 0;
 
 uint64_t reserve_once(uint64_t &slot, uint64_t size) {   // under g_mm
     if (!slot) {
-        void *p = VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS);
+        void *p = host::mem_reserve(size, PAGE, false, nullptr);
         if (p) slot = (uint64_t)(uintptr_t)p;
     }
     return slot;
@@ -361,11 +323,16 @@ extern "C" void snap_os_mem_stats(uint64_t *out) {
     out[5] = b;
 }
 
+// 1 when the guest reservations carry write tracking, 0 when the NVN layer has to copy whole ranges: SNAP_SYNC_FULL=1, SNAP_WRITE_WATCH=0, or a
+// host that cannot track writes (Linux for now). runtime/nvn/nvn_vk.cpp (SyncPoolRange) decides from the two environment variables alone today;
+// the Linux NVN stage has to ask this function as well, or it would call GetWriteWatch's replacement on memory that is not tracked.
+extern "C" int snap_os_write_watch_active() { return ww_flag() ? 1 : 0; }
+
 namespace osk {
 uint32_t mem_get_info(uint32_t type, uint64_t *out) {
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    uint64_t lo = (uint64_t)(uintptr_t)si.lpMinimumApplicationAddress, hi = (uint64_t)(uintptr_t)si.lpMaximumApplicationAddress + 1;
+    uint64_t lo = 0, hi = 0;
+    host::mem_app_range(&lo, &hi);
+    hi += 1;
     std::lock_guard<std::mutex> lk(g_mm);
     uint64_t used = g_heap_size + g_committed_total, sysused = std::min(g_committed_total, SYSTEM_RESOURCE);
     uint64_t v = 0;
@@ -374,7 +341,7 @@ uint32_t mem_get_info(uint32_t type, uint64_t *out) {
     case 3: v = ALIAS_RESERVE; break;
     case 4:
         if (!g_heap_base) {
-            void *p = VirtualAlloc(nullptr, HEAP_RESERVE, MEM_RESERVE | ww_flag(), PAGE_NOACCESS);
+            void *p = host::mem_reserve(HEAP_RESERVE, PAGE, ww_flag(), nullptr);
             if (!p) return R_OUT_OF_ADDRESS_SPACE;
             g_heap_base = (uint64_t)(uintptr_t)p;
         }
@@ -436,7 +403,7 @@ void state_mem_save(MemBook &m) {   // save states
 }
 void state_mem_arm() {   // a state was just saved: regions released from now on stay reserved; those kept for an older state are let go
     std::lock_guard<std::mutex> lk(g_mm);
-    for (auto &kv : g_limbo) VirtualFree((void *)(uintptr_t)kv.first, 0, MEM_RELEASE);
+    for (auto &kv : g_limbo) host::mem_release((void *)(uintptr_t)kv.first, kv.second);
     g_limbo.clear();
     g_limbo_bytes = 0;
     g_limbo_on = true;
@@ -461,15 +428,15 @@ std::string state_mem_check(const MemBook &m) {
                     continue;
                 }
             }
-            MEMORY_BASIC_INFORMATION mi;
-            if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi) || mi.State != MEM_FREE) {
-                char b[300];
-                snprintf(b, sizeof b, "the address of a released VAMM region is in use (region %llx+%llx; at %llx: state %lx type %lx alloc base %llx size %llx; kept %zu regions %llu MiB, %s)", (unsigned long long)kv.first,
-                         (unsigned long long)kv.second.first, (unsigned long long)a, (unsigned long)mi.State, (unsigned long)mi.Type, (unsigned long long)(uintptr_t)mi.AllocationBase,
-                         (unsigned long long)mi.RegionSize, g_limbo.size(), (unsigned long long)(g_limbo_bytes >> 20), g_limbo_on ? "armed" : "not armed");
+            uint64_t free_end = 0;
+            char detail[160];
+            if (!host::mem_find_free((void *)(uintptr_t)a, &free_end, detail, sizeof detail)) {
+                char b[400];
+                snprintf(b, sizeof b, "the address of a released VAMM region is in use (region %llx+%llx; at %llx: %s; kept %zu regions %llu MiB, %s)", (unsigned long long)kv.first,
+                         (unsigned long long)kv.second.first, (unsigned long long)a, detail, g_limbo.size(), (unsigned long long)(g_limbo_bytes >> 20), g_limbo_on ? "armed" : "not armed");
                 return b;
             }
-            a = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+            a = free_end;
         }
     }
     return "";
@@ -477,7 +444,7 @@ std::string state_mem_check(const MemBook &m) {
 std::string state_mem_restore(const MemBook &m) {
     std::lock_guard<std::mutex> lk(g_mm);
     for (auto &kv : g_regions)   // made since the save: the restored world does not know them
-        if (!m.regions.count(kv.first)) VirtualFree((void *)(uintptr_t)kv.first, 0, MEM_RELEASE);
+        if (!m.regions.count(kv.first)) host::mem_release((void *)(uintptr_t)kv.first, kv.second.size);
     for (auto &kv : m.regions) {
         if (g_regions.count(kv.first)) continue;
         auto lb = g_limbo.find(kv.first);
@@ -486,10 +453,10 @@ std::string state_mem_restore(const MemBook &m) {
             g_limbo.erase(lb);
             continue;
         }
-        if (!VirtualAlloc((void *)(uintptr_t)kv.first, kv.second.first, MEM_RESERVE | ww_flag(), PAGE_NOACCESS))
+        if (!host::mem_reserve_at((void *)(uintptr_t)kv.first, kv.second.first, ww_flag()))
             return "cannot re-reserve a released VAMM region";
     }
-    for (auto &kv : g_limbo) VirtualFree((void *)(uintptr_t)kv.first, 0, MEM_RELEASE);   // freed since the save and never in it
+    for (auto &kv : g_limbo) host::mem_release((void *)(uintptr_t)kv.first, kv.second);   // freed since the save and never in it
     g_limbo.clear();
     g_limbo_bytes = 0;
     g_regions.clear();

@@ -56,6 +56,35 @@ if(UNIX AND NOT APPLE)
   add_test(NAME ctx_sysv COMMAND snap_ctx_sysv_test)
   add_test(NAME ctx_sysv_repeat COMMAND snap_ctx_sysv_test --repeat 30)
   set_tests_properties(ctx_sysv ctx_sysv_repeat PROPERTIES TIMEOUT 300)
+
+  # Stage 3, part B: the OS layer on the POSIX host primitives and the System V context switch. The OS-layer sources are the manifest's
+  # shared and linux files under runtime/os (nothing is globbed), minus the two that no OS test needs (the ABI table and the cheat heap).
+  set(SNAP_OS_LAYER_SOURCES ${SNAP_LINUX_SOURCES})
+  list(FILTER SNAP_OS_LAYER_SOURCES INCLUDE REGEX "^runtime/os/")
+  list(FILTER SNAP_OS_LAYER_SOURCES EXCLUDE REGEX "/(abi|cheat_heap)\\.cpp$")
+  function(snap_os_test target)
+    add_executable(${target} ${ARGN})
+    target_include_directories(${target} PRIVATE runtime runtime/os)
+    target_compile_features(${target} PRIVATE cxx_std_20)
+    target_compile_options(${target} PRIVATE -O2 -g -fno-strict-aliasing -march=x86-64-v3)
+    target_link_libraries(${target} PRIVATE Threads::Threads)
+  endfunction()
+
+  # the POSIX host primitives alone (threads, clocks, virtual memory, profiling): no scheduler, no guest
+  snap_os_test(snap_os_host_test tests/platform/os_host_test.cpp runtime/os/linux/os_host_posix.cpp)
+  add_test(NAME os_host COMMAND snap_os_host_test)
+  add_test(NAME os_host_repeat COMMAND snap_os_host_test --repeat 20)
+
+  # save states are off: the real OS layer with runtime/os/linux/os_state_off.cpp
+  snap_os_test(snap_os_state_off_test tests/platform/os_state_off_test.cpp ${SNAP_OS_LAYER_SOURCES})
+  add_test(NAME os_state_off COMMAND snap_os_state_off_test)
+
+  # the scheduler, threads, fibers, sync objects and the VAMM/heap, as tests/os/os_test.cpp has always tested them, on the Linux sources
+  snap_os_test(snap_os_test tests/os/os_test.cpp ${SNAP_OS_LAYER_SOURCES})
+  add_test(NAME os_scheduler COMMAND snap_os_test)
+  add_test(NAME os_scheduler_vamm_fault COMMAND ${CMAKE_COMMAND} -E env SNAP_FAULT_VAMM=0:7 OS_TEST_ONLY=vamm $<TARGET_FILE:snap_os_test>)
+  add_test(NAME os_scheduler_sync_full COMMAND ${CMAKE_COMMAND} -E env SNAP_SYNC_FULL=1 $<TARGET_FILE:snap_os_test>)
+  set_tests_properties(os_host_repeat os_scheduler os_scheduler_vamm_fault os_scheduler_sync_full os_state_off PROPERTIES TIMEOUT 600)
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.
