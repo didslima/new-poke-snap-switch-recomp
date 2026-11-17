@@ -1,13 +1,13 @@
 // Host hooks for the exception and longjmp resume mechanism, plus the libc leaf overrides (project code, ours).
 // Design: docs/runtime-boundary.md sections 2 and 3. The functions below replace guest functions by address
 // (recomp/snap_gen.py SDK_HOOKS): the generated f_<addr> of each one just calls it.
-#include <windows.h>
-
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 #include "loader.h"
+#include "os/os_host.h"
 
 using namespace loader;
 
@@ -80,36 +80,35 @@ static void *gp(uint64_t v) { return (void *)(uintptr_t)v; }
 // Debug: SNAP_MEMLOG=1 keeps a ring of libc memory events; crash_filter calls snap_memlog_find(addr) to list those that touched it.
 struct MemEv { uint64_t addr, size, lr; uint32_t tid; char kind; };
 static MemEv g_memring[1 << 20];
-static volatile LONG64 g_memn;
+static std::atomic<int64_t> g_memn{0};
 static bool g_memlog = getenv("SNAP_MEMLOG") != nullptr;
 static inline void memev(char k, uint64_t a, uint64_t sz, uint64_t lr) {
     if (!g_memlog) return;
-    LONG64 i = InterlockedIncrement64(&g_memn) - 1;
-    g_memring[i & ((1 << 20) - 1)] = MemEv{a, sz, lr, GetCurrentThreadId(), k};
+    int64_t i = g_memn.fetch_add(1);
+    g_memring[i & ((1 << 20) - 1)] = MemEv{a, sz, lr, osk::host::thread_id(), k};
 }
 void snap_memev(char k, uint64_t a, uint64_t sz, uint64_t lr) { memev(k, a, sz, lr); }
 void snap_memlog_find(uint64_t addr) {
     if (!g_memlog) return;
-    LONG64 n = g_memn;
+    int64_t n = g_memn.load();
     fprintf(stderr, "  memlog: %lld events\n", (long long)n);
-    for (LONG64 i = n > (1 << 20) ? n - (1 << 20) : 0; i < n; i++) {
+    for (int64_t i = n > (1 << 20) ? n - (1 << 20) : 0; i < n; i++) {
         const MemEv &e = g_memring[i & ((1 << 20) - 1)];
         if (addr >= e.addr && addr < e.addr + (e.size ? e.size : 1))
             fprintf(stderr, "  memev#%lld %c addr=%#llx size=%#llx tid=%u lr=%s\n", (long long)i, e.kind, (unsigned long long)e.addr, (unsigned long long)e.size, e.tid, symbolize(e.lr).c_str());
     }
 }
 
-static void h_malloc(Cpu *c) { uint64_t sz = c->x[0]; c->x[0] = (uint64_t)_aligned_malloc((size_t)c->x[0] ? (size_t)c->x[0] : 1, 16); memev('m', c->x[0], sz, c->x[30]); }
-static void h_free(Cpu *c) { memev('f', c->x[0], 0, c->x[30]); _aligned_free(gp(c->x[0])); }
+static void h_malloc(Cpu *c) { uint64_t sz = c->x[0]; c->x[0] = (uint64_t)osk::host::heap_aligned_alloc((size_t)c->x[0] ? (size_t)c->x[0] : 1, 16); memev('m', c->x[0], sz, c->x[30]); }
+static void h_free(Cpu *c) { memev('f', c->x[0], 0, c->x[30]); osk::host::heap_aligned_free(gp(c->x[0])); }
 static void h_calloc(Cpu *c) {
     size_t n = (size_t)(c->x[0] * c->x[1]);
-    void *p = _aligned_malloc(n ? n : 1, 16);
+    void *p = osk::host::heap_aligned_alloc(n ? n : 1, 16);
     if (p) memset(p, 0, n);
     c->x[0] = (uint64_t)p;
     memev('c', (uint64_t)p, n, c->x[30]);
 }
-static void h_realloc(Cpu *c) { c->x[0] = (uint64_t)_aligned_realloc(gp(c->x[0]), (size_t)c->x[1] ? (size_t)c->x[1] : 1, 16); }
-static void h_aligned_alloc(Cpu *c) { uint64_t sz = c->x[1], lr = c->x[30]; c->x[0] = (uint64_t)_aligned_malloc((size_t)c->x[1] ? (size_t)c->x[1] : 1, (size_t)c->x[0]); memev('a', c->x[0], sz, lr); }
+static void h_aligned_alloc(Cpu *c) { uint64_t sz = c->x[1], lr = c->x[30]; c->x[0] = (uint64_t)osk::host::heap_aligned_alloc((size_t)c->x[1] ? (size_t)c->x[1] : 1, (size_t)c->x[0]); memev('a', c->x[0], sz, lr); }
 static void h_memalign(Cpu *c) { h_aligned_alloc(c); }
 namespace loader { void snap_wide_eval_copy(uint64_t src); }   // host/mods/lodanim.cpp, docs/ultrawide.md
 // the photo Evaluation copying a photo's camera block (0x480 bytes) out of the shared photo camera: ultrawide puts its 16:9 projection back first

@@ -1285,6 +1285,11 @@ extern "C" void os_host_block_end(void) {
 extern "C" void os_io_begin(void) { if (!legacy(LG_HOST_BLOCK)) os_host_block_begin(); }
 extern "C" void os_io_end(void) { if (!legacy(LG_HOST_BLOCK)) os_host_block_end(); }
 extern "C" uint64_t os_current_thread_type(void) { return t_self ? t_self->tt : 0; }
+extern "C" __attribute__((noinline)) Cpu *os_current_cpu(void) {
+    __asm__ volatile("" ::: "memory");
+    Thread *t = t_self;
+    return t ? t->cur : nullptr;
+}
 // Diagnostics (host watchdog): visit every live guest thread with its wait state and the Cpu whose x30/sp the caller can symbolize.
 extern "C" void os_dump_threads(void (*emit)(void *ud, uint64_t tt, uint64_t id, int wkind, uint64_t wkey, uint64_t waddr, int core, int prio, Cpu *cpu), void *ud) {
     // G is normally held only briefly: retry for up to 500 ms. If it is still held, never walk the live maps and thread

@@ -168,6 +168,19 @@ if(UNIX AND NOT APPLE)
     add_test(NAME guest_tls_block_tsan COMMAND snap_guest_tls_block_test_tsan)
     set_tests_properties(guest_tls_block_tsan PROPERTIES TIMEOUT 300)
   endif()
+
+  # Stage 5a: os_current_cpu() across fibers/host threads, and portable host/hooks.cpp on Linux.
+  snap_os_test(snap_os_current_cpu_test tests/platform/os_current_cpu_test.cpp ${SNAP_TLS_FIBER_SOURCES})
+  target_include_directories(snap_os_current_cpu_test PRIVATE host)
+  target_compile_options(snap_os_current_cpu_test PRIVATE -w)
+  add_test(NAME os_current_cpu COMMAND snap_os_current_cpu_test)
+
+  snap_os_test(snap_hooks_linux_test tests/platform/hooks_linux_test.cpp tests/platform/loader_test_stubs.cpp
+               host/hooks.cpp host/linux/hooks_mods_stub.cpp host/loader.cpp host/elf_check.cpp
+               ${SNAP_OS_LAYER_SOURCES})
+  target_include_directories(snap_hooks_linux_test PRIVATE host)
+  target_compile_options(snap_hooks_linux_test PRIVATE -w)
+  add_test(NAME hooks_linux COMMAND ${CMAKE_COMMAND} -E env SNAP_MEMLOG=1 $<TARGET_FILE:snap_hooks_linux_test>)
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.
