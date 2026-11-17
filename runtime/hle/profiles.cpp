@@ -15,13 +15,9 @@
 #include <sstream>
 
 #include "hle.h"
+#include "hle_host.h"
 #include "json_lite.h"
 #include "save_gen.h"
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 namespace hle {
 namespace profiles {
@@ -34,13 +30,8 @@ static std::string S(const fs::path& p) { auto u = p.u8string(); return std::str
 int64_t now_seconds() { return (int64_t)std::time(nullptr); }
 
 static std::tm local_tm(int64_t t) {
-  std::time_t tt = (std::time_t)t;
   std::tm out{};
-#ifdef _WIN32
-  localtime_s(&out, &tt);
-#else
-  localtime_r(&tt, &out);
-#endif
+  hle::host::local_calendar_tm(t, &out);
   return out;
 }
 std::string format_time(int64_t t) {
@@ -338,22 +329,7 @@ std::string Store::duplicate(const std::string& id, const std::string& raw, std:
 // exclusive LockFileEx, opened without FILE_SHARE_DELETE). Byte locks are per handle, so this also sees a mount in this process,
 // and they die with their process, so a crashed game never blocks a delete. Unknown states count as held.
 static bool save_lock_held(const fs::path& save_root) {
-#ifdef _WIN32
-  HANDLE h = CreateFileW((save_root / ".snap.lock").c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (h == INVALID_HANDLE_VALUE) {
-    DWORD e = GetLastError();
-    return !(e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND);
-  }
-  OVERLAPPED ov{};
-  bool held = !LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov);
-  if (!held) UnlockFileEx(h, 0, 1, 0, &ov);
-  CloseHandle(h);
-  return held;
-#else
-  (void)save_root;
-  return false;
-#endif
+  return hle::host::is_save_lock_held(S(save_root / ".snap.lock"));
 }
 
 bool Store::in_use(const std::string& id) const { return save_lock_held(P(save_dir(id))); }
@@ -404,28 +380,16 @@ static bool tree_manifest(const fs::path& root, std::map<std::string, int64_t>* 
 // The lock beside a pending trash entry (_trash/.pending-<x>.lock): held by the process building it; a byte lock, so it dies with
 // that process. take() fails if someone else holds it.
 struct PendingLock {
-#ifdef _WIN32
-  HANDLE h = INVALID_HANDLE_VALUE;
-  OVERLAPPED ov{};
-  fs::path file;
+  void* h = nullptr;
+  std::string path;
   bool take(const fs::path& f) {
-    file = f;
-    h = CreateFileW(f.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    if (!LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) { CloseHandle(h); h = INVALID_HANDLE_VALUE; return false; }
-    return true;
+    path = S(f);
+    h = hle::host::pending_lock_begin(path);
+    return h != nullptr;
   }
   ~PendingLock() {
-    if (h == INVALID_HANDLE_VALUE) return;
-    std::error_code ec;
-    fs::remove(file, ec);   // POSIX delete while still locked: no one can take a lock on the removed name
-    UnlockFileEx(h, 0, 1, 0, &ov);
-    CloseHandle(h);
+    if (h) hle::host::pending_lock_end(h, path);
   }
-#else
-  bool take(const fs::path&) { return true; }
-#endif
 };
 
 std::string Store::trash_move(const Profile& p, const char* kind, std::string* err) {
@@ -445,11 +409,7 @@ std::string Store::trash_move(const Profile& p, const char* kind, std::string* e
   const fs::path trash = P(root_) / "_trash";
   fs::create_directories(trash, ec);
   if (ec) { if (err) *err = "Cannot create the trash folder: " + ec.message(); return ""; }
-#ifdef _WIN32
-  const std::string pend_name = ".pending-" + base + "-" + std::to_string(GetCurrentProcessId());
-#else
-  const std::string pend_name = ".pending-" + base;
-#endif
+  const std::string pend_name = ".pending-" + base + "-" + std::to_string(hle::host::process_id());
   PendingLock plock;
   if (!plock.take(trash / P(pend_name + ".lock"))) { if (err) *err = "Cannot lock the trash entry."; return ""; }
   const fs::path dir = trash / P(pend_name);
@@ -469,28 +429,25 @@ std::string Store::trash_move(const Profile& p, const char* kind, std::string* e
   bool partial = false;   // copied to the trash, but the source could not be fully removed
   std::string partial_msg;
   if (src_exists) {
-    // A plain rename needs no lock: Windows refuses to rename a folder while any file below it is open, and a running game keeps
-    // <save>/.snap.lock open from mount to exit, so a game that started after the check above makes this fail (then the fallback
-    // below finds the lock held and refuses).
-    fs::rename(src, dir / "save", ec);
-    if (ec) {
-      // Fallback (a file below is open, e.g. a scanner): copy, verify, remove the source. All of it while holding the save lock
-      // ourselves, so no game can mount this folder in between; nothing is deleted under a root whose lock we do not hold.
-#ifdef _WIN32
-      HANDLE lk = CreateFileW((src / ".snap.lock").c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-      OVERLAPPED ov{};
-      if (lk != INVALID_HANDLE_VALUE && !LockFileEx(lk, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) { CloseHandle(lk); lk = INVALID_HANDLE_VALUE; }
-      if (lk == INVALID_HANDLE_VALUE) {
+    // Windows refuses to rename a folder while any file below it is open; POSIX rename_save_dir() acquires .snap.lock across rename().
+    bool lock_busy = false;
+    if (!hle::host::rename_save_dir(S(src), S(dir / "save"), S(src / ".snap.lock"), &lock_busy, &ec)) {
+      if (lock_busy) {
         std::error_code e2;
         fs::remove_all(dir, e2);
         if (err) *err = "This save is in use by a running copy of the game. Close it first.";
         return "";
       }
-      auto unlock = [&]() { UnlockFileEx(lk, 0, 1, 0, &ov); CloseHandle(lk); };
-#else
-      auto unlock = [&]() {};
-#endif
+      // Fallback (a file below is open, e.g. a scanner): copy, verify, remove the source. All of it while holding the save lock
+      // ourselves, so no game can mount this folder in between; nothing is deleted under a root whose lock we do not hold.
+      void* lk = nullptr;
+      if (hle::host::try_acquire_save_lock(S(src / ".snap.lock"), &lk) != 0) {
+        std::error_code e2;
+        fs::remove_all(dir, e2);
+        if (err) *err = "This save is in use by a running copy of the game. Close it first.";
+        return "";
+      }
+      auto unlock = [&]() { hle::host::release_save_lock(lk); lk = nullptr; };
       std::error_code why;
       // .copying marks a copy in progress: a start that finds it (builder killed) drops the fragment, since the source is intact
       if (!write_atomic(dir / ".copying", "copy in progress\n")) {
@@ -812,12 +769,10 @@ static bool dir_nonempty(const fs::path& d) {
 }
 
 Active startup(const std::string& root, const std::string& legacy, const std::string& want, PickerFn picker, bool force_picker) {
-#ifdef _WIN32
   if (const char* w = std::getenv("SNAP_RESTART_WAIT_PID")) {   // a restart: wait for the old process to release its save
-    DWORD pid = (DWORD)std::atoi(w);
-    if (pid) if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid)) { WaitForSingleObject(h, 15000); CloseHandle(h); }
+    const uint64_t pid = static_cast<uint64_t>(std::strtoull(w, nullptr, 10));
+    if (pid) hle::host::wait_process_exit(pid, 15000);
   }
-#endif
   Active a;
   a.root = root;
   Store s(root);

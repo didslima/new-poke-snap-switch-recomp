@@ -204,6 +204,7 @@ if(UNIX AND NOT APPLE)
     runtime/hle/overrides.cpp runtime/hle/hle_config.cpp runtime/hle/settings.cpp
     runtime/hle/fs.cpp runtime/hle/fs_core.cpp
     runtime/hle/hid.cpp runtime/hle/input_core.cpp runtime/hle/freecam.cpp
+    runtime/hle/profiles.cpp
     runtime/hle/services_sys.cpp runtime/hle/services_net.cpp
     runtime/hle/access.cpp runtime/hle/btn_icons.cpp
     runtime/hle/linux/hle_host_posix.cpp runtime/hle/linux/input_backend_sdl3.cpp
@@ -279,6 +280,7 @@ if(UNIX AND NOT APPLE)
   endif()
 
   set_source_files_properties(
+    runtime/hle/profiles.cpp
     runtime/hle/linux/hle_host_posix.cpp
     runtime/hle/linux/input_backend_sdl3.cpp
     tests/platform/hle_core_linux_test.cpp

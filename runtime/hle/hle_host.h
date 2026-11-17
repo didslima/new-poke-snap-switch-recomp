@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <string>
 #include <system_error>
 
@@ -45,5 +46,14 @@ std::error_code last_os_error();
 uint64_t monotonic_ms();
 void sleep_ms(int ms);
 [[noreturn]] void exit_process(int code);
+
+// Profile & process helpers (used by profiles.cpp).
+bool is_save_lock_held(const std::string& lock_path);
+void* pending_lock_begin(const std::string& lock_path);
+void pending_lock_end(void* handle, const std::string& lock_path);
+bool rename_save_dir(const std::string& src_dir, const std::string& dst_dir, const std::string& lock_path,
+                     bool* lock_busy, std::error_code* ec);
+void wait_process_exit(uint64_t pid, int timeout_ms);
+bool local_calendar_tm(int64_t t, std::tm* out);
 
 }  // namespace hle::host

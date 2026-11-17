@@ -305,4 +305,72 @@ void sleep_ms(int ms) {
 
 [[noreturn]] void exit_process(int code) { ExitProcess((UINT)code); }
 
+bool is_save_lock_held(const std::string& lock_path) {
+  const std::wstring wp = std::filesystem::u8path(lock_path).wstring();
+  HANDLE h = CreateFileW(wp.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    const DWORD e = GetLastError();
+    return !(e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND);
+  }
+  OVERLAPPED ov{};
+  const bool held = !LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov);
+  if (!held) UnlockFileEx(h, 0, 1, 0, &ov);
+  CloseHandle(h);
+  return held;
+}
+
+struct WinPendingLock {
+  HANDLE h = INVALID_HANDLE_VALUE;
+  OVERLAPPED ov{};
+};
+
+void* pending_lock_begin(const std::string& lock_path) {
+  auto* lk = new WinPendingLock;
+  const std::wstring wp = std::filesystem::u8path(lock_path).wstring();
+  lk->h = CreateFileW(wp.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                      nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (lk->h == INVALID_HANDLE_VALUE) { delete lk; return nullptr; }
+  if (!LockFileEx(lk->h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &lk->ov)) {
+    CloseHandle(lk->h);
+    delete lk;
+    return nullptr;
+  }
+  return lk;
+}
+
+void pending_lock_end(void* handle, const std::string& lock_path) {
+  auto* lk = static_cast<WinPendingLock*>(handle);
+  if (!lk) return;
+  std::error_code ec;
+  std::filesystem::remove(std::filesystem::u8path(lock_path), ec);
+  if (lk->h != INVALID_HANDLE_VALUE) {
+    UnlockFileEx(lk->h, 0, 1, 0, &lk->ov);
+    CloseHandle(lk->h);
+  }
+  delete lk;
+}
+
+bool rename_save_dir(const std::string& src_dir, const std::string& dst_dir, const std::string&,
+                     bool* lock_busy, std::error_code* ec) {
+  if (lock_busy) *lock_busy = false;
+  std::error_code local_ec;
+  std::filesystem::rename(std::filesystem::u8path(src_dir), std::filesystem::u8path(dst_dir), ec ? *ec : local_ec);
+  return !(ec ? *ec : local_ec);
+}
+
+void wait_process_exit(uint64_t pid, int timeout_ms) {
+  if (!pid) return;
+  if (HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid))) {
+    WaitForSingleObject(h, static_cast<DWORD>(timeout_ms > 0 ? timeout_ms : 0));
+    CloseHandle(h);
+  }
+}
+
+bool local_calendar_tm(int64_t t, std::tm* out) {
+  if (!out) return false;
+  __time64_t tt = (__time64_t)t;
+  return _localtime64_s(out, &tt) == 0;
+}
+
 }  // namespace hle::host

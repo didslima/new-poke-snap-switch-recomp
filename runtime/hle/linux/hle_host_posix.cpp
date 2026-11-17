@@ -7,6 +7,7 @@
 #include "../hle_host.h"
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
@@ -58,22 +59,7 @@ __attribute__((weak)) std::unique_ptr<Backend> make_default_backend() {
 }
 }  // namespace hle::input
 
-// Weak Stage 6B/6C link seams for unported HLE profiles/UI (register_fs and register_hid are now strongly defined).
-namespace hle::profiles {
-__attribute__((weak)) Store::Store(std::string) {}
-__attribute__((weak)) bool Store::load() { return false; }
-__attribute__((weak)) const Profile* Store::find(const std::string&) const { return nullptr; }
-__attribute__((weak)) std::string Store::save_dir(const std::string&) const { return ""; }
-__attribute__((weak)) Active startup(const std::string&, const std::string&, const std::string&, PickerFn, bool) {
-  return Active{};
-}
-__attribute__((weak)) void set_active(const Active&) {}
-__attribute__((weak)) const Active& active() {
-  static const Active kInactive{};
-  return kInactive;
-}
-}  // namespace hle::profiles
-
+// Weak Stage 6B/6C link seam for unported profile picker UI (register_fs, register_hid, input, and profiles are strongly defined).
 extern "C" __attribute__((weak)) int snap_ui_pick_profile(const hle::profiles::PickItem*, int) {
   return -1;
 }
@@ -314,6 +300,85 @@ void sleep_ms(int ms) {
 [[noreturn]] void exit_process(int code) {
   std::fflush(nullptr);
   std::_Exit(code);
+}
+
+bool is_save_lock_held(const std::string& lock_path) {
+  const std::filesystem::path p = std::filesystem::u8path(lock_path);
+  int fd = -1;
+  do {
+    fd = ::open(p.c_str(), O_RDWR | O_CLOEXEC);
+  } while (fd < 0 && errno == EINTR);
+  if (fd < 0) {
+    return !(errno == ENOENT || errno == ENOTDIR);
+  }
+  int rc = 0;
+  do {
+    rc = ::flock(fd, LOCK_EX | LOCK_NB);
+  } while (rc != 0 && errno == EINTR);
+  const bool held = (rc != 0);
+  if (!held) ::flock(fd, LOCK_UN);
+  ::close(fd);
+  return held;
+}
+
+void* pending_lock_begin(const std::string& lock_path) {
+  const std::filesystem::path p = std::filesystem::u8path(lock_path);
+  int fd = -1;
+  do {
+    fd = ::open(p.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+  } while (fd < 0 && errno == EINTR);
+  if (fd < 0) return nullptr;
+  int rc = 0;
+  do {
+    rc = ::flock(fd, LOCK_EX | LOCK_NB);
+  } while (rc != 0 && errno == EINTR);
+  if (rc != 0) {
+    ::close(fd);
+    return nullptr;
+  }
+  return fd_to_handle(fd);
+}
+
+void pending_lock_end(void* handle, const std::string& lock_path) {
+  const int fd = handle_to_fd(handle);
+  if (fd < 0) return;
+  const std::filesystem::path p = std::filesystem::u8path(lock_path);
+  ::unlink(p.c_str());
+  ::flock(fd, LOCK_UN);
+  ::close(fd);
+}
+
+bool rename_save_dir(const std::string& src_dir, const std::string& dst_dir, const std::string& lock_path,
+                     bool* lock_busy, std::error_code* ec) {
+  if (lock_busy) *lock_busy = false;
+  void* lk = nullptr;
+  // On POSIX, rename(2) succeeds even while another process holds .snap.lock open; acquire the lock across rename.
+  if (try_acquire_save_lock(lock_path, &lk) != 0) {
+    if (lock_busy) *lock_busy = true;
+    return false;
+  }
+  std::error_code local_ec;
+  std::filesystem::rename(std::filesystem::u8path(src_dir), std::filesystem::u8path(dst_dir), ec ? *ec : local_ec);
+  const bool ok = !(ec ? *ec : local_ec);
+  release_save_lock(lk);
+  return ok;
+}
+
+void wait_process_exit(uint64_t pid, int timeout_ms) {
+  if (pid <= 1) return;
+  const uint64_t end = monotonic_ms() + static_cast<uint64_t>(timeout_ms > 0 ? timeout_ms : 0);
+  for (;;) {
+    if (::kill(static_cast<pid_t>(pid), 0) != 0 && errno == ESRCH) break;
+    if (monotonic_ms() >= end) break;
+    sleep_ms(20);
+  }
+}
+
+bool local_calendar_tm(int64_t t, std::tm* out) {
+  if (!out) return false;
+  std::time_t tt = static_cast<std::time_t>(t);
+  ::tzset();
+  return ::localtime_r(&tt, out) != nullptr;
 }
 
 }  // namespace hle::host
