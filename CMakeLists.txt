@@ -85,6 +85,28 @@ if(UNIX AND NOT APPLE)
   add_test(NAME os_scheduler_vamm_fault COMMAND ${CMAKE_COMMAND} -E env SNAP_FAULT_VAMM=0:7 OS_TEST_ONLY=vamm $<TARGET_FILE:snap_os_test>)
   add_test(NAME os_scheduler_sync_full COMMAND ${CMAKE_COMMAND} -E env SNAP_SYNC_FULL=1 $<TARGET_FILE:snap_os_test>)
   set_tests_properties(os_host_repeat os_scheduler os_scheduler_vamm_fault os_scheduler_sync_full os_state_off PROPERTIES TIMEOUT 600)
+
+  # Stage 4a: the shared guest TLS module (runtime/hle/guest_tls.h, header only) on buffers the test owns: no loader, no OS layer, no threads.
+  # Built twice: plain (C++20) and, when the compiler can, with AddressSanitizer + UBSan, which turns a write outside a block into a failure.
+  add_executable(snap_guest_tls_test tests/platform/guest_tls_test.cpp)
+  target_include_directories(snap_guest_tls_test PRIVATE runtime/hle)
+  target_compile_features(snap_guest_tls_test PRIVATE cxx_std_20)
+  target_compile_options(snap_guest_tls_test PRIVATE -Wall -Wextra -O2)
+  add_test(NAME guest_tls COMMAND snap_guest_tls_test)
+  include(CheckCXXSourceCompiles)
+  set(CMAKE_REQUIRED_FLAGS "-fsanitize=address,undefined")
+  set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=address,undefined")
+  check_cxx_source_compiles("int main() { return 0; }" SNAP_HAVE_ASAN_UBSAN)
+  unset(CMAKE_REQUIRED_FLAGS)
+  unset(CMAKE_REQUIRED_LINK_OPTIONS)
+  if(SNAP_HAVE_ASAN_UBSAN)
+    add_executable(snap_guest_tls_test_san tests/platform/guest_tls_test.cpp)
+    target_include_directories(snap_guest_tls_test_san PRIVATE runtime/hle)
+    target_compile_features(snap_guest_tls_test_san PRIVATE cxx_std_20)
+    target_compile_options(snap_guest_tls_test_san PRIVATE -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all)
+    target_link_options(snap_guest_tls_test_san PRIVATE -fsanitize=address,undefined)
+    add_test(NAME guest_tls_sanitized COMMAND snap_guest_tls_test_san)
+  endif()
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.

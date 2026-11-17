@@ -309,6 +309,43 @@ Read, against the code each function replaced (git `HEAD` of `os_kernel.cpp`, `o
 
 **Not validated, pending CI or a maintainer with Windows:** that the five touched files and `os_host_win32.cpp` compile and link with the Windows toolchain; that `tests/os/build.bat` and `tests/hle/run_tests.ps1` (which now name `os_host_win32.cpp`) still build; `os_test.exe` on Windows; the game. `host/build_snap.py` was not edited.
 
+## Stage 4a: shared guest TLS module (`runtime/hle/guest_tls.h`)
+
+Part A of stage 4 only: a platform-independent module and its unit tests. The loader (`host/loader.cpp`), the hooks in `host/boot.cpp`, the OS layer and the scheduler are **not touched** and do not use it yet (that is stage 4b). No production source file was added: the module is header-only (`runtime/hle/guest_tls.h` already existed upstream and is included by the Windows loader), so the manifest did not change and `host/build_snap.py` compiles exactly what it compiled.
+
+**Layout, checked.**
+
+| Fact | Evidence |
+|---|---|
+| Block of `0x10000` bytes, `tp = block + 0x8000` | `host/loader.cpp:412` and `:424`, `host/boot.cpp:672` and `:673` |
+| The imported ELFs have no `PT_TLS` | the program headers of a local `main.elf` (7 headers, none of type `PT_TLS`); the test checks this when `SNAP_MAIN_ELF` is set |
+| 8-byte image at `main + 0xccb900` (build 2.0.1), bytes `ff ff ff ff 95 23 73 00` | the same file: the 8 bytes follow 8 bytes of zero padding in a 16-byte `.data` section at `0xccb8f8`; read from the `PT_LOAD` that contains it |
+| Image goes to `tp + 0x10` (after the 16-byte TCB) | `hle::kTlsBlockOffset`, `guest_tls_init` |
+| The `TLR+0x1f0` (tp) and `TLR+0x1f8` (ThreadType) offsets are relative to the **Thread Local Region** (`c->tpidrro`), not to `tp` | `runtime/os/os_layout.h` (`TLR_TP`, `TLR_THREAD`), `os_kernel.cpp::host_entry` |
+
+**Not known, and not assumed by the module:** how far `main`'s `.tbss` reaches (the "up to `tp + 0x670`" in the old comment is not a measurement), the largest alignment its TLS asks for, and whether the half of the block below `tp` is used. The module therefore zeroes **every** byte of the block except the image, which is what the old zero-filled allocation gave and is a superset of any `.tbss`. It requires the block address to be a multiple of 16: a conservative floor chosen here (the TCB is 16 bytes), not a proven maximum. Real blocks will be 64 KiB aligned.
+
+**API** (namespace `hle`, no OS call, no global state, no allocation of guest memory):
+
+| Name | Does |
+|---|---|
+| `GuestTlsImage` | The bytes of `main`'s `.tdata`, copied once; read-only afterwards (`data()` is `const`). Copying it copies the bytes. Changing the source later, or any block made from it, never changes it |
+| `GuestTlsImage::capture(base, span, module_offset, size, &out)` | Reads the image out of a loaded module; checks it lies inside `span` without overflow. `out` is left alone on failure |
+| `GuestTlsImage::capture_bytes(bytes, size, &out)` | The same from bytes in hand |
+| `guest_tls_init_block(block, block_size, image, &tp, tp_offset = 0x8000)` | Zeroes the whole block, copies the image to `tp + 0x10`, returns `tp`. Needs `block_size >= tp_offset + 0x10 + image.size()`, a 16-byte aligned address and no overlap with the image. On any error nothing is written |
+| `GuestTlsStatus`, `guest_tls_status_name` | `Ok`, `NullPointer`, `EmptyImage`, `OutOfRange`, `BlockTooSmall`, `BadTpOffset`, `Misaligned`, `Overlap` |
+| `kGuestTlsBlockSize`, `kGuestTlsTpOffset`, `kGuestTlsMinBlockAlign` | The numbers above, pinned by `static_assert`s in the test |
+
+The block is allocated and released by the caller. The plan for stage 4b is the OS layer's `mem_reserve` + `mem_commit` / `mem_release`; the module does not do it and the tests do not use it. The old `guest_tls_init(tp, image, n)` is unchanged (the Windows loader and `hle_tests.cpp` use it); a test checks that both functions write the same bytes. Which of the two the loaders end up calling is a stage 4b decision.
+
+**Capture timing is not decided here.** The upstream loader captures lazily, on the first thread, before any guest code runs, in a function-local static. `GuestTlsImage` is a plain value, so *when* and *where* the one capture happens (and who guards it) is left to the caller in stage 4b.
+
+**Tests** (ctest `guest_tls`, and `guest_tls_sanitized` when the compiler supports AddressSanitizer + UBSan; `tests/platform/guest_tls_test.cpp`, about 35,000 checks): the image is copied exactly, to the right offset, to several independent blocks, and the captured image stays intact when a block is damaged; images of 1, 2, 7, 8, 9, 16, 100, 4096 and the largest size that fits are copied byte for byte, and one byte more is refused (the real image ends in a zero byte, so a copy that is one byte short would not show with it alone); every byte outside the image is zero for blocks pre-filled with 0x00, 0x01, 0x5a, 0x80, 0xff and a per-byte ramp, and canary bytes around each block never change; three blocks changed independently stay independent, and a block made after the others were changed starts from the original image; the image is the bytes of capture time after the source is overwritten, and two captures share no storage; null pointers, empty images, one byte short, bad tp offsets, misalignment, overlap with the image and every overflowing capture range fail with the right status and leave the block, the guards and the output unchanged; with `SNAP_MAIN_ELF` set (a local file, read only, never committed) the constants are checked against the game's bytes.
+
+**Do the tests detect a wrong module?** 16 mutations of the header were each run against the test built with the sanitizers, and each was detected: copy offset `+0x18`; copy size `n-1`; no zeroing; zeroing only from `tp`; zeroing 16 bytes past the block; all images sharing one storage; an image that re-reads its source; no block-size check; block-size check off by one; no tp-offset check; no alignment check; no overlap check; no capture range check; an overflowing capture range check; a failed capture that clobbers its output; a capture at the wrong module offset. Two of them (no overlap check, no capture range check) are detected by AddressSanitizer rather than by a check, and the first run of the copy-size mutation was *not* detected until the multi-size test above was added.
+
+**Limits.** `<vector>` is now included by `guest_tls.h` (the Windows loader and `hle_tests.cpp` include it): the Windows build was not run, so that is read, not verified. The 16-byte alignment floor and the zero-the-whole-block rule are decisions of this stage, not facts about the game. Nothing was run with the game, and no thread, fiber or loader code was exercised.
+
 ## Known limits
 
 Observed:
@@ -332,6 +369,6 @@ Hypotheses (not checked):
 | Stage | Needs from this one |
 |---|---|
 | 3 OS layer (`os_ctx`, `os_state`) | Done in parts A and B. Left in `runtime/os`: `hostprof.cpp` and `sampler.cpp` (profilers, `windows`), `os_state.cpp` (Windows only; Linux has `os_state_off.cpp`) |
-| 4 TLS | `host/loader.cpp` (`windows`); the TLS contract in "Stage 2"; `host::heap_aligned_alloc` for thread blocks, `host::mem_reserve`/`mem_commit` for stacks |
+| 4 TLS | 4a done (above). 4b: `host/loader.cpp` (`windows`) and the thread-start hook call the module; blocks from `host::mem_reserve`/`mem_commit`; capture timing; the TLS contract in "Stage 2" |
 | 5 Linux runner | A `linux` class for the new files |
 | 7 Vulkan backend | `runtime/nvn/*` (most are `windows`: `VK_USE_PLATFORM_WIN32_KHR` comes in through `nvn_internal.h`); `SyncPoolRange` must consult `snap_os_write_watch_active()` (full copies when 0); the uffd-wp evaluation, with measurements |
