@@ -268,8 +268,12 @@ if(UNIX AND NOT APPLE)
   target_compile_options(snap_sdl3_backend_linux_test PRIVATE -w)
   add_test(NAME sdl3_backend_linux COMMAND snap_sdl3_backend_linux_test)
 
+  snap_os_test(snap_profiles_linux_test tests/platform/profiles_linux_test.cpp ${SNAP_LINUX_HLE_CORE_SOURCES} runtime/os/perf.cpp runtime/os/linux/os_host_posix.cpp)
+  target_compile_options(snap_profiles_linux_test PRIVATE -w)
+  add_test(NAME profiles_linux COMMAND snap_profiles_linux_test)
+
   if(SNAP_HAVE_SDL3)
-    foreach(_t IN ITEMS snap_init_linux_test snap_hle_core_linux_test snap_fs_linux_test snap_hid_linux_test snap_sdl3_backend_linux_test)
+    foreach(_t IN ITEMS snap_init_linux_test snap_hle_core_linux_test snap_fs_linux_test snap_hid_linux_test snap_sdl3_backend_linux_test snap_profiles_linux_test)
       target_compile_definitions(${_t} PRIVATE HLE_WITH_SDL3)
       target_link_libraries(${_t} PRIVATE SDL3::SDL3)
     endforeach()
@@ -287,6 +291,7 @@ if(UNIX AND NOT APPLE)
     tests/platform/fs_linux_test.cpp
     tests/platform/hid_linux_test.cpp
     tests/platform/sdl3_backend_linux_test.cpp
+    tests/platform/profiles_linux_test.cpp
     host/linux/init_linux.cpp
     tests/platform/init_linux_test.cpp
     PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra")
