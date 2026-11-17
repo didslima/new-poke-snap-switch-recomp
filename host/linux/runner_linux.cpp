@@ -2,6 +2,7 @@
 // Linux runner bootstrap (stage 5B). See runner_linux.h.
 #include "runner_linux.h"
 #include "crash_linux.h"
+#include "preflight_linux.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -15,14 +16,14 @@ namespace snap_linux {
 namespace {
 
 bool is_supported_cmd(const std::string &c) {
-    return c == "info" || c == "shared" || c == "init" || c == "run" ||
+    return c == "validate" || c == "info" || c == "shared" || c == "init" || c == "run" ||
            c == "eh" || c == "lua" || c == "bench" || c == "all";
 }
 
 void print_usage(FILE *out) {
     std::fprintf(out,
-        "usage: snap_boot_linux [--main elf] [--sdk elf] "
-        "info|shared|init [--probe N] [--libc]|run [--probe N] [--trace file] [--stop-after-init]|"
+        "usage: snap_boot_linux [--main elf] [--sdk elf] [--main-lib lib.a] [--sdk-lib lib.a] "
+        "validate|info|shared|init [--probe N] [--libc]|run [--probe N] [--trace file] [--stop-after-init]|"
         "eh|lua|bench [--iters N]|all\n");
 }
 
@@ -98,6 +99,14 @@ ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err) {
             const char *v = need_val("--sdk");
             if (!v) return ParseStatus::Error;
             out.sdk_elf = v;
+        } else if (a == "--main-lib") {
+            const char *v = need_val("--main-lib");
+            if (!v) return ParseStatus::Error;
+            out.main_lib = v;
+        } else if (a == "--sdk-lib") {
+            const char *v = need_val("--sdk-lib");
+            if (!v) return ParseStatus::Error;
+            out.sdk_lib = v;
         } else if (a == "--probe") {
             const char *v = need_val("--probe");
             if (!v) return ParseStatus::Error;
@@ -185,6 +194,12 @@ int bootstrap_main(int argc, char **argv) {
         std::fprintf(stderr, "boot_linux: %s\n", err.c_str());
         print_usage(stderr);
         return 2;
+    }
+
+    if (opts.cmd == "validate") {
+        const PreflightReport rep = run_preflight(opts.main_elf, opts.sdk_elf, opts.main_lib, opts.sdk_lib);
+        print_preflight_report(rep, stdout);
+        return (int)rep.overall;
     }
 
     int rc = 1;

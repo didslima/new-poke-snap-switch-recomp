@@ -16,6 +16,8 @@ inline constexpr size_t kRunnerHostStackSize = 256u << 20;
 struct BootOpts {
     std::string main_elf = "analysis/import/v262144-main.elf";
     std::string sdk_elf = "analysis/import/v262144-sdk.elf";
+    std::string main_lib = "build/aot/main/lib/libsnap_main.a";
+    std::string sdk_lib = "build/aot/sdk/lib/libsnap_sdk.a";
     std::string cmd;
     std::string arg;
     std::string trace_file;

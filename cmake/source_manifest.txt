@@ -48,6 +48,7 @@ shared   host/hooks.cpp
 linux    host/linux/boot_linux.cpp   # Linux runner executable entry point (stage 5B)
 linux    host/linux/crash_linux.cpp   # Linux POSIX signal handlers and async-signal-safe diagnostics (stage 5C)
 linux    host/linux/hooks_mods_stub.cpp   # explicit no-op stubs for unported host/mods/* called by host/hooks.cpp
+linux    host/linux/preflight_linux.cpp   # Linux preflight validator for guest ELFs and AOT archives (stage 5D-B1)
 linux    host/linux/runner_linux.cpp   # Linux runner bootstrap, CLI, CPU check, 256 MiB runner thread (stage 5B)
 windows  host/launcher.cpp   # #include <bcrypt.h>, #include <commctrl.h>, #include <shellapi.h> ...
 windows  host/launcher_ui.cpp   # #include <d3d11.h>, #include <dxgi.h>, #include <shellapi.h> ...
