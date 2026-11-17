@@ -137,8 +137,10 @@ void guest_tls_hook_destroy(Cpu *c) {
     if (!tlr) return;
     const uint64_t tp = gld<uint64_t>(tlr + oslay::TLR_TP);
     if (!tp) return;   // nothing to release (or already released)
-    if (guest_tls_block_destroy(tp, tt)) gst<uint64_t>(tlr + oslay::TLR_TP, 0);
-    else fprintf(stderr, "[os] guest TLS: TLR+%#x (%#llx) is not a live block of this thread, nothing released\n", (unsigned)oslay::TLR_TP, (unsigned long long)tp);
+    if (guest_tls_block_destroy(tp, tt)) {
+        gst<uint64_t>(tlr + oslay::TLR_TP, 0);
+        if (c->tpidr == tp) c->tpidr = 0;   // the thread's own Cpu must not keep a pointer into memory that is gone
+    } else fprintf(stderr, "[os] guest TLS: TLR+%#x (%#llx) is not a live block of this thread, nothing released\n", (unsigned)oslay::TLR_TP, (unsigned long long)tp);
 }
 
 }  // namespace osk

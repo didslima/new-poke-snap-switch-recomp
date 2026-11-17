@@ -42,7 +42,8 @@ uint64_t guest_tls_block_owner(uint64_t tp);
 // afterwards. A TLR that already holds a thread pointer is left alone.
 void guest_tls_hook_init(Cpu *c);
 // nnmuslThreadPointerDestroyer, after the TLS destructors: x0 = the ThreadType. Releases the block named by TLR+0x1f0 if it is this thread's,
-// then clears the TLR word so that a second call finds nothing.
+// then clears the TLR word, and c->tpidr when it still holds that block's tp, so that a second call finds nothing and the Cpu keeps no
+// pointer into released memory.
 void guest_tls_hook_destroy(Cpu *c);
 
 // Test seam: the three memory operations a block uses. nullptr restores osk::host. Not for production code.

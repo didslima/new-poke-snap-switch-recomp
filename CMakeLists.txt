@@ -117,12 +117,32 @@ if(UNIX AND NOT APPLE)
   add_test(NAME guest_tls_block COMMAND snap_guest_tls_block_test)
   snap_os_test(snap_guest_tls_os_test tests/platform/guest_tls_os_test.cpp ${SNAP_OS_LAYER_SOURCES})
   add_test(NAME guest_tls_os COMMAND snap_guest_tls_os_test)
-  snap_os_test(snap_guest_tls_loader_test tests/platform/guest_tls_loader_test.cpp host/loader.cpp host/elf_check.cpp host/guest_tls_hooks.cpp
+  snap_os_test(snap_guest_tls_loader_test tests/platform/guest_tls_loader_test.cpp tests/platform/loader_test_stubs.cpp host/loader.cpp host/elf_check.cpp host/guest_tls_hooks.cpp
                runtime/os/guest_tls_block.cpp runtime/os/linux/os_host_posix.cpp)
   target_include_directories(snap_guest_tls_loader_test PRIVATE host)
   target_compile_options(snap_guest_tls_loader_test PRIVATE -w)
   add_test(NAME guest_tls_loader COMMAND snap_guest_tls_loader_test)
   set_tests_properties(guest_tls_block guest_tls_os guest_tls_loader PROPERTIES TIMEOUT 300)
+
+  snap_os_test(snap_guest_tls_lifecycle_test tests/platform/guest_tls_lifecycle_test.cpp ${SNAP_OS_LAYER_SOURCES})
+  add_test(NAME guest_tls_lifecycle COMMAND snap_guest_tls_lifecycle_test)
+  set_tests_properties(guest_tls_lifecycle PROPERTIES TIMEOUT 300)
+
+  # Stage 4c: host and guest TLS across fibers that change host threads, with the real loader dispatch and the real OS layer. Built three ways:
+  # optimised, unoptimised, and with stack protectors in every function (the canary at %fs:0x28 must survive a fiber changing threads).
+  set(SNAP_TLS_FIBER_SOURCES tests/platform/loader_test_stubs.cpp host/loader.cpp host/elf_check.cpp host/guest_tls_hooks.cpp ${SNAP_OS_LAYER_SOURCES})
+  foreach(variant plain O0 ssp)
+    snap_os_test(snap_tls_host_fibers_${variant} tests/platform/tls_host_fibers_test.cpp ${SNAP_TLS_FIBER_SOURCES})
+    target_include_directories(snap_tls_host_fibers_${variant} PRIVATE host)
+    target_compile_options(snap_tls_host_fibers_${variant} PRIVATE -w)
+    if(variant STREQUAL "O0")
+      target_compile_options(snap_tls_host_fibers_${variant} PRIVATE -O0)
+    elseif(variant STREQUAL "ssp")
+      target_compile_options(snap_tls_host_fibers_${variant} PRIVATE -fstack-protector-all)
+    endif()
+    add_test(NAME tls_host_fibers_${variant} COMMAND snap_tls_host_fibers_${variant})
+    set_tests_properties(tls_host_fibers_${variant} PROPERTIES TIMEOUT 300)
+  endforeach()
   if(SNAP_HAVE_ASAN_UBSAN)   # a double release, a write outside a block or a leak in the registry is a failure here
     add_executable(snap_guest_tls_block_test_san tests/platform/guest_tls_block_test.cpp runtime/os/guest_tls_block.cpp runtime/os/linux/os_host_posix.cpp)
     target_include_directories(snap_guest_tls_block_test_san PRIVATE runtime runtime/os)

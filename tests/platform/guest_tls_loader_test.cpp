@@ -2,7 +2,7 @@
 // The guest TLS integration in the real host/loader.cpp (stage 4b), compiled and linked on Linux with a stand-in `main` module and no game
 // data: loader::new_thread (the adopted main thread's TLS block), loader::init_guest_tls (what host/boot.cpp's hook calls), and the Linux
 // hook binding (host/guest_tls_hooks.cpp) driven through the loader's own thunk dispatch. The AOT tables the loader links against and the
-// few host observers it calls are stubbed below. What this cannot show: the ELF mapping (load() needs the game's files) and any guest code.
+// few host observers it calls are stubbed in loader_test_stubs.cpp. What this cannot show: the ELF mapping (load() needs the game's files) and any guest code.
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -21,32 +21,7 @@
 #include "os/guest_tls_block.h"
 #include "os/os_internal.h"
 
-// ---- what loader.cpp links against and the test does not need ------------------------------------------------------------------------------
-extern "C" {
-extern const uint64_t main_fn_addrs[];
-extern const GuestFn main_fn_ptrs[];
-extern const uint64_t main_fn_count;
-extern const char *const main_import_names[];
-extern const uint64_t main_import_stub_addrs[];
-extern const uint64_t main_import_count;
-extern const uint64_t sdk_fn_addrs[];
-extern const GuestFn sdk_fn_ptrs[];
-extern const uint64_t sdk_fn_count;
-const uint64_t main_fn_addrs[1] = {0};
-const GuestFn main_fn_ptrs[1] = {nullptr};
-const uint64_t main_fn_count = 0;
-const char *const main_import_names[1] = {""};
-const uint64_t main_import_stub_addrs[1] = {0};
-const uint64_t main_import_count = 0;
-const uint64_t sdk_fn_addrs[1] = {0};
-const GuestFn sdk_fn_ptrs[1] = {nullptr};
-const uint64_t sdk_fn_count = 0;
-void snap_crashlog_fatal(const char *kind, const char *detail) { fprintf(stderr, "[stub] fatal %s: %s\n", kind, detail); }
-void snap_fn_observe(uint64_t, uint64_t, uint64_t) {}
-void snap_skips_observe(uint64_t, uint64_t, uint64_t) {}
-void snap_neo_observe(uint64_t, uint64_t, uint64_t) {}
-void snap_highfps_observe(uint64_t, uint64_t, uint64_t) {}
-}
+// the AOT tables and observers loader.cpp links against: tests/platform/loader_test_stubs.cpp
 namespace osk {
 void fatal(const char *fmt, ...) {   // the one OS-layer function the hook bodies call
     va_list ap;
@@ -174,18 +149,18 @@ static void test_hooks_through_thunks() {
     OsConfig oc{};
     oc.tp_init_var = (uint64_t)(uintptr_t)&cell_init;
     oc.tp_destroy_var = (uint64_t)(uintptr_t)&cell_destroy;
-    snap_host::install_guest_tls_hooks(oc);
+    CHECK(snap_host::install_guest_tls_hooks(oc) == 2);
     CHECK(cell_init >= THUNK_BASE && cell_init < THUNK_BASE + THUNK_SPAN);
     CHECK(cell_destroy >= THUNK_BASE && cell_destroy < THUNK_BASE + THUNK_SPAN && cell_destroy != cell_init);
     const uint64_t ci = cell_init, cd = cell_destroy;
-    snap_host::install_guest_tls_hooks(oc);                                  // already bound: left as it is
+    CHECK(snap_host::install_guest_tls_hooks(oc) == 2);                      // already bound: left as it is, still reported as bound
     CHECK(cell_init == ci && cell_destroy == cd);
     OsConfig set{};
     set.tp_init_var = (uint64_t)(uintptr_t)&cell_set;                        // a hook someone else installed
-    snap_host::install_guest_tls_hooks(set);
+    CHECK(snap_host::install_guest_tls_hooks(set) == 1);                     // one variable only: the other hook is missing, and said so
     CHECK(cell_set == 0x7777);
     OsConfig none{};
-    snap_host::install_guest_tls_hooks(none);                                // no variables (a game without the symbols): nothing to do
+    CHECK(snap_host::install_guest_tls_hooks(none) == 0);                    // no variables (a game without the symbols): nothing bound, both said
 
     // a guest thread's TLR as host_entry builds it, then the trampoline's two calls, through the dispatch
     alignas(512) static uint8_t tlr[0x200];
@@ -205,6 +180,12 @@ static void test_hooks_through_thunks() {
     CHECK(osk::guest_tls_block_owner(tp) == tt && mapped(tp));
     loader::call_guest(c, cell_destroy, {tt});                               // the owner after its TLS destructors
     CHECK(!mapped(tp) && osk::guest_tls_blocks_live() == live0 && osk::gld<uint64_t>((uint64_t)(uintptr_t)tlr + 0x1f0) == 0);
+    c->tpidr = tp;                                                           // a Cpu that still holds the pointer loses it with the block
+    loader::call_guest(c, cell_init, {tt});
+    const uint64_t tp2 = osk::gld<uint64_t>((uint64_t)(uintptr_t)tlr + 0x1f0);
+    c->tpidr = tp2;
+    loader::call_guest(c, cell_destroy, {tt});
+    CHECK(c->tpidr == 0 && !mapped(tp2));
     loader::call_guest(c, cell_destroy, {tt});                               // again: nothing
     CHECK(osk::guest_tls_blocks_live() == live0);
     *c = saved;
