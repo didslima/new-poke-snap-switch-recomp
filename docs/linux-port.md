@@ -1,6 +1,6 @@
 # Cross-platform build and the Linux port
 
-Status: **stage 2 of the Linux port (neutral OS interfaces and contracts for stages 3 and 4).** The game does not build or run on Linux yet. This page records what exists, how to extend it, what was tested and what is still missing. Statements are facts that were checked unless a line says otherwise.
+Status: **stage 3 of the Linux port: part A (System V context switch) done and tested; part B (OS layer integration) blocked, see "Stage 3".** The game does not build or run on Linux yet. This page records what exists, how to extend it, what was tested and what is still missing. Statements are facts that were checked unless a line says otherwise.
 
 ## Goal
 
@@ -81,7 +81,7 @@ There is no `runtime/platform/` directory and no platform abstraction in the ups
 | `os_kernel.cpp` | Host thread start (`_beginthreadex`, `CREATE_SUSPENDED`, reserved stack), `SetThreadPriority`, `SetThreadDescription`, `SwitchToThread`, `QueryPerformanceCounter`, `timeBeginPeriod`, `Sleep`, TLR/Cpu allocation (`_aligned_malloc`) | yes, about 20 API names | `os_init`, `os_adopt_main_thread`, `call_guest` | `windows`, stage 3 |
 | `os_memory.cpp` | Guest virtual memory: `VirtualAlloc` reserve/commit/decommit/release, `VirtualQuery`, `GetWriteWatch` flag, `VirtualAlloc2` aligned reserve, `GetSystemInfo` | yes (about 19 names) | `mem_get_info`, svc memory calls | `windows`, stage 3 |
 | `os_thread.cpp` | Threads, TLS slots, fibers (`do_switch`, `fiber_proc`), time; calls `ctx_*` and `snap_ctx_switch` | `SwitchToThread`, `Sleep`, `ExitProcess`, `GetCurrentProcess`, `GetLastError` | `HostCtx` contract below | `windows`, stage 3 |
-| `os_ctx.cpp` | Host context switch (Win64 assembly, TIB, `VirtualAlloc` stacks) | yes | `ctx_new_thread`, `ctx_new_fiber`, `ctx_free`, `snap_ctx_switch` | `windows`; Linux sibling in stage 3 |
+| `os_ctx_win64.cpp` (was `os_ctx.cpp`) | Host context switch (Win64 assembly, TIB, `VirtualAlloc` stacks) | yes | `ctx_new_thread`, `ctx_new_fiber`, `ctx_free`, `snap_ctx_switch` | `windows`; Linux sibling `runtime/os/linux/os_ctx_sysv.cpp` (stage 3 part A, done) |
 | `os_state.cpp` | Save states (drain, copy, restore) | `dbghelp`, `VirtualQuery`, `VirtualAlloc` | `state_*` hooks called by the kernel | `windows`; not part of the Linux first version (see below) |
 | `perf.cpp`, `hostprof.cpp`, `sampler.cpp` | Profilers | `OpenThread`, `GetThreadContext`, toolhelp, `psapi` | `perf.h` | `windows`, later |
 | `runtime/hle/*` | Services, input, settings, save files | `CreateFileW`, known folders, DLL loading; `guest_tls.h`, `access.cpp`, `btn_icons.cpp`, `freecam.cpp`, `zip_read.cpp`, `services_net.cpp` are already shared | `hle_config.h`, `settings.h` | 5 shared, 14 `windows` (stage 5 and later) |
@@ -177,6 +177,85 @@ Not run, pending CI or a maintainer with a Windows toolchain: the Windows build 
 - Stage 4: the TLS block allocation and the `.tdata` copy on Linux, as specified above.
 - Stage 5: the Linux runner.
 - Not designed yet: write-watch replacement, shadow-stack behaviour of the target kernel, overcommit limits for fiber stacks.
+
+## Stage 3: System V context switch (part A) and OS layer integration (part B)
+
+### Part A: done
+
+**Files.** `runtime/os/os_ctx.cpp` was renamed to `runtime/os/os_ctx_win64.cpp` with `git mv` and no content change (`git diff -M` shows a 100 % rename, 0 insertions, 0 deletions); `tests/os/build.bat` names the new path (one token). The Linux implementation is `runtime/os/linux/os_ctx_sysv.cpp`. It is in a subdirectory on purpose: `host/build_snap.py` compiles `runtime/os/*.cpp` with a non-recursive glob, so a Linux-only file next to the others would have been compiled into the Windows game. `host/build_snap.py` is untouched and `scripts/source_classes.py` rebuilds the same non-recursive rule, so `source_classification` checks that no `linux` file is in the Windows build. The manifest classes: `os_ctx_win64.cpp` is `windows`, `os_ctx_sysv.cpp` is `linux` (compiled only by `snap_portable_objects`, which selects `shared` + `linux`). Neither is selected by a glob.
+
+**Interface (unchanged).** `HostCtx` keeps its layout, `sp` at offset 0, and the four functions keep their signatures (`os_internal.h`). On Linux the three TIB fields are not TIB fields: `base` = top of the stack, `limit` = lowest usable address, `dealloc` = `alloc` = start of the mapping, `reserve` = its size (rounded up to a page). `os_posix_header` still pins the offsets.
+
+**`snap_ctx_switch(from, to)`** (`rdi`, `rsi`): pushes `rbp rbx r12 r13 r14 r15`, reserves 16 bytes, stores `MXCSR` and the x87 control word there, stores `rsp` in `from->sp`, loads `to->sp`, reloads the control words, pops in reverse order and `ret`s. Nothing else is saved: `rdi`, `rsi` and `xmm0-15` are caller-saved in System V. The code never reads or writes `%fs` (or `%gs`).
+
+**Frame** (lowest address first, 72 bytes; also the initial frame of a new fiber): `+0` MXCSR, `+4` x87 CW, `+8` unused (16-byte control area), `+16` r15, `+24` r14, `+32` r13, `+40` r12, `+48` rbx, `+56` rbp, `+64` return address. A new fiber has MXCSR `0x1F80`, CW `0x037F`, `r13 = entry`, `r12 = arg`, `rbp = 0`, return address `snap_ctx_tramp`.
+
+**Stack convention.** `ctx_new_fiber` maps `reserve` bytes read/write with `MAP_NORESERVE | MAP_STACK` (lazily committed) and makes the lowest page `PROT_NONE`. The frame sits 64 bytes under the top: `sp = top - 136`, so `sp % 16 == 8` and `sp + 72` (the `rsp` after the `ret` into the trampoline) is 16-aligned. `snap_ctx_tramp` moves `r12` into `rdi` and `call`s `r13`, so the entry function sees `rsp % 16 == 8` at its first instruction, as the ABI requires; `ud2` follows the call (an entry that returns traps with SIGILL). A suspended context has no alignment requirement of its own: it resumes after its own `call snap_ctx_switch`. `.cfi_undefined rip` ends unwinding at the trampoline. Requests below four pages or impossible sizes return `nullptr`.
+
+**Thread pointer and other threads.** `%fs` is per host thread and is not part of a context. A context resumed on another host thread therefore runs with that thread's `%fs`; the switch does not alter it. The hazard is in the C++ around a switch, not in the switch: a `thread_local` address computed before `snap_ctx_switch` may be reused after it by the compiler. The scheduler already reloads it (`self_fresh()` is `noinline` with a memory barrier, `do_switch` calls it after the switch). The tests reproduce this with a `noinline` reader of a `thread_local` and a fiber that hops between two threads. The guest TLS (`tpidr_el0`) is a different thing (stage 4) and nothing here simulates it with the host thread pointer.
+
+**Tests** (`ctx_sysv_test`, all independent of GPU, SDL, Vulkan and the game; test-only assembly is in the test file, not in production code):
+
+| Check | How |
+|---|---|
+| new contexts | `sp % 16 == 8`, `sp + 72` aligned, `base/limit/dealloc/alloc/reserve` consistent, initial MXCSR/CW in the frame, serials unique and increasing, both ends of the usable range writable, `ctx_free` of a context that never ran, `nullptr` for a too-small and for an impossible size |
+| callee-saved registers | `snap_test_switch_regs` loads `rbx rbp r12-r15` with a per-context, per-round pattern, switches, and compares what it finds on resume; a ring of three contexts (main + two fibers), 2000 rounds each, with a 32-word stack canary and a local alignment check after each resume |
+| MXCSR, x87 CW | three contexts with different values (round up / down / nearest, FTZ, DAZ, precision), 500 switches each; also in effect: `2.5` converted with SSE and with `fistp` rounds as the context's own mode says; a new fiber starts with the defaults although its creator had set other values |
+| alignment | `rsp` recorded by assembly at the first instruction of the entry (`% 16 == 8`), an `alignas(16)` local and an aligned SSE load in the entry body |
+| end of the function | ends by switching away for good (as `fiber_proc` does); an entry that returns traps with SIGILL (child process); the page below the usable range raises SIGSEGV (child process) |
+| other host thread | one fiber resumed alternately by two host threads, 2000 hops: `%fs`, `gettid`, a `thread_local` value, callee-saved registers and a local alignment are checked after each hop; the switch leaves `%fs` unchanged |
+| many cycles | 3 x 60000 switches with canaries and registers |
+
+Results (Linux x86-64 container, kernel 7.3.3, clang 21): `ctx_sysv` and `ctx_sysv_repeat` (30 suites in one process) pass; 150 separate runs and 40 runs pinned to one CPU (`taskset -c 0`) had 0 failures; the suite also passes built with `clang -O0`, `clang -O3 -march=x86-64-v3`, `g++ -O0` and `g++ -O2` (10 repetitions each). Mutation check, to show that the tests can fail: removing the `ldmxcsr`, the `fldcw`, the restore of `r12`, `r13`, `r14`, `r15`, `rbx` or `rbp`, a frame misaligned by 8, a wrong default MXCSR or CW, no guard page, or no `rdi` setup in the trampoline each made the suite fail (13 variants, all detected; the register variants fail with a crash or a check, depending on which register). Not tested: AddressSanitizer (its fake stacks need annotations), other architectures, CET shadow stacks (hypothesis: user-space shadow stacks are opt-in and off for ordinary binaries), `MAP_NORESERVE` under `vm.overcommit_memory=2`.
+
+### Part B: blocked, with evidence
+
+Part B was not started in code. The reasons are checked facts, not time:
+
+1. **Nothing can be validated yet.** The only OS-layer test, `tests/os/os_test.cpp` (1395 lines, standard C++), needs `os_kernel.cpp`, `os_thread.cpp`, `os_memory.cpp`, `os_state.cpp` and `perf.cpp` to link. These contain Win32 calls (distinct API names, counted by scanning): `os_kernel.cpp` 20, `os_memory.cpp` 12, `os_thread.cpp` 5, `os_state.cpp` 12, `perf.cpp` 8. Until all of them have a Linux counterpart, no scheduler/thread/memory behaviour can be run, so a port would be unverifiable.
+2. **The Windows build cannot be compiled here.** `os_kernel.cpp`, `os_memory.cpp` and `os_thread.cpp` are Windows-only files; a seam (a primitives header with a Win32 side and a POSIX side) means editing them. A silent change of their Windows behaviour could not be detected in this environment.
+3. **Three decisions are yours** (below): the shape of the host primitives, the policy for the save-state gates, and the write-watch mechanism.
+
+**The five `state_*` functions (read from the tree, not guessed).**
+
+| Function | Defined in | Called from, when | What it is |
+|---|---|---|---|
+| `state_gate_wait(t, lk)` | `os_state.cpp:932` | `os_kernel.cpp:374`, top of the keyed-wait loop, only when `g_sphase != 0`; its own first line returns when `g_sphase == 0` | Parks a thread that waits without a core while a save state drains or captures |
+| `state_gate_acq(t, lk)` | `os_state.cpp:937` | `os_kernel.cpp:523`, top of the core-wait loop, only when `g_sphase != 0`; returns `false` when `g_sphase == 0` | Grants no core to a waiter during a drain (sets `Thread::sgated`, which `best_waiter_for` skips) |
+| `state_kick_cores()` | `os_kernel.cpp:469` | `state_gate_acq` | One line: `kick_free_cores()`. It is scheduler code that lives in the kernel and is ported with it, not a save-state mechanism |
+| `state_time_get()` / `state_time_set()` | `os_kernel.cpp:1199/1206` | only `os_state.cpp` (capture and restore, lines 603 and 766) | The guest clock (QPC minus paused time) in the kernel file; ported with the kernel's clock |
+| `state_init()` | `os_state.cpp:952`, called at the end of `os_init` (`os_kernel.cpp:1264`) | once | Records the process start tick and starts optional driver threads only if `SNAP_CHECKPOINT` or `SNAP_STATE_TEST` is set |
+
+`g_sphase` (`os_state.cpp:51`) is written only inside `os_state.cpp` (lines 150, 205, 554, 563, 606, 708, 716) and nothing can set it without a save-state request (`snap_state_request`, from `ui_savestate.cpp` or the route/hotkey code). Invariant: while it is 0 both gates are inert, so with no way to request a save state the scheduler behaves exactly as on Windows in the idle phase. That is the only behaviour a first Linux version would have to preserve; the gates cannot be separated from the capture machinery without porting it, because `gate_block` and the unclean-grant counters live there. Consequence: any Linux definition of `g_sphase`, `state_gate_wait`, `state_gate_acq` and `state_init` would be a deliberate "save states disabled" configuration whose gates are unreachable, and `snap_state_request` and friends (called by the shared `ui_savestate.cpp`) would have to say that save states are unsupported instead of returning success. That is a policy decision, recorded as decision 2.
+
+**Write watch.** The consumer is `nvn_vk.cpp` (`SyncPoolRange`, lines 847-952): `GetWriteWatch(RESET, storage, size, ...)` per range, or one snapshot without reset per replay epoch. It already has a correct fallback: on failure it sets `ww = -1` and copies whole ranges; `SNAP_SYNC_FULL=1` or `SNAP_WRITE_WATCH=0` reserve without the flag and force that path. So full copies are semantically safe and only slower. Contract needed from a Linux mechanism: report the 4 KiB pages written in a range since the last query, with an optional reset of that range only, covering writes made by the kernel too (`fs_core.cpp:95` marks pages it filled from user mode, because on Windows kernel writes are not seen; a superset is harmless), and registration at reserve time.
+
+Facts measured on this machine (kernel 7.3.3, inside the container, unprivileged; one probe program, not a general proof):
+
+| Option | Works here | Per-range reset | Sees kernel writes | Privilege / availability | Cost and complexity |
+|---|---|---|---|---|---|
+| Full copies (existing fallback) | yes | n/a | n/a | none | no tracking; copies every range every replay; slowest, simplest, already exercised by the NVN layer |
+| Soft-dirty (`/proc/self/clear_refs`, pagemap bit 55) | yes (probe: only the written page reported) | **no**: clearing is per process, not per range | yes | needs `CONFIG_MEM_SOFT_DIRTY` | a pagemap read per query; a global reset would clear the state of every range and of any other user (checkpoint tools); cannot reproduce `GetWriteWatch(RESET)` per range |
+| `userfaultfd` write-protect, async (`UFFD_FEATURE_WP_ASYNC`, `UFFD_USER_MODE_ONLY`) + `PAGEMAP_SCAN` | yes (2 written pages reported at the right offsets; a kernel `read()` into a protected page succeeded, no `EFAULT`, and the page was reported) | **yes** (`PM_SCAN_WP_MATCHING` re-protects only the scanned range; the reset call itself was not exercised by the probe) | yes | kernel 6.7 or newer; unprivileged here (`vm.unprivileged_userfaultfd = 0`, `USER_MODE_ONLY` accepted); a seccomp profile may forbid it elsewhere | one ioctl per query, no fault-handler thread; the mapping must be registered at reserve time; the closest match to the Windows API. Not tested: behaviour with the NVN workload, `mprotect`/`munmap` of registered ranges, fork |
+
+No choice is made here. Both kernel-assisted options need the NVN layer (stage 7) to exercise them, so only the contract and the facts are recorded.
+
+**Decisions requested before part B can start:**
+
+1. **Host primitives.** How the OS layer reaches the host: a small neutral header (`os_host.h`) with `thread_start(entry, arg, reserved stack, suspended)`, `thread_resume`, `thread_yield`, `sleep`, `monotonic counter and frequency`, `set_priority`, `set_name`, `timer resolution request`, and the memory primitives (reserve, commit, decommit, release, query, aligned reserve), with the existing Win32 calls moved behind it unchanged and a POSIX side next to it. Alternative: `#if defined(_WIN32)` inside the three files. The first changes the Windows files in a reviewable, mechanical way; neither can be verified on Windows here.
+2. **State gates.** Accept a Linux "save states disabled" definition of `g_sphase`, the two gates and `state_init` (unreachable gates, honest "unsupported" answers from `snap_state_*`), or port `os_state.cpp` first.
+3. **Write watch.** Full copies first (existing, safe), then uffd-wp async with `PAGEMAP_SCAN` once the NVN stage can measure it, or soft-dirty (not recommended: no per-range reset).
+
+Suggested order once decided: (1) the primitives header and its POSIX tests (threads with reserved stacks, monotonic clock, sleep, memory reserve/commit/decommit), (2) `os_memory.cpp`, (3) `os_kernel.cpp` and `os_thread.cpp` against `os_ctx_sysv.cpp`, (4) the `state_*` decision, (5) `perf.cpp` or an explicit exclusion, (6) build `tests/os/os_test.cpp` on Linux and run it repeatedly.
+
+### Tests of stage 3
+
+| ctest name | Result in this branch |
+|---|---|
+| `ctx_sysv`, `ctx_sysv_repeat` | pass |
+| `os_posix_header`, `os_neutral_interfaces`, `source_classification`, `source_selection`, `json_lite`, `portable_sources_compile` | pass (8 of 8 in the full run) |
+
+Not run: the Windows build, the batch-built suites (`tests/os/os_test.cpp` and others), the game. `os_test` on Linux is blocked by part B.
 
 ## Known limits
 

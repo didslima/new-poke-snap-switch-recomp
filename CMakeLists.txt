@@ -45,6 +45,17 @@ if(UNIX AND NOT APPLE)
   target_include_directories(snap_os_posix_header_test PRIVATE runtime)
   target_compile_features(snap_os_posix_header_test PRIVATE cxx_std_20)
   add_test(NAME os_posix_header COMMAND snap_os_posix_header_test)
+
+  # Stage 3, part A: the System V context switch, tested alone (no scheduler, no guest, no GPU). The source is named here, not globbed.
+  find_package(Threads REQUIRED)
+  add_executable(snap_ctx_sysv_test tests/platform/ctx_sysv_test.cpp runtime/os/linux/os_ctx_sysv.cpp)
+  target_include_directories(snap_ctx_sysv_test PRIVATE runtime runtime/os)
+  target_compile_features(snap_ctx_sysv_test PRIVATE cxx_std_20)
+  target_compile_options(snap_ctx_sysv_test PRIVATE -O2 -g -fno-omit-frame-pointer -fno-strict-aliasing)
+  target_link_libraries(snap_ctx_sysv_test PRIVATE Threads::Threads)
+  add_test(NAME ctx_sysv COMMAND snap_ctx_sysv_test)
+  add_test(NAME ctx_sysv_repeat COMMAND snap_ctx_sysv_test --repeat 30)
+  set_tests_properties(ctx_sysv ctx_sysv_repeat PROPERTIES TIMEOUT 300)
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.
