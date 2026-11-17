@@ -284,6 +284,22 @@ if(UNIX AND NOT APPLE)
   add_test(NAME audio_core_linux COMMAND snap_audio_core_linux_test)
 
   if(SNAP_HAVE_SDL3)
+    add_executable(snap_audio_sdl3_linux_test
+      tests/audio/audio_sdl3_linux_test.cpp
+      runtime/audio/audio_out.cpp
+      runtime/audio/audio_null.cpp
+      runtime/audio/linux/audio_host_posix.cpp
+      runtime/audio/linux/audio_sdl3.cpp)
+    target_include_directories(snap_audio_sdl3_linux_test PRIVATE runtime/audio)
+    target_compile_features(snap_audio_sdl3_linux_test PRIVATE cxx_std_20)
+    target_compile_options(snap_audio_sdl3_linux_test PRIVATE -w)
+    target_compile_definitions(snap_audio_sdl3_linux_test PRIVATE HLE_WITH_SDL3)
+    target_link_libraries(snap_audio_sdl3_linux_test PRIVATE Threads::Threads SDL3::SDL3)
+    add_test(NAME audio_sdl3_linux
+      COMMAND ${CMAKE_COMMAND} -E env SDL_AUDIO_DRIVER=dummy $<TARGET_FILE:snap_audio_sdl3_linux_test>)
+  endif()
+
+  if(SNAP_HAVE_SDL3)
     foreach(_t IN ITEMS snap_init_linux_test snap_hle_core_linux_test snap_fs_linux_test snap_hid_linux_test snap_sdl3_backend_linux_test snap_profiles_linux_test)
       target_compile_definitions(${_t} PRIVATE HLE_WITH_SDL3)
       target_link_libraries(${_t} PRIVATE SDL3::SDL3)
