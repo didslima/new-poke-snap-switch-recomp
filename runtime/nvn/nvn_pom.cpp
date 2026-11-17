@@ -27,6 +27,7 @@
 #include "hle/visual_defaults.h"
 #include "nvn_fx.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_pom.h"
 
 namespace nvn {
@@ -78,8 +79,8 @@ std::unordered_map<uint64_t, uint8_t>& Table() {
 
 int ParseLevel(const char* s) {
   if (!s || !*s) return 0;
-  if (!_stricmp(s, "low") || !strcmp(s, "1")) return 1;
-  if (!_stricmp(s, "high") || !strcmp(s, "2") || !_stricmp(s, "on")) return 2;
+  if (nvn::os_host::ascii_ieq(s, "low") || !strcmp(s, "1")) return 1;
+  if (nvn::os_host::ascii_ieq(s, "high") || !strcmp(s, "2") || nvn::os_host::ascii_ieq(s, "on")) return 2;
   return 0;
 }
 

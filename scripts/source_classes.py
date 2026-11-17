@@ -66,6 +66,7 @@ _INCLUDE_ROOTS = ('runtime', 'host', 'runtime/nvn', 'runtime/ui', 'runtime/ui/th
 _REVIEWED_SWITCHES = {
     'runtime/simd.h': {'_WIN32', '__declspec'},   # SIMD_SELECTANY: __declspec(selectany) on Windows, __attribute__((weak)) elsewhere
     'runtime/audio/audio_out.h': {'_WIN32', '__declspec'},   # SNAP_AUDIO_API: __declspec(dllexport) on Windows, visibility("default") elsewhere
+    'runtime/nvn/nvn_host.h': {'_WIN32', '__declspec'},   # NVN_HOST_EXPORT: __declspec(dllexport) on Windows, visibility("default") elsewhere
     # message strings only: nn::os::SwitchToFiber and the guest's ExitProcess are guest API names, not host calls (os_thread.cpp calls neither)
     'runtime/os/os_thread.cpp': {'SwitchToFiber', 'ExitProcess'},
     # the guest's SVC names in the table that labels the SVC log (loader.cpp, {6, "QueryMemory"} ... {69, "CreateEvent"}); strings, not host calls

@@ -18,17 +18,18 @@
 #include "nvn_dev.h"
 #include "nvn_fx.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 
 namespace nvn {
 
 namespace {
-bool EnvOn(const char* n) { const char* e = getenv(n); return e && *e && strcmp(e, "0") != 0 && _stricmp(e, "off") != 0; }
+bool EnvOn(const char* n) { const char* e = getenv(n); return e && *e && strcmp(e, "0") != 0 && !nvn::os_host::ascii_ieq(e, "off"); }
 // Live values (dev loop: the A/B capture tool and F1 "Tuning" set them by env name); without SNAP_DEV they are the env values read once.
 struct Live {
   int aa = EnvOn("SNAP_FOLIAGE_AA") ? 1 : 0;
-  float leaf = [] { const char* e = getenv("SNAP_LEAF_TRANSLUCENCY"); if (!e || !*e || _stricmp(e, "off") == 0) return 0.0f; const float f = (float)atof(e); return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }();
+  float leaf = [] { const char* e = getenv("SNAP_LEAF_TRANSLUCENCY"); if (!e || !*e || nvn::os_host::ascii_ieq(e, "off")) return 0.0f; const float f = (float)atof(e); return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }();
   int soft = EnvOn("SNAP_SOFT_PARTICLES") ? 1 : 0;
-  float sway = [] { const char* e = getenv("SNAP_WIND_SWAY"); if (!e || !*e || _stricmp(e, "off") == 0) return 0.0f; const float f = (float)atof(e); return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }();
+  float sway = [] { const char* e = getenv("SNAP_WIND_SWAY"); if (!e || !*e || nvn::os_host::ascii_ieq(e, "off")) return 0.0f; const float f = (float)atof(e); return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }();
   int pick = 0;   // dev: one value runs one effect (cost runs): 1 edge smoothing, 2 translucency 1.0, 3 wind sway 1.0, 4 all three; 0 = the rows as set
   int swayPhase = [] { const char* e = getenv("SNAP_WIND_PHASE"); const int v = e && *e ? atoi(e) : 0; return v < 0 ? 0 : v > 7 ? 7 : v; }();   // debug: time offset step 0..7 (0.35 s each) for frozen-frame strips
   float swayAmp = [] { const char* e = getenv("SNAP_WIND_AMP"); const float f = e && *e ? (float)atof(e) : 0.0f; return f > 0 ? f : 0.0f; }();   // world units at full strength (0 = built in default)

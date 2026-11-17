@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Host-side objects behind the opaque guest NVN structs. Guest memory only holds {magic, impl*}.
 #pragma once
-#ifndef VK_USE_PLATFORM_WIN32_KHR
-#define VK_USE_PLATFORM_WIN32_KHR
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
 #include <vulkan/vulkan.h>
 #include "nvn_vkcount.h"
 
@@ -18,6 +9,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <mutex>

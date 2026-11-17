@@ -10,16 +10,25 @@
 // Every explicit switch (SNAP_SHADOW_RES, SNAP_SHADOW_DISTANCE, SNAP_SSAO_QUALITY, ...) still wins over the preset.
 #pragma once
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 
 namespace snaplight {
+inline bool ieq(const char* a, const char* b) {
+  while (*a && *b) {
+    if (std::tolower((unsigned char)*a) != std::tolower((unsigned char)*b)) return false;
+    ++a;
+    ++b;
+  }
+  return *a == *b;
+}
 inline int level() {
   static const int v = [] {
     const char* l = getenv("SNAP_LIGHTING");
     if (!l || !*l) return 0;
-    if (!_stricmp(l, "high") || !_stricmp(l, "enhanced")) return 1;
-    if (!_stricmp(l, "ultra") || !_stricmp(l, "maximum")) return 2;
+    if (ieq(l, "high") || ieq(l, "enhanced")) return 1;
+    if (ieq(l, "ultra") || ieq(l, "maximum")) return 2;
     return 0;
   }();
   return v;
