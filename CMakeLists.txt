@@ -182,14 +182,18 @@ if(UNIX AND NOT APPLE)
   target_compile_options(snap_hooks_linux_test PRIVATE -w)
   add_test(NAME hooks_linux COMMAND ${CMAKE_COMMAND} -E env SNAP_MEMLOG=1 $<TARGET_FILE:snap_hooks_linux_test>)
 
-  # Stage 5b: Linux runner bootstrap target and isolated CLI + 256 MiB stack tests.
-  snap_os_test(snap_boot_linux host/linux/boot_linux.cpp host/linux/runner_linux.cpp runtime/os/linux/os_host_posix.cpp)
+  # Stage 5b/5c: Linux runner bootstrap target, signal handling, and isolated tests.
+  snap_os_test(snap_boot_linux host/linux/boot_linux.cpp host/linux/runner_linux.cpp host/linux/crash_linux.cpp runtime/os/linux/os_host_posix.cpp)
   target_include_directories(snap_boot_linux PRIVATE host)
 
-  snap_os_test(snap_boot_linux_test tests/platform/boot_linux_test.cpp host/linux/runner_linux.cpp runtime/os/linux/os_host_posix.cpp)
+  snap_os_test(snap_boot_linux_test tests/platform/boot_linux_test.cpp host/linux/runner_linux.cpp host/linux/crash_linux.cpp runtime/os/linux/os_host_posix.cpp)
   target_include_directories(snap_boot_linux_test PRIVATE host)
   add_test(NAME boot_linux COMMAND snap_boot_linux_test)
   add_test(NAME boot_linux_help COMMAND snap_boot_linux --help)
+
+  snap_os_test(snap_crash_linux_test tests/platform/crash_linux_test.cpp host/linux/crash_linux.cpp)
+  target_include_directories(snap_crash_linux_test PRIVATE host)
+  add_test(NAME crash_linux COMMAND snap_crash_linux_test)
 endif()
 
 # Pure checks, no compiler needed: they run anywhere CMake and Python run.

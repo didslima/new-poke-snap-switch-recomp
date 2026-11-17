@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Linux runner bootstrap (stage 5B). See runner_linux.h.
 #include "runner_linux.h"
+#include "crash_linux.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -37,19 +38,34 @@ void runner_trampoline(void *p) {
     call->rc = call->fn(call->ud);
 }
 
+struct SignalGuard {
+    bool active = false;
+    SignalGuard() : active(install_signal_handlers(true)) {}
+    ~SignalGuard() {
+        if (active) uninstall_signal_handlers();
+    }
+};
+
 int bootstrap_runner_entry(void *ud) {
     const auto *opts = static_cast<const BootOpts *>(ud);
-    // Stage 5C/5D will execute the confirmed initialization sequence here:
-    //   1. install POSIX signal handlers (5C)
-    //   2. loader::load(opts->main_elf.c_str(), opts->sdk_elf.c_str())
-    //   3. os_init(&oc) with tp_init_var / tp_destroy_var
-    //   4. snap_host::install_guest_tls_hooks(oc)
-    //   5. loader::new_thread() for the main guest thread
-    //   6. os_adopt_main_thread(c, 0, -1)
-    //   7. run_initializers() / nninitStartup / nnMain
+    SignalGuard signals;
+    if (!signals.active) {
+        std::fprintf(stderr, "boot_linux: warning: could not install POSIX signal handlers\n");
+    }
+    if (shutdown_requested()) {
+        std::fprintf(stderr, "boot_linux: shutdown requested by signal %d before startup\n", shutdown_signal());
+        return 128 + shutdown_signal();
+    }
+    // Stage 5D will execute the confirmed initialization sequence here:
+    //   1. loader::load(opts->main_elf.c_str(), opts->sdk_elf.c_str())
+    //   2. os_init(&oc) with tp_init_var / tp_destroy_var
+    //   3. snap_host::install_guest_tls_hooks(oc)
+    //   4. loader::new_thread() for the main guest thread
+    //   5. os_adopt_main_thread(c, 0, -1)
+    //   6. run_initializers() / nninitStartup / nnMain
     std::fprintf(stderr,
                  "boot_linux: bootstrap ready (cmd=%s, main=%s, sdk=%s); "
-                 "ELF loading and guest execution are not wired in stage 5B (deferred to 5D)\n",
+                 "ELF loading and guest execution are not wired in stage 5B/5C (deferred to 5D)\n",
                  opts->cmd.c_str(), opts->main_elf.c_str(), opts->sdk_elf.c_str());
     return 2;
 }
