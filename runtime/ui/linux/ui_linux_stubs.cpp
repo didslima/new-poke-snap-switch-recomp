@@ -1,46 +1,21 @@
 // SPDX-License-Identifier: MIT
-// Explicit Linux stubs for Windows-only optional UI tabs/features (Stage 6F):
-//   - ui_options.cpp (ShellExecuteW / Windows-only launcher options)
+// Explicit Linux stubs for Windows-only optional UI tabs/features (Stage 6F/6G):
 //   - ui_saves.cpp (ShellExecuteW / CreateProcessW restart)
-//   - ui_extras.cpp (Winsock2 / ShellExecuteW)
-//   - ui_bench.cpp (shlobj.h benchmark UI)
-//   - ui_shiny.cpp (mmsystem PlaySoundW shiny chime/badges)
 //   - ui_test.cpp (Win32 HWND/GDI scripted UI test)
+//   - host/window_opts.cpp (Win32 window mode/monitor options)
+//   - host/mods/problem_report.cpp (Win32 problem report archive)
 #if !defined(__linux__)
 #error "runtime/ui/linux/ui_linux_stubs.cpp is Linux-only"
 #endif
 
 #include "../ui_internal.h"
 #include "hle/cheats.h"
+#include "window_opts_public.h"
 #include "imgui.h"
 
-namespace snap::ui {
+#include <cstdio>
 
-void tab_graphics() {
-  ImGui::TextDisabled("Graphics options tab is not yet ported on Linux.");
-}
-void tab_display() {
-  ImGui::TextDisabled("Display options tab is not yet ported on Linux.");
-}
-void tab_photos() {
-  ImGui::TextDisabled("Photos options tab is not yet ported on Linux.");
-}
-void tab_mods() {
-  ImGui::TextDisabled("Mods options tab is not yet ported on Linux.");
-}
-void audio_output_section() {}
-void access_rows() {}
-void options_menu_opened() {}
-int options_pending_restart(std::string* /*names*/) { return 0; }
-void options_restart_bar() {}
-bool options_test_set(const std::string& /*key*/, const std::string& /*value*/) { return false; }
-std::string options_test_get(const std::string& /*key*/) { return {}; }
-std::string options_note(const std::string& /*key*/) { return {}; }
-void options_test_scroll(float /*fraction*/) {}
-bool options_test_option_when(const std::string& /*key*/, std::string* /*when*/) { return false; }
-bool options_test_mods(const std::string& /*op*/, const std::string& /*id*/, int /*arg*/, std::string* /*state*/) {
-  return false;
-}
+namespace snap::ui {
 
 void tab_saves() {
   ImGui::TextDisabled("Saves management tab is not yet ported on Linux.");
@@ -55,21 +30,36 @@ bool saves_test_backups(const std::string& /*action*/, int /*n*/, std::string* /
 bool hold_confirm(const char* /*label*/, float /*secs*/, const ImVec4& /*color*/) { return false; }
 void restart_game() {}
 
-void extras_controller() {}
-void gallery_section() {}
-
-void tab_benchmark() {
-  ImGui::TextDisabled("Benchmark tab is not yet ported on Linux.");
-}
-
-bool shiny_fx_active() { return false; }
-void draw_shiny_fx(ImVec2 /*size*/) {}
-bool shiny_badges_active() { return false; }
-void draw_shiny_badges(ImVec2 /*size*/) {}
-
 void test_tick(double /*now*/) {}
 
 }  // namespace snap::ui
+
+extern "C" {
+
+int snap_problem_report(const char* /*who*/, char* path_out, int path_cap, char* why_out, int why_cap) {
+  if (path_out && path_cap > 0) path_out[0] = '\0';
+  if (why_out && why_cap > 0) {
+    std::snprintf(why_out, static_cast<size_t>(why_cap), "Problem report export is not yet supported on Linux.");
+  }
+  return 0;
+}
+
+int snap_window_get_mode(void) { return SNAP_WINDOW_WINDOWED; }
+void snap_window_set_mode(int /*mode*/) {}
+void snap_window_toggle_fullscreen(void) {}
+int snap_window_monitor_count(void) { return 0; }
+const char* snap_window_monitor_name(int /*index*/) { return nullptr; }
+int snap_window_get_monitor(void) { return -1; }
+void snap_window_set_monitor(int /*index*/) {}
+int snap_window_get_pause_on_focus_loss(void) { return 0; }
+void snap_window_set_pause_on_focus_loss(int /*on*/) {}
+int snap_window_get_mute_in_background(void) { return 0; }
+void snap_window_set_mute_in_background(int /*on*/) {}
+void snap_window_set_frame_cap(int /*fps*/) {}
+int snap_window_focused(void) { return 1; }
+int snap_window_paused(void) { return 0; }
+
+}  // extern "C"
 
 namespace hle::cheats {
 

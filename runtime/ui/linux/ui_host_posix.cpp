@@ -11,12 +11,17 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <arpa/inet.h>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
+#include <netinet/in.h>
 #include <string>
+#include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 #ifdef HLE_WITH_SDL3
@@ -185,6 +190,128 @@ uint64_t current_process_id() {
 
 char path_sep() {
   return '/';
+}
+
+namespace {
+
+void spawn_detached_argv(const char* dir, char* const argv[]) {
+  const pid_t pid = ::fork();
+  if (pid != 0) return;
+  ::setsid();
+  if (dir && *dir) {
+    if (::chdir(dir) != 0) _exit(127);
+  }
+  ::execvp(argv[0], argv);
+  _exit(127);
+}
+
+bool has_gui_display() {
+  const char* disp = std::getenv("DISPLAY");
+  const char* way = std::getenv("WAYLAND_DISPLAY");
+  return (disp && *disp) || (way && *way);
+}
+
+}  // namespace
+
+__attribute__((weak)) extern "C" bool snap_benchmark_launch_from_game() {
+  return false;
+}
+
+void play_wav_async(const void* /*wav_bytes*/, size_t /*size*/) {
+  // Optional audio chime is not yet wired on Linux; visual badge still renders.
+}
+
+std::string documents_dir() {
+  if (const char* xdg = std::getenv("XDG_DOCUMENTS_DIR"); xdg && *xdg) {
+    return xdg;
+  }
+  if (const char* home = std::getenv("HOME"); home && *home) {
+    return (std::filesystem::path(home) / "Documents").string();
+  }
+  return {};
+}
+
+std::string exe_dir() {
+  std::error_code ec;
+  const std::filesystem::path p = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (ec || p.empty()) return {};
+  return p.parent_path().string();
+}
+
+bool beside_exe(const char* rel_path) {
+  if (!rel_path || !*rel_path) return false;
+  const std::string dir = exe_dir();
+  if (dir.empty()) return false;
+  std::string rel(rel_path);
+  std::replace(rel.begin(), rel.end(), '\\', '/');
+  std::error_code ec;
+  return std::filesystem::exists(std::filesystem::path(dir) / rel, ec);
+}
+
+bool benchmark_launch_from_game() {
+  return snap_benchmark_launch_from_game();
+}
+
+bool tcp_port_open(const char* ipv4_addr, unsigned short port) {
+  const int s = ::socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) return false;
+  sockaddr_in a{};
+  a.sin_family = AF_INET;
+  a.sin_port = htons(port);
+  if (::inet_pton(AF_INET, ipv4_addr ? ipv4_addr : "127.0.0.1", &a.sin_addr) != 1) {
+    ::close(s);
+    return false;
+  }
+  const bool ok = (::connect(s, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0);
+  ::close(s);
+  return ok;
+}
+
+void sleep_ms(unsigned ms) {
+  std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+void open_folder(const std::string& dir) {
+  if (dir.empty()) return;
+  std::error_code ec;
+  std::filesystem::create_directories(std::filesystem::path(dir), ec);
+  if (!has_gui_display()) return;
+  char* const argv[] = {const_cast<char*>("xdg-open"), const_cast<char*>(dir.c_str()), nullptr};
+  spawn_detached_argv(nullptr, argv);
+}
+
+void open_url(const std::string& url) {
+  if (url.empty() || !has_gui_display()) return;
+  char* const argv[] = {const_cast<char*>("xdg-open"), const_cast<char*>(url.c_str()), nullptr};
+  spawn_detached_argv(nullptr, argv);
+}
+
+bool launch_gallery_server(const std::string& root, const std::string& profile, const std::string& port_file) {
+  if (root.empty()) return false;
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path root_p(root);
+  const fs::path py_venv = root_p / "tools" / "venv-recomp" / "bin" / "python3";
+  const std::string py_exe = fs::exists(py_venv, ec) ? py_venv.string() : std::string("python3");
+  const std::string script = (root_p / "tools-src" / "gallery" / "serve.py").string();
+  if (!fs::exists(script, ec)) return false;
+  std::string prof = profile.empty() ? std::string("default") : profile;
+  char* const argv[] = {
+      const_cast<char*>(py_exe.c_str()),
+      const_cast<char*>("-E"),
+      const_cast<char*>("-P"),
+      const_cast<char*>(script.c_str()),
+      const_cast<char*>("--no-open"),
+      const_cast<char*>("--profile"),
+      const_cast<char*>(prof.c_str()),
+      const_cast<char*>("--port"),
+      const_cast<char*>("8777"),
+      const_cast<char*>("--port-file"),
+      const_cast<char*>(port_file.c_str()),
+      nullptr,
+  };
+  spawn_detached_argv(root.c_str(), argv);
+  return true;
 }
 
 }  // namespace snap::ui::host

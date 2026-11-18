@@ -2,11 +2,6 @@
 // "Benchmark" tab of the F1 overlay: starts the built-in ride benchmark (host/benchmark.cpp). The benchmark runs in its own copy of the game on a
 // scratch save profile, so this game closes first (the player's save is committed atomically; unsaved progress is lost). The tab also shows the
 // newest saved result.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <shlobj.h>
-
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -15,14 +10,10 @@
 #include <sstream>
 #include <string>
 
+#include "ui_host.h"
 #include "ui_internal.h"
 #include "ui_i18n.h"
 #include "ui_theme.h"
-
-// host/benchmark.cpp; a build without the host (the ui unit tests) gets a stub that reports failure.
-extern "C" bool snap_benchmark_launch_from_game();
-extern "C" bool snap_benchmark_launch_none() { return false; }
-#pragma comment(linker, "/alternatename:snap_benchmark_launch_from_game=snap_benchmark_launch_none")
 
 namespace snap::ui {
 namespace {
@@ -40,10 +31,9 @@ std::string g_msg;
 
 fs::path results_dir() {
   if (const char* e = std::getenv("SNAP_BENCH_DIR")) if (*e) return fs::u8path(e);
-  PWSTR docs = nullptr;
-  fs::path d;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs)) && docs) { d = docs; CoTaskMemFree(docs); }
-  return d / L"Snap Recomp" / L"benchmarks";
+  const std::string docs = host::documents_dir();
+  if (docs.empty()) return {};
+  return fs::u8path(docs) / "Snap Recomp" / "benchmarks";
 }
 
 double field(const std::string& t, const char* key) {
@@ -58,8 +48,8 @@ void refresh() {
   std::error_code ec;
   fs::path best;
   for (auto& e : fs::directory_iterator(results_dir(), ec)) {
-    const std::wstring n = e.path().filename().wstring();
-    if (e.path().extension() == L".json" && n.rfind(L"benchmark-", 0) == 0 && (best.empty() || n > best.filename().wstring())) best = e.path();
+    const std::string n = e.path().filename().string();
+    if (e.path().extension() == ".json" && n.rfind("benchmark-", 0) == 0 && (best.empty() || n > best.filename().string())) best = e.path();
   }
   if (best.empty()) return;
   std::ifstream f(best, std::ios::binary);
@@ -87,7 +77,7 @@ void tab_benchmark() {
   ImGui::TextColored(t.text_dim, "%s", tr("This game closes first; unsaved progress is lost. Run it twice on the same settings to see how steady the numbers are."));
   ImGui::Spacing();
   if (hold_confirm("Hold to start the benchmark", 1.0f, t.good)) {
-    if (!snap_benchmark_launch_from_game()) g_msg = "The benchmark could not be started.";
+    if (!host::benchmark_launch_from_game()) g_msg = "The benchmark could not be started.";
   }
   if (!g_msg.empty()) ImGui::TextColored(t.error, "%s", tr(g_msg));
   ImGui::Spacing();

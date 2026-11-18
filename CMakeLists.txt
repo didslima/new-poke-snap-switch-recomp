@@ -342,7 +342,7 @@ if(UNIX AND NOT APPLE)
   add_test(NAME nvn_os_host_linux COMMAND snap_nvn_os_host_linux_test)
 
   set(SNAP_LINUX_NVN_RENDERER_SOURCES ${SNAP_LINUX_SOURCES})
-  list(FILTER SNAP_LINUX_NVN_RENDERER_SOURCES INCLUDE REGEX "^runtime/(nvn|fx/ocean_fft|os|hle|audio|ui)/")
+  list(FILTER SNAP_LINUX_NVN_RENDERER_SOURCES INCLUDE REGEX "^runtime/(nvn|fx/ocean_fft|os|hle|audio|ui|mods)/")
   add_library(snap_nvn_renderer_linux STATIC ${SNAP_LINUX_NVN_RENDERER_SOURCES})
   target_include_directories(snap_nvn_renderer_linux PRIVATE
     runtime host runtime/nvn runtime/ui runtime/ui/third_party/imgui runtime/hle runtime/fx/ocean_fft)

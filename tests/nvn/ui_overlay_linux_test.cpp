@@ -23,6 +23,10 @@ extern "C" void rt_dispatch(void*) {
 }
 
 extern "C" void snap_ui_shutdown();
+extern "C" void snap_shiny_fx_trigger(const char* species);
+extern "C" int snap_problem_report(const char* who, char* path_out, int path_cap, char* why_out, int why_cap);
+extern "C" int snap_window_get_mode(void);
+extern "C" int snap_window_monitor_count(void);
 
 namespace {
 
@@ -231,6 +235,11 @@ void test_sdl3_hotkeys_and_vulkan_present() {
   vkCmdPipelineBarrier2(cb, &pre_di);
 
   snap::ui::overlay_set_open(true);
+  snap_shiny_fx_trigger("Pikachu");
+  CHECK(snap::ui::shiny_fx_active());
+  snap::ui::options_menu_opened();
+  CHECK(snap::ui::options_pending_restart(nullptr) >= 0);
+  CHECK(!snap::ui::options_test_get("vsync").empty());
   SnapUiFrame uf{inst, phys, dev, queue, family, cb, img, VK_FORMAT_B8G8R8A8_UNORM, {640, 360},
                  reinterpret_cast<VkSwapchainKHR>(0x1), 3, win.native_handle()};
   snap_ui_present(&uf);
@@ -256,10 +265,28 @@ void test_sdl3_hotkeys_and_vulkan_present() {
   win.destroy();
 }
 
+void test_stage6g_ui_features() {
+  CHECK(!snap::ui::host::exe_dir().empty());
+  CHECK(snap::ui::host::beside_exe("snap_ui_overlay_linux_test"));
+  CHECK(!snap::ui::host::beside_exe("definitely_missing_stage6g_file.bin"));
+  CHECK(!snap::ui::host::benchmark_launch_from_game());
+  CHECK(!snap::ui::host::tcp_port_open("127.0.0.1", 0));
+  snap::ui::host::play_wav_async(nullptr, 0);
+
+  char path_buf[64] = "dirty";
+  char why_buf[128] = {};
+  CHECK(snap_problem_report("test", path_buf, sizeof(path_buf), why_buf, sizeof(why_buf)) == 0);
+  CHECK(path_buf[0] == '\0');
+  CHECK(why_buf[0] != '\0');
+  CHECK(snap_window_get_mode() == 0);
+  CHECK(snap_window_monitor_count() == 0);
+}
+
 }  // namespace
 
 int main() {
   test_ui_host_basics();
+  test_stage6g_ui_features();
   test_sdl3_hotkeys_and_vulkan_present();
   std::printf("ui_overlay_linux_test: %d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
