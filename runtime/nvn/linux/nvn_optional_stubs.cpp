@@ -14,6 +14,8 @@
 #include "../nvn_hdr.h"
 #include "../nvn_shot.h"
 
+#include <cstdint>
+
 namespace nvn {
 
 // ---- nvn_framegen.h ----
@@ -103,8 +105,12 @@ void DumpPQ(const char* /*base*/, const void* /*px*/, uint32_t /*w*/, uint32_t /
 
 extern "C" {
 void snap_framegen_state_loaded() {}
-__attribute__((weak)) int snap_mods_ab_live = 0;
-__attribute__((weak)) int snap_mods_ab_original = 0;
-__attribute__((weak)) double snap_mods_ab_period = 0.0;
-__attribute__((weak)) void snap_shiny_fx_trigger(int) {}
+__attribute__((weak)) unsigned snap_mods_ab_period() { return 0; }
+__attribute__((weak)) bool snap_mods_ab_live(unsigned /*present*/) { return false; }
+__attribute__((weak)) const uint8_t* snap_mods_ab_original(const uint8_t* /*src*/, uint32_t /*w*/, uint32_t /*h*/,
+                                                           uint32_t /*mips*/, uint32_t* /*ow*/, uint32_t* /*oh*/,
+                                                           uint32_t* /*om*/) {
+  return nullptr;
+}
+__attribute__((weak)) void snap_shiny_fx_trigger(const char* /*species*/) {}
 }

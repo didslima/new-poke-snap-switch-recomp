@@ -99,11 +99,30 @@ void test_vulkan_device_and_sdl_surface() {
 #endif
 }
 
+extern "C" {
+unsigned snap_mods_ab_period();
+bool snap_mods_ab_live(unsigned present);
+const uint8_t* snap_mods_ab_original(const uint8_t* src, uint32_t w, uint32_t h, uint32_t mips,
+                                     uint32_t* ow, uint32_t* oh, uint32_t* om);
+void snap_shiny_fx_trigger(const char* species);
+}
+
+void test_optional_stub_functions() {
+  CHECK(snap_mods_ab_period() == 0u);
+  CHECK(!snap_mods_ab_live(0));
+  CHECK(!snap_mods_ab_live(120));
+  uint32_t ow = 1, oh = 1, om = 1;
+  const uint8_t dummy[4] = {};
+  CHECK(snap_mods_ab_original(dummy, 64, 64, 1, &ow, &oh, &om) == nullptr);
+  snap_shiny_fx_trigger("Pikachu");
+}
+
 }  // namespace
 
 int main() {
   test_nvn_bootstrap_table();
   test_vulkan_device_and_sdl_surface();
+  test_optional_stub_functions();
   std::printf("nvn_renderer_linux_test: %d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }
