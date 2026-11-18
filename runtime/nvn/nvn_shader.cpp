@@ -170,17 +170,26 @@ bool RunHarness(const std::string& bin, const std::string& spv, const std::strin
   if (const char* e = getenv("SNAP_XLATE_REV"); e && *e && strcmp(e, "0")) {   // revision n: build\xlate\r<n>\h (scripts/xlate_build.ps1), under the same project root as the default harness
     size_t k = dll.find("tools\\shader_harness");
     if (k == std::string::npos) k = dll.find("tools/shader_harness");
-    if (k != std::string::npos) dll = dll.substr(0, k) + "build\\xlate\\r" + e + "\\h\\bin\\Release\\net10.0\\ShaderHarness.dll";
+    if (k != std::string::npos) {
+      const char sep = nvn::os_host::path_sep();
+      dll = dll.substr(0, k) + "build" + sep + "xlate" + sep + "r" + e + sep + "h" + sep + "bin" + sep + "Release" + sep + "net10.0" + sep + "ShaderHarness.dll";
+    }
   }
-  if (dll.empty()) {   // release build (no baked dev path): the harness folder next to the exe
+  if (dll.empty() || !nvn::os_host::file_exists(dll)) {   // release build or fallback: harness folder next to exe or repo tools/
     const char sep = nvn::os_host::path_sep();
-    dll = nvn::os_host::exe_dir() + sep + "shader_harness" + sep + "ShaderHarness.exe";
+    const std::string exe_base = nvn::os_host::exe_dir() + sep + "shader_harness" + sep;
+    const std::string repo_rel = std::string("tools") + sep + "shader_harness" + sep + "bin" + sep + "Release" + sep + "net10.0" + sep + "ShaderHarness.dll";
+    if (nvn::os_host::file_exists(exe_base + "ShaderHarness.exe")) dll = exe_base + "ShaderHarness.exe";
+    else if (nvn::os_host::file_exists(exe_base + "ShaderHarness")) dll = exe_base + "ShaderHarness";
+    else if (nvn::os_host::file_exists(exe_base + "ShaderHarness.dll")) dll = exe_base + "ShaderHarness.dll";
+    else if (nvn::os_host::file_exists(repo_rel)) dll = repo_rel;
+    else if (dll.empty()) dll = exe_base + "ShaderHarness.exe";
   }
-  if (const char* e = getenv("NVN_SHADER_HARNESS")) dll = e;
+  if (const char* e = getenv("NVN_SHADER_HARNESS"); e && *e) dll = e;
   if (dll.empty()) { LogError("shader translation needs the harness: set NVN_SHADER_HARNESS=<ShaderHarness.dll>"); return false; }
   std::ostringstream cl;
-  const bool native = dll.size() > 4 && nvn::os_host::ascii_ieq(dll.c_str() + dll.size() - 4, ".exe");   // self-contained publish (release): run the apphost, no dotnet
-  if (!native) cl << "dotnet ";
+  const bool is_dll = dll.size() > 4 && nvn::os_host::ascii_ieq(dll.c_str() + dll.size() - 4, ".dll");   // .dll runs via dotnet; native apphosts (.exe or Linux binary) run directly
+  if (is_dll) cl << "dotnet ";
   cl << "\"" << dll << "\" --nvn \"" << bin << "\" \"" << spv << "\" \"" << json << "\" " << stage << " " << constOff << " "
      << codeOff;
   if (!nvn::os_host::run_shader_harness(cl.str(), json)) {

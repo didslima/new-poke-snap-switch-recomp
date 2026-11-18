@@ -29,8 +29,11 @@ __attribute__((weak)) void snap_crashlog_fatal(const char*, const char*) {}
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fcntl.h>
 #include <mutex>
+#include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -343,9 +346,178 @@ void sha256(const void* data, size_t len, uint8_t out[32]) {
   sha256_2(data, len, nullptr, 0, out);
 }
 
-bool run_shader_harness(const std::string&, const std::string&) {
-  // ShaderHarness.exe is not available on Linux; report unavailable explicitly.
-  return false;
+namespace {
+
+bool parse_command_argv(const std::string& cmd, std::vector<std::string>& out) {
+  out.clear();
+  std::string cur;
+  bool in_tok = false;
+  char quote = '\0';
+  for (size_t i = 0; i < cmd.size(); ++i) {
+    const char ch = cmd[i];
+    if (quote) {
+      if (ch == quote) {
+        quote = '\0';
+      } else {
+        cur.push_back(ch);
+      }
+      in_tok = true;
+      continue;
+    }
+    if (ch == '"' || ch == '\'') {
+      quote = ch;
+      in_tok = true;
+    } else if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+      if (in_tok) {
+        out.push_back(std::move(cur));
+        cur.clear();
+        in_tok = false;
+      }
+    } else {
+      cur.push_back(ch);
+      in_tok = true;
+    }
+  }
+  if (quote != '\0') return false;
+  if (in_tok) out.push_back(std::move(cur));
+  return !out.empty();
+}
+
+int harness_timeout_ms() {
+  if (const char* e = std::getenv("SNAP_HARNESS_TIMEOUT_MS"); e && *e) {
+    const int v = std::atoi(e);
+    if (v > 0) return v;
+  }
+  return 600000;
+}
+
+}  // namespace
+
+bool run_shader_harness(const std::string& cmd, const std::string& json_path) {
+  std::vector<std::string> argv_storage;
+  if (!parse_command_argv(cmd, argv_storage) || json_path.empty()) {
+    std::fprintf(stderr, "[nvn][harness] invalid command or empty output path\n");
+    return false;
+  }
+
+  const char* runtime_exe = argv_storage[0].c_str();
+  const char* harness_target = argv_storage.size() > 1 ? argv_storage[1].c_str() : runtime_exe;
+  if (argv_storage[0] == "dotnet" && argv_storage.size() > 1) {
+    struct stat st_dll {};
+    if (::stat(argv_storage[1].c_str(), &st_dll) != 0 || !S_ISREG(st_dll.st_mode)) {
+      std::fprintf(stderr, "[nvn][harness] missing harness dll: %s\n", argv_storage[1].c_str());
+      return false;
+    }
+  }
+
+  int fds[2] = {-1, -1};
+  if (::pipe(fds) != 0) {
+    std::fprintf(stderr, "[nvn][harness] pipe() failed (errno=%d: %s)\n", errno, std::strerror(errno));
+    return false;
+  }
+  ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+  ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+
+  std::vector<char*> c_argv;
+  c_argv.reserve(argv_storage.size() + 1);
+  for (std::string& s : argv_storage) c_argv.push_back(s.data());
+  c_argv.push_back(nullptr);
+
+  const pid_t pid = ::fork();
+  if (pid < 0) {
+    std::fprintf(stderr, "[nvn][harness] fork() failed (errno=%d: %s)\n", errno, std::strerror(errno));
+    ::close(fds[0]);
+    ::close(fds[1]);
+    return false;
+  }
+
+  if (pid == 0) {
+    ::close(fds[0]);
+    ::dup2(fds[1], STDOUT_FILENO);
+    ::dup2(fds[1], STDERR_FILENO);
+    ::close(fds[1]);
+    ::execvp(c_argv[0], c_argv.data());
+    std::fprintf(stderr, "execvp(%s) failed: %s\n", c_argv[0], std::strerror(errno));
+    _exit(127);
+  }
+
+  ::close(fds[1]);
+  const int fl = ::fcntl(fds[0], F_GETFL, 0);
+  if (fl >= 0) ::fcntl(fds[0], F_SETFL, fl | O_NONBLOCK);
+
+  const int timeout_ms = harness_timeout_ms();
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  std::string output;
+  bool timed_out = false;
+  bool pipe_open = true;
+
+  while (pipe_open) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      timed_out = true;
+      break;
+    }
+    const int rem_ms = static_cast<int>(
+        std::min<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count(), 1000));
+    struct pollfd pfd {};
+    pfd.fd = fds[0];
+    pfd.events = POLLIN | POLLHUP;
+    const int pr = ::poll(&pfd, 1, std::max(1, rem_ms));
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (pr == 0) continue;
+    char buf[512];
+    for (;;) {
+      const ssize_t n = ::read(fds[0], buf, sizeof(buf));
+      if (n > 0) {
+        if (output.size() < 65536) {
+          output.append(buf, static_cast<size_t>(std::min<ssize_t>(n, static_cast<ssize_t>(65536 - output.size()))));
+        }
+      } else if (n == 0) {
+        pipe_open = false;
+        break;
+      } else {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        if (errno == EINTR) continue;
+        pipe_open = false;
+        break;
+      }
+    }
+  }
+
+  if (timed_out) {
+    ::kill(pid, SIGKILL);
+  }
+  ::close(fds[0]);
+
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+  }
+
+  if (timed_out) {
+    std::fprintf(stderr, "[nvn][harness] timeout after %d ms (runtime=%s, target=%s)\n",
+                 timeout_ms, runtime_exe, harness_target);
+    return false;
+  }
+
+  const int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+  if (!WIFEXITED(status) || exit_code != 0) {
+    const std::string snippet = output.size() > 512 ? output.substr(0, 512) + "..." : output;
+    std::fprintf(stderr, "[nvn][harness] failed (runtime=%s, target=%s, exit=%d)%s%s\n",
+                 runtime_exe, harness_target, exit_code, snippet.empty() ? "" : ": ", snippet.c_str());
+    return false;
+  }
+
+  struct stat st_out {};
+  if (::stat(json_path.c_str(), &st_out) != 0 || !S_ISREG(st_out.st_mode) || st_out.st_size <= 0) {
+    std::fprintf(stderr, "[nvn][harness] missing or empty output artifact: %s (runtime=%s, target=%s, exit=0)\n",
+                 json_path.c_str(), runtime_exe, harness_target);
+    return false;
+  }
+
+  return true;
 }
 
 bool run_process_capture(const std::string& cmd, std::string* out_output, int* out_exit_code) {

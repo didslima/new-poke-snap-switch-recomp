@@ -373,6 +373,76 @@ void test_vulkan_surface_and_upscale_stubs() {
 #endif
 }
 
+void test_shader_harness_posix() {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  const fs::path base = fs::path(nvn::os_host::temp_dir()) / "snap_harness_test";
+  fs::remove_all(base, ec);
+  const fs::path spaced_dir = base / "dir with spaces";
+  fs::create_directories(spaced_dir, ec);
+  CHECK(fs::exists(spaced_dir));
+
+  const fs::path ok_script = spaced_dir / "mock harness.py";
+  const fs::path out_json = spaced_dir / "out shader.json";
+  {
+    const std::string body =
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "mode = sys.argv[1]\n"
+        "out = sys.argv[2]\n"
+        "if mode == 'ok':\n"
+        "    open(out, 'w').write('{\"ok\":true}\\n')\n"
+        "    sys.exit(0)\n"
+        "elif mode == 'empty':\n"
+        "    open(out, 'w').write('')\n"
+        "    sys.exit(0)\n"
+        "elif mode == 'noout':\n"
+        "    sys.exit(0)\n"
+        "elif mode == 'fail':\n"
+        "    sys.stderr.write('synthetic failure\\n')\n"
+        "    sys.exit(3)\n"
+        "elif mode == 'sleep':\n"
+        "    time.sleep(2.0)\n"
+        "    sys.exit(0)\n";
+    CHECK(nvn::os_host::write_file_bytes(ok_script.string(), body.data(), body.size()));
+    fs::permissions(ok_script,
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
+                    fs::perm_options::replace, ec);
+    CHECK(!ec);
+  }
+
+  // 1. Success with spaces in both executable path and output json path.
+  CHECK(nvn::os_host::run_shader_harness("\"" + ok_script.string() + "\" ok \"" + out_json.string() + "\"",
+                                        out_json.string()));
+  CHECK(nvn::os_host::file_exists(out_json.string()));
+
+  // 2. Missing executable / missing dll.
+  CHECK(!nvn::os_host::run_shader_harness("\"" + (spaced_dir / "missing_harness").string() + "\"", out_json.string()));
+  CHECK(!nvn::os_host::run_shader_harness("dotnet \"" + (spaced_dir / "missing.dll").string() + "\"", out_json.string()));
+
+  // 3. Nonzero exit code.
+  fs::remove(out_json, ec);
+  CHECK(!nvn::os_host::run_shader_harness("\"" + ok_script.string() + "\" fail \"" + out_json.string() + "\"",
+                                         out_json.string()));
+
+  // 4. Exit 0 but missing output artifact.
+  fs::remove(out_json, ec);
+  CHECK(!nvn::os_host::run_shader_harness("\"" + ok_script.string() + "\" noout \"" + out_json.string() + "\"",
+                                         out_json.string()));
+
+  // 5. Exit 0 but empty output artifact.
+  CHECK(!nvn::os_host::run_shader_harness("\"" + ok_script.string() + "\" empty \"" + out_json.string() + "\"",
+                                         out_json.string()));
+
+  // 6. Timeout handling.
+  ::setenv("SNAP_HARNESS_TIMEOUT_MS", "100", 1);
+  CHECK(!nvn::os_host::run_shader_harness("\"" + ok_script.string() + "\" sleep \"" + out_json.string() + "\"",
+                                         out_json.string()));
+  ::unsetenv("SNAP_HARNESS_TIMEOUT_MS");
+
+  fs::remove_all(base, ec);
+}
+
 }  // namespace
 
 int main() {
@@ -387,6 +457,7 @@ int main() {
   test_writeback_watch();
   test_pacing_helpers();
   test_vulkan_surface_and_upscale_stubs();
+  test_shader_harness_posix();
   std::printf("nvn_os_host_linux_test: %d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }
