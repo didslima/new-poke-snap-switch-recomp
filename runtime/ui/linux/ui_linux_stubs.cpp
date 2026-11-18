@@ -44,21 +44,6 @@ int snap_problem_report(const char* /*who*/, char* path_out, int path_cap, char*
   return 0;
 }
 
-int snap_window_get_mode(void) { return SNAP_WINDOW_WINDOWED; }
-void snap_window_set_mode(int /*mode*/) {}
-void snap_window_toggle_fullscreen(void) {}
-int snap_window_monitor_count(void) { return 0; }
-const char* snap_window_monitor_name(int /*index*/) { return nullptr; }
-int snap_window_get_monitor(void) { return -1; }
-void snap_window_set_monitor(int /*index*/) {}
-int snap_window_get_pause_on_focus_loss(void) { return 0; }
-void snap_window_set_pause_on_focus_loss(int /*on*/) {}
-int snap_window_get_mute_in_background(void) { return 0; }
-void snap_window_set_mute_in_background(int /*on*/) {}
-void snap_window_set_frame_cap(int /*fps*/) {}
-int snap_window_focused(void) { return 1; }
-int snap_window_paused(void) { return 0; }
-
 }  // extern "C"
 
 namespace hle::cheats {

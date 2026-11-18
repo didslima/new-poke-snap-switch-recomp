@@ -25,6 +25,7 @@ struct WindowEvents {
   bool resized = false;
   bool display_changed = false;
   bool focus_changed = false;
+  bool toggle_fullscreen = false;
   int width = 0;
   int height = 0;
   int pixel_width = 0;
@@ -50,6 +51,10 @@ class HostWindow {
 
   bool set_fullscreen(bool fullscreen);
   bool is_fullscreen() const { return fullscreen_; }
+  bool set_display(int index);          // 0-based display index
+  bool set_window_size(int w, int h);
+  static int display_count();
+  static std::string display_name(int index);   // "Name WxH" or empty when out of range
   void request_close() { quit_requested_ = true; }
   bool quit_requested() const { return quit_requested_; }
 

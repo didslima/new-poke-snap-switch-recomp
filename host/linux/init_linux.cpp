@@ -18,6 +18,7 @@
 #include "nvn/nvn_host.h"
 #include "os/os.h"
 #include "preflight_linux.h"
+#include "window_opts_linux.h"
 
 int snap_bind_audio();
 void snap_bind_nvn();
@@ -95,6 +96,13 @@ void hook_present(void *, int slot, int w, int h) {
         std::fflush(nullptr);
         std::_Exit(exit_code);
     }
+    window_opts_wait_if_paused(
+        [](void *) -> bool {
+            const WindowEvents pev = pump_host_window_events();
+            int code = 0;
+            return !check_present_exit(pev.quit_requested, &code);
+        },
+        nullptr);
 }
 
 void hook_submit(void *, int, int) {
@@ -191,10 +199,19 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
     out.stage = InitStage::Window;
     if (!opts.no_window && !std::getenv("SNAP_HEADLESS")) {
         WindowConfig wcfg;
+        window_opts_initial_config(&wcfg);
         wcfg.hidden = (opts.cmd == "init" || opts.stop_after_init);
         if (g_host_win.create(wcfg)) {
             out.window_created = true;
             out.native_window = g_host_win.native_handle();
+            WindowOptsCallbacks wcb;
+            wcb.ctx = &g_host_win;
+            wcb.set_fullscreen = [](void *c, bool fs) { return static_cast<HostWindow *>(c)->set_fullscreen(fs); };
+            wcb.set_monitor = [](void *c, int idx) { return static_cast<HostWindow *>(c)->set_display(idx); };
+            wcb.set_size = [](void *c, int w, int h) { return static_cast<HostWindow *>(c)->set_window_size(w, h); };
+            wcb.monitor_count = [](void *) { return HostWindow::display_count(); };
+            wcb.monitor_name = [](void *, int idx) { return HostWindow::display_name(idx); };
+            window_opts_init(&wcb);
             apply_ultrawide_from_window(g_host_win);
         } else {
             std::fprintf(stderr, "init_linux: warning: SDL3 window creation failed; continuing headless\n");
@@ -304,6 +321,8 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
 WindowEvents pump_host_window_events() {
     if (!g_host_win.is_open()) return {};
     const WindowEvents ev = g_host_win.poll_events();
+    if (ev.toggle_fullscreen) snap_window_toggle_fullscreen();
+    if (ev.focus_changed) window_opts_on_focus(ev.focused && !ev.minimized);
     if (ev.resized || ev.display_changed) {
         note_ultrawide_aspect_change(g_host_win);
         nvnHostNotifyWindowResize(g_host_win.native_handle());
@@ -326,6 +345,7 @@ void shutdown_guest_runtime() {
         nvnHostSetHooks(nullptr);
     }
     snap_ui_shutdown();
+    window_opts_shutdown();
     snap_audio_log_checks();
     snap_audio_shutdown();
     g_host_win.destroy();

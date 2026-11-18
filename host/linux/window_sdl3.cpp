@@ -149,6 +149,83 @@ bool HostWindow::set_fullscreen(bool fullscreen) {
 #endif
 }
 
+int HostWindow::display_count() {
+#ifdef HLE_WITH_SDL3
+  int count = 0;
+  SDL_DisplayID* displays = SDL_GetDisplays(&count);
+  if (displays) SDL_free(displays);
+  return count > 0 ? count : 0;
+#else
+  return 0;
+#endif
+}
+
+std::string HostWindow::display_name(int index) {
+#ifdef HLE_WITH_SDL3
+  if (index < 0) return {};
+  int count = 0;
+  SDL_DisplayID* displays = SDL_GetDisplays(&count);
+  if (!displays || index >= count) {
+    if (displays) SDL_free(displays);
+    return {};
+  }
+  const SDL_DisplayID id = displays[index];
+  SDL_free(displays);
+  const char* nm = SDL_GetDisplayName(id);
+  const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(id);
+  char buf[128];
+  if (mode && mode->w > 0 && mode->h > 0) {
+    std::snprintf(buf, sizeof(buf), "%s %dx%d", (nm && *nm) ? nm : "Display", mode->w, mode->h);
+  } else {
+    std::snprintf(buf, sizeof(buf), "%s %d", (nm && *nm) ? nm : "Display", index + 1);
+  }
+  return buf;
+#else
+  (void)index;
+  return {};
+#endif
+}
+
+bool HostWindow::set_display(int index) {
+#ifdef HLE_WITH_SDL3
+  if (!window_ || index < 0) return false;
+  int count = 0;
+  SDL_DisplayID* displays = SDL_GetDisplays(&count);
+  if (!displays || index >= count) {
+    if (displays) SDL_free(displays);
+    return false;
+  }
+  const SDL_DisplayID id = displays[index];
+  SDL_free(displays);
+  SDL_Rect bounds{};
+  if (!SDL_GetDisplayBounds(id, &bounds)) return false;
+  const bool was_fs = fullscreen_;
+  if (was_fs) SDL_SetWindowFullscreen(window_, false);
+  SDL_SetWindowPosition(window_, bounds.x, bounds.y);
+  if (was_fs) SDL_SetWindowFullscreen(window_, true);
+  SDL_SyncWindow(window_);
+  sync_sizes();
+  return true;
+#else
+  (void)index;
+  return false;
+#endif
+}
+
+bool HostWindow::set_window_size(int w, int h) {
+#ifdef HLE_WITH_SDL3
+  if (!window_ || w < 64 || h < 64) return false;
+  if (!SDL_SetWindowSize(window_, w, h)) return false;
+  SDL_SyncWindow(window_);
+  sync_sizes();
+  return true;
+#else
+  (void)w;
+  (void)h;
+  return false;
+#endif
+}
+
 void HostWindow::sync_sizes() {
 #ifdef HLE_WITH_SDL3
   if (!window_) return;
@@ -213,6 +290,7 @@ WindowEvents HostWindow::poll_events() {
       case SDL_EVENT_WINDOW_MINIMIZED:
         if (ev.window.windowID == window_id_) {
           minimized_ = true;
+          ev_out.focus_changed = true;
         }
         break;
       case SDL_EVENT_WINDOW_RESTORED:
@@ -220,6 +298,15 @@ WindowEvents HostWindow::poll_events() {
           minimized_ = false;
           sync_sizes();
           ev_out.resized = true;
+          ev_out.focus_changed = true;
+        }
+        break;
+      case SDL_EVENT_KEY_DOWN:
+        if (ev.key.windowID == window_id_ && !ev.key.repeat) {
+          const bool alt = (ev.key.mod & SDL_KMOD_ALT) != 0;
+          if (ev.key.key == SDLK_F11 || (alt && (ev.key.key == SDLK_RETURN || ev.key.key == SDLK_KP_ENTER))) {
+            ev_out.toggle_fullscreen = true;
+          }
         }
         break;
       default:

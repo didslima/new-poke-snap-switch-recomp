@@ -349,7 +349,9 @@ if(UNIX AND NOT APPLE)
 
   set(SNAP_LINUX_NVN_RENDERER_SOURCES ${SNAP_LINUX_SOURCES})
   list(FILTER SNAP_LINUX_NVN_RENDERER_SOURCES INCLUDE REGEX "^runtime/(nvn|fx/ocean_fft|os|hle|audio|ui|mods)/")
-  add_library(snap_nvn_renderer_linux STATIC ${SNAP_LINUX_NVN_RENDERER_SOURCES})
+  add_library(snap_nvn_renderer_linux STATIC
+    ${SNAP_LINUX_NVN_RENDERER_SOURCES}
+    host/linux/window_opts_linux.cpp)
   target_include_directories(snap_nvn_renderer_linux PRIVATE
     runtime host runtime/nvn runtime/ui runtime/ui/third_party/imgui runtime/hle runtime/fx/ocean_fft)
   target_compile_features(snap_nvn_renderer_linux PRIVATE cxx_std_20)
@@ -383,6 +385,14 @@ if(UNIX AND NOT APPLE)
   target_compile_options(snap_window_sdl3_linux_test PRIVATE -Wall -Wextra)
   target_link_libraries(snap_window_sdl3_linux_test PRIVATE snap_nvn_renderer_linux)
   add_test(NAME window_sdl3_linux COMMAND snap_window_sdl3_linux_test)
+
+  add_executable(snap_window_opts_linux_test
+    tests/platform/window_opts_linux_test.cpp)
+  target_include_directories(snap_window_opts_linux_test PRIVATE ${CMAKE_SOURCE_DIR} host runtime)
+  target_compile_features(snap_window_opts_linux_test PRIVATE cxx_std_20)
+  target_compile_options(snap_window_opts_linux_test PRIVATE -Wall -Wextra)
+  target_link_libraries(snap_window_opts_linux_test PRIVATE snap_nvn_renderer_linux)
+  add_test(NAME window_opts_linux COMMAND snap_window_opts_linux_test)
 
   add_executable(snap_ui_overlay_linux_test
     tests/nvn/ui_overlay_linux_test.cpp
