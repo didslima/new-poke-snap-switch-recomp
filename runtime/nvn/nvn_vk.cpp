@@ -1622,7 +1622,16 @@ bool WindowImpl::Recreate() {
   VkSurfaceCapabilitiesKHR caps{};
   VKCHK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(h->phys, surface, &caps));
   VkExtent2D ext = caps.currentExtent;
-  if (ext.width == 0xFFFFFFFFu) ext = {tex.empty() ? 1280u : (uint32_t)tex[0]->b.width, tex.empty() ? 720u : (uint32_t)tex[0]->b.height};
+  if (ext.width == 0xFFFFFFFFu) {
+    uint32_t pw = 0, ph = 0;
+    if (nvn::os_host::window_pixel_size(hwnd, &pw, &ph)) {
+      ext = {pw, ph};
+    } else {
+      ext = {tex.empty() ? 1280u : (uint32_t)tex[0]->b.width, tex.empty() ? 720u : (uint32_t)tex[0]->b.height};
+    }
+    ext.width = std::clamp(ext.width, caps.minImageExtent.width, caps.maxImageExtent.width);
+    ext.height = std::clamp(ext.height, caps.minImageExtent.height, caps.maxImageExtent.height);
+  }
   if (ext.width == 0 || ext.height == 0) return false;  // minimized
 
   uint32_t n = 0;

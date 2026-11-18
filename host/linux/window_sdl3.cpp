@@ -96,6 +96,9 @@ bool HostWindow::create(const WindowConfig& cfg) {
     return false;
   }
 
+  if (!cfg.hidden) {
+    SDL_SyncWindow(window_);
+  }
   window_id_ = SDL_GetWindowID(window_);
   fullscreen_ = (SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN) != 0;
   focused_ = (SDL_GetKeyboardFocus() == window_);
@@ -136,6 +139,7 @@ bool HostWindow::set_fullscreen(bool fullscreen) {
 #ifdef HLE_WITH_SDL3
   if (!window_) return false;
   if (!SDL_SetWindowFullscreen(window_, fullscreen)) return false;
+  SDL_SyncWindow(window_);
   fullscreen_ = fullscreen;
   sync_sizes();
   return true;

@@ -416,6 +416,8 @@ struct ReplayCtx {
   uint8_t wideMode = 0;            // [wide] 0 full, 1 narrow (middle 16:9), 2 unwiden (nvn_wide.cpp)
   uint64_t wideC3Hash[8] = {}; VkBuffer wideC3Buf[8] = {}; uint8_t wideC3Next = 0;   // [wide] widened c3 copies of this recording
   const char* wideFs = nullptr;   // [wide] fragment program key of the current draw (decision log only)
+  uint8_t wideVfSide = 0;         // [wide] 1 = left, 2 = right photo-mode viewfinder mask quarter
+  float wideVfBox[4] = {};        // [wide] guest-pixel box of the viewfinder mask quarter
   DrawState* ds = nullptr;
 };
 
@@ -548,6 +550,7 @@ float WideFor(const TextureBuilder& b, uint32_t tag);   // extra horizontal fact
 float WideXform(const ReplayCtx& cx, const float* vpGuest, float* sx, float* ox);   // x mapping of the bound targets (vpGuest null = scissor); returns the y scale
 // returns true when the draw should read a widened copy of its c3 camera buffer (WideC3Copy): a 16:9 camera drawn across a wide target
 bool WideOnDraw(ReplayCtx& cx, TextureImpl* const* sampled, int nSampled, const uint8_t* c3, uint64_t c3range, const float* box, bool c3Only);
+void WideDrawViewfinderSide(ReplayCtx& cx, void (*emit)(void*), void* user);   // [wide] extend photo-mode gray mask to side strips
 VkBuffer WideC3Copy(ReplayCtx& cx, const uint8_t* c3, uint64_t range);   // c3 with the projection k times wider (same vertical field of view)
 TextureImpl* WideCropSubstitute(ReplayCtx& cx, TextureImpl* src);   // middle 16:9 of a wide image for a draw into a 16:9-only target
 void WideMarkDrawn(TextureImpl* t);                                  // BeginRendering: a wide target changed

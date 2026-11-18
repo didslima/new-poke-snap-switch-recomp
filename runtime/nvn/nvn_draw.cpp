@@ -1448,6 +1448,16 @@ void DoDraw(ReplayCtx& cx, const Cmd& c0) {
   snap_rt::DrawCapture rtCap; snap_rt::DrawInfo rtInfo;   // [rt] SNAP_RT=1: transform-feedback capture of scene opaque draws (nvn_rt.cpp)
   const bool rtWant = snap_rt::Capture();
   if (rtWant) RtFillInfo(rtInfo, d, p, c, indexed, topo, rewrite ? (uint32_t)rw.size() : (uint32_t)std::max(c.i[2], 0));
+  auto emitCmd = [&]() {
+    if (rewrite) {
+      if (indexed) vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
+      else vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[4], 1), 0, 0, (uint32_t)c.i[3]);
+    } else if (indexed) {
+      vkCmdDrawIndexed(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
+    } else {
+      vkCmdDraw(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[4], 1), (uint32_t)c.i[1], (uint32_t)c.i[3]);
+    }
+  };
   if (rewrite) {
     VkBuffer ib = VK_NULL_HANDLE;
     uint8_t* m = NewScratch(cx, rw.size() * 4, &ib, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
@@ -1455,8 +1465,7 @@ void DoDraw(ReplayCtx& cx, const Cmd& c0) {
     memcpy(m, rw.data(), rw.size() * 4);
     vkCmdBindIndexBuffer(cx.cb, ib, 0, VK_INDEX_TYPE_UINT32);
     if (rtWant) rtCap.Begin(cx, rtInfo);
-    if (indexed) vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
-    else vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[4], 1), 0, 0, (uint32_t)c.i[3]);
+    emitCmd();
   } else if (indexed) {
     PoolImpl* pool = nullptr; uint64_t off = 0;
     if (!h->ResolveAddress(c.a[0], &pool, &off)) { LogError("index buffer address 0x%llx is not in any memory pool", (unsigned long long)c.a[0]); return; }
@@ -1465,11 +1474,12 @@ void DoDraw(ReplayCtx& cx, const Cmd& c0) {
     SyncPoolRangeOnce(pool, off, isz * (uint64_t)std::max(c.i[2], 0));
     vkCmdBindIndexBuffer(cx.cb, pool->buffer, off, c.i[1] == IDX_U32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (rtWant) rtCap.Begin(cx, rtInfo);
-    vkCmdDrawIndexed(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
+    emitCmd();
   } else {
     if (rtWant) rtCap.Begin(cx, rtInfo);
-    vkCmdDraw(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[4], 1), (uint32_t)c.i[1], (uint32_t)c.i[3]);
+    emitCmd();
   }
+  if (cx.wideVfSide) WideDrawViewfinderSide(cx, [](void* u) { (*static_cast<decltype(emitCmd)*>(u))(); }, &emitCmd);
   ShinyQueryEnd(cx.cb, shinyQ);
   DrawCensus(cx, p, 'D');   // debug census (NVN_DRAW_CENSUS)
   rtCap.End();   // [rt] (a no-op unless this draw was captured; the build runs from the Fx post-tonemap slot, nvn_rt.cpp)

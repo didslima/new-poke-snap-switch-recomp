@@ -74,6 +74,7 @@ struct PaceDisplayInfo {
 };
 
 bool pace_query_display(void* native_window, int monitor_override, PaceDisplayInfo* out);
+bool window_pixel_size(void* native_window, uint32_t* out_w, uint32_t* out_h);
 bool pace_vblank_supported();
 void* pace_vblank_open(const char* display_name);
 bool pace_vblank_wait(void* handle, int* out_status);

@@ -82,6 +82,7 @@ float WideXform(const ReplayCtx& cx, const float* vpGuest, float* sx, float* ox)
 }
 
 bool WideOnDraw(ReplayCtx& cx, TextureImpl* const* sampled, int nSampled, const uint8_t* c3, uint64_t c3range, const float* box, bool c3Only) {
+  cx.wideVfSide = 0;
   if (g_wideK <= 1.0f) return false;
   TextureImpl* t = FirstRt(cx);
   if (!t) return false;
@@ -102,6 +103,18 @@ bool WideOnDraw(ReplayCtx& cx, TextureImpl* const* sampled, int nSampled, const 
       const bool spanX = (box[0] <= x0 + ex && box[2] >= cx0 - ex) || (box[0] <= cx0 + ex && box[2] >= x1 - ex);
       const bool spanY = (box[1] <= y0 + ey && box[3] >= cy0 - ey) || (box[1] <= cy0 + ey && box[3] >= y1 - ey);
       screenPart = !fullScreen && spanX && spanY;
+      // Photo-mode viewfinder mask: 4 mirrored quarters meeting at (cx0, cy0) sampling a half-res (960x540) texture into the display target.
+      // Keep it narrow (16:9) so the viewfinder opening frames the 16:9/3:2 photo capture area rather than stretching to ~21:9.
+      const bool quarterAligned = (std::fabs(box[0] - cx0) <= ex || std::fabs(box[2] - cx0) <= ex) &&
+                                  (std::fabs(box[1] - cy0) <= ey || std::fabs(box[3] - cy0) <= ey);
+      const bool viewfinderMask = screenPart && !ndc && (t->b.flags & TF_DISPLAY) && quarterAligned &&
+                                  nSampled == 1 && sampled[0] && sampled[0]->b.width * 2 == t->b.width && sampled[0]->b.height * 2 == t->b.height &&
+                                  cx.wideFs && std::strcmp(cx.wideFs, "0b6e3cad047c") == 0;
+      if (viewfinderMask) {
+        screenPart = false;
+        cx.wideVfSide = (box[0] + box[2] < cx0 * 2.0f) ? 1 : 2;
+        std::memcpy(cx.wideVfBox, box, sizeof(cx.wideVfBox));
+      }
     }
     if (cam == 2) { mode = 0; why = "widened camera"; g_wideDraws.fetch_add(1, std::memory_order_relaxed); }
     else if (cam == 1 && c3Only && c3range >= 0x180 && !NoC3Patch() && box) { mode = 0; patch = true; why = "16:9 camera, c3 projection widened"; }   // effects, particles
@@ -136,6 +149,68 @@ bool WideOnDraw(ReplayCtx& cx, TextureImpl* const* sampled, int nSampled, const 
   }
   if (mode != cx.wideMode) { cx.wideMode = (uint8_t)mode; FxReemitViewState(cx); }
   return patch;
+}
+
+void WideDrawViewfinderSide(ReplayCtx& cx, void (*emit)(void*), void* user) {
+  if (cx.wideVfSide == 0 || g_wideK <= 1.0f || !(cx.vpHave & 1)) return;
+  const TextureImpl* t = FirstRt(cx);
+  if (!t || t->wide <= 1.0f) return;
+  const float s = t->scale;
+  const int hw = (int)t->HW(), hh = (int)t->HH();
+  const int midX0 = (int)std::lround(((float)hw - (float)t->b.width * s) * 0.5f);
+  const int midX1 = midX0 + (int)std::lround((float)t->b.width * s);
+  const int sideX0 = (cx.wideVfSide == 1) ? 0 : std::min(hw, midX1);
+  const int sideX1 = (cx.wideVfSide == 1) ? std::max(0, midX0) : hw;
+  if (sideX1 <= sideX0) return;
+
+  int sy = 0, sh = hh;
+  if (cx.scHave & 1) {
+    int y = cx.scGuest[0][1], ht = cx.scGuest[0][3];
+    if (cx.hud.on) {
+      const int y1 = (int)std::ceil(cx.hud.r * (y + ht) + cx.hud.t);
+      y = (int)std::floor(cx.hud.r * y + cx.hud.t);
+      ht = y1 - y;
+    }
+    if (y < 0) { ht += y; y = 0; }
+    if (ht < 0) ht = 0;
+    if (s != 1.0f) { y = (int)std::floor(y * s); ht = (int)std::ceil(ht * s); }
+    sy = std::clamp(y, 0, hh);
+    sh = std::clamp(ht, 0, hh - sy);
+  }
+  if (sh <= 0) return;
+
+  float vh[4];
+  std::memcpy(vh, cx.vpGuest[0], sizeof(vh));
+  if (cx.hud.on) {
+    vh[0] = cx.hud.p * vh[0] + cx.hud.q;
+    vh[1] = cx.hud.r * vh[1] + cx.hud.t;
+    vh[2] *= cx.hud.p;
+    vh[3] *= cx.hud.r;
+  }
+  if (vh[2] <= 0.0f || vh[3] <= 0.0f) return;
+
+  const float boxL = cx.hud.on ? cx.hud.p * cx.wideVfBox[0] + cx.hud.q : cx.wideVfBox[0];
+  const float boxR = cx.hud.on ? cx.hud.p * cx.wideVfBox[2] + cx.hud.q : cx.wideVfBox[2];
+  const float wBorder = std::max(1.0f, (boxR - boxL) * 0.03f);
+  const float limVp = cx.h->props.limits.maxViewportDimensions[0] > 0
+      ? std::min<float>((float)cx.h->props.limits.maxViewportDimensions[0], 16384.0f)
+      : 8192.0f;
+  const float vpW = std::max(vh[2] * s, limVp);
+  const int tileW = std::max(1, (int)std::floor((wBorder / vh[2]) * vpW));
+
+  for (int tx0 = sideX0; tx0 < sideX1; tx0 += tileW) {
+    const int tx1 = std::min(sideX1, tx0 + tileW);
+    VkViewport vp = MakeNvnViewport(cx.h->originMode, vh[0], vh[1], vh[2], vh[3], s);
+    vp.width = vpW;
+    vp.x = (cx.wideVfSide == 1)
+        ? (float)tx0 - ((boxL - vh[0]) / vh[2]) * vpW
+        : (float)tx1 - ((boxR - vh[0]) / vh[2]) * vpW;
+    VkRect2D sc{{tx0, sy}, {(uint32_t)(tx1 - tx0), (uint32_t)sh}};
+    vkCmdSetViewport(cx.cb, 0, 1, &vp);
+    vkCmdSetScissor(cx.cb, 0, 1, &sc);
+    emit(user);
+  }
+  FxReemitViewState(cx);
 }
 
 VkBuffer WideC3Copy(ReplayCtx& cx, const uint8_t* c3, uint64_t range) {

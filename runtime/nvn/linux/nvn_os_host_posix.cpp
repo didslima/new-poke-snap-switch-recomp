@@ -688,6 +688,24 @@ bool physical_device_presentation_support(VkInstance instance, VkPhysicalDevice 
   return true;
 }
 
+bool window_pixel_size(void* native_window, uint32_t* out_w, uint32_t* out_h) {
+  if (out_w) *out_w = 0;
+  if (out_h) *out_h = 0;
+#ifdef HLE_WITH_SDL3
+  if (native_window && SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+    int pw = 0, ph = 0;
+    if (SDL_GetWindowSizeInPixels(static_cast<SDL_Window*>(native_window), &pw, &ph) && pw > 0 && ph > 0) {
+      if (out_w) *out_w = static_cast<uint32_t>(pw);
+      if (out_h) *out_h = static_cast<uint32_t>(ph);
+      return true;
+    }
+  }
+#else
+  (void)native_window;
+#endif
+  return false;
+}
+
 bool write_watch_supported() { return false; }
 
 bool query_write_watch(void* /*base*/, size_t /*size*/, bool /*reset*/, std::vector<void*>* out_addrs, uint32_t* out_error) {

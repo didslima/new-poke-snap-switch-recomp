@@ -7,19 +7,92 @@
 //     modifying Cpu state, the lifted guest code executes its original unmodded Switch instructions.
 //   - None of them advertises mod support or registers host overrides via loader::add_override().
 //   - rt_drp_decrypt / rt_drp_decrypt_check are NOT stubbed here: they are provided by shared host/mods/drpfast.cpp.
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <strings.h>
 
-struct Cpu;
+#include "cpu.h"
+#include "loader.h"
+
+extern "C" float nvnHostGetUltrawide(void);   // runtime/nvn/nvn_wide.cpp
+
+namespace {
+
+struct WideSite { uint64_t off; int reg; };
+WideSite g_wide_sites[8] = {{0x296400, 9}};   // ride and lab camera (builder 0x295170)
+int g_wide_nsites = 1;
+
+float wide_k() { static const float k = nvnHostGetUltrawide(); return k; }
+
+void wide_camera(Cpu *c, uint64_t off) {
+    int reg = -1;
+    for (int i = 0; i < g_wide_nsites; i++) if (g_wide_sites[i].off == off) { reg = g_wide_sites[i].reg; break; }
+    if (reg < 0) return;
+    uint32_t ab = (uint32_t)c->v[reg];
+    float a;
+    std::memcpy(&a, &ab, 4);
+    if (std::fabs(a - 16.0f / 9.0f) >= 0.01f) return;
+    a *= wide_k();
+    std::memcpy(&ab, &a, 4);
+    c->v[reg] = (__uint128_t)ab;
+}
+
+void h_tanf(Cpu *c) {
+    uint32_t b = (uint32_t)c->v[0];
+    float x;
+    std::memcpy(&x, &b, 4);
+    if (wide_k() > 1.0f) wide_camera(c, c->x[30] - GUEST_MAIN_BASE);
+    float r = tanf(x);
+    uint32_t rb;
+    std::memcpy(&rb, &r, 4);
+    c->v[0] = (__uint128_t)rb;
+}
+
+}  // namespace
 
 namespace loader {
 
-void snap_wide_eval_copy(uint64_t) {}
+void snap_wide_eval_copy(uint64_t src) {
+    const float k = wide_k();
+    if (k <= 1.0f) return;
+    int fixed = 0;
+    for (uint64_t o = 0; o + 64 <= 0x480; o += 4) {
+        float *m = (float *)(src + o);   // column-major; a perspective projection has m[11] = -1 and zeros off its terms
+        uint32_t w11;
+        std::memcpy(&w11, m + 11, 4);
+        if (w11 != 0xbf800000u) continue;
+        if (m[1] != 0 || m[2] != 0 || m[3] != 0 || m[4] != 0 || m[6] != 0 || m[7] != 0 || m[12] != 0 || m[13] != 0 || m[15] != 0) continue;
+        if (!(m[0] > 0 && m[5] > 0) || std::fabs(m[5] / m[0] / (16.0 / 9.0 * k) - 1.0) > 0.01) continue;
+        m[0] *= k;
+        fixed++;
+    }
+    static bool logged;
+    if (fixed && !logged) { logged = true; std::fprintf(stderr, "ultrawide: photo Evaluation uses the 16:9 projection (x scale times %.4f)\n", k); }
+}
 void snap_photoexport_install() {}
 void snap_shiny_install() {}
 void snap_neofilm_install() {}
 void snap_skips_install() {}
-void snap_lodanim_install() {}
+void snap_lodanim_install() {
+    const char *uw = std::getenv("SNAP_ULTRAWIDE");
+    const bool wide = !(uw && (strcasecmp(uw, "off") == 0 || std::strcmp(uw, "0") == 0));
+    if (const char *ws = std::getenv("SNAP_WIDE_SITES")) {
+        for (const char *p = ws; *p && g_wide_nsites < 8;) {
+            char *e;
+            const uint64_t off = std::strtoull(p, &e, 0);
+            if (*e != ':') break;
+            const int reg = (int)std::strtol(e + 1, &e, 10);
+            if (off && reg >= 0 && reg < 32) g_wide_sites[g_wide_nsites++] = {off, reg};
+            if (*e != ',') break;
+            p = e + 1;
+        }
+        trace("ultrawide: %d camera sites", g_wide_nsites);
+    }
+    if (wide) add_override("tanf", h_tanf);
+}
 
 }  // namespace loader
 

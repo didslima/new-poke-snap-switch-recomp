@@ -580,4 +580,20 @@ bool create_vulkan_surface(VkInstance instance,
   return vkCreateWin32SurfaceKHR(instance, &sci, allocator, out_surface) == VK_SUCCESS;
 }
 
+bool window_pixel_size(void* native_window, uint32_t* out_w, uint32_t* out_h) {
+  if (out_w) *out_w = 0;
+  if (out_h) *out_h = 0;
+  RECT rc{};
+  if (native_window && GetClientRect(static_cast<HWND>(native_window), &rc)) {
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+    if (w > 0 && h > 0) {
+      if (out_w) *out_w = static_cast<uint32_t>(w);
+      if (out_h) *out_h = static_cast<uint32_t>(h);
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace nvn::os_host
