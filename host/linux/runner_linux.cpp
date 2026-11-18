@@ -71,7 +71,7 @@ int bootstrap_runner_entry(void *ud) {
         }
     } runtime_guard;
 
-    if (opts->cmd == "init") {
+    if (opts->cmd == "init" || opts->cmd == "run") {
         runtime_guard.active = true;
         InitResult res;
         if (!init_guest_runtime(*opts, true, res)) {
@@ -79,7 +79,22 @@ int bootstrap_runner_entry(void *ud) {
                          init_stage_name(res.stage), res.error.c_str());
             return 1;
         }
-        return 0;
+        if (opts->cmd == "init") {
+            return 0;
+        }
+        RunPlan plan;
+        std::string plan_err;
+        if (!prepare_run_pipeline(*opts, res, plan, plan_err)) {
+            std::fprintf(stderr, "boot_linux: run pipeline preparation failed: %s\n", plan_err.c_str());
+            return 1;
+        }
+        std::fprintf(stderr,
+                     "boot_linux: run pipeline prepared (nninitStartup=%#llx, nnMain=%#llx, stop_after_init=%d); "
+                     "guest execution is disabled in stage 6E-D (build/test only)\n",
+                     static_cast<unsigned long long>(plan.startup_addr),
+                     static_cast<unsigned long long>(plan.nnmain_addr),
+                     plan.stop_after_init ? 1 : 0);
+        return plan.stop_after_init ? 0 : 2;
     }
 #else
     if (opts->cmd == "init") {

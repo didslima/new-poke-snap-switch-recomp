@@ -244,9 +244,12 @@ int main() {
         }
         CHECK(res.nvn_bound);
         CHECK(res.nvn_procs_bound > 50);
+        CHECK(res.codec_stubs_bound == 2);
         CHECK(res.hooks_installed);
         CHECK(loader::find_override("nvnBootstrapLoader") != nullptr);
         CHECK(loader::find_override("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE") != nullptr);
+        CHECK(loader::find_override("_ZN2nn5codec19HardwareOpusDecoderC1Ei") != nullptr);
+        CHECK(loader::find_override("_ZN2nn3ngc15ProfanityFilterC1Ev") != nullptr);
         if (res.window_created) {
             CHECK(res.native_window != nullptr);
             CHECK(snap_linux::host_window() != nullptr);
@@ -264,6 +267,61 @@ int main() {
         CHECK(loader::g_init_log.empty());
         CHECK(os_current_cpu() == res.main_cpu);
         CHECK(os_current_thread_type() == res.main_thread_type);
+
+        // Stage 6E-D: verify run pipeline preparation & mock execution ordering without calling real guest code.
+        {
+            snap_linux::InitResult bad_init;
+            snap_linux::RunPlan bad_plan;
+            std::string err;
+            CHECK(!snap_linux::prepare_run_pipeline(opts, bad_init, bad_plan, err));
+            CHECK(!err.empty());
+
+            snap_linux::RunPlan plan;
+            CHECK(snap_linux::prepare_run_pipeline(opts, res, plan, err));
+            CHECK(plan.valid);
+            CHECK(plan.main_cpu == res.main_cpu);
+            // Provide synthetic non-zero addresses to test ordering through mock GuestExecutionOps.
+            plan.startup_addr = 0x7100001000ull;
+            plan.nnmain_addr = 0x7100002000ull;
+
+            static std::vector<std::string> s_calls;
+            s_calls.clear();
+            snap_linux::GuestExecutionOps mock_ops{
+                [](Cpu *c, bool log) -> int {
+                    (void)c; (void)log;
+                    s_calls.emplace_back("run_initializers");
+                    return 42;
+                },
+                [](Cpu *c, uint64_t addr) {
+                    (void)c;
+                    s_calls.emplace_back(addr == 0x7100001000ull ? "call_guest:startup" : "call_guest:nnMain");
+                },
+                []() {
+                    s_calls.emplace_back("stop_vi_vsync");
+                },
+            };
+
+            snap_linux::RunResult run_res;
+            CHECK(snap_linux::execute_run_pipeline(plan, mock_ops, run_res, err));
+            CHECK(run_res.ok);
+            CHECK(run_res.initializers_run == 42);
+            CHECK(run_res.called_startup && run_res.called_nnmain && run_res.stopped_vsync);
+            CHECK(s_calls.size() == 4);
+            CHECK(s_calls[0] == "run_initializers" && s_calls[1] == "call_guest:startup" &&
+                  s_calls[2] == "call_guest:nnMain" && s_calls[3] == "stop_vi_vsync");
+
+            // Also verify --stop-after-init stops before nninitStartup / nnMain.
+            s_calls.clear();
+            plan.stop_after_init = true;
+            CHECK(snap_linux::execute_run_pipeline(plan, mock_ops, run_res, err));
+            CHECK(run_res.ok && run_res.stopped_after_init && !run_res.called_startup && !run_res.called_nnmain);
+            CHECK(s_calls.size() == 2 && s_calls[0] == "run_initializers" && s_calls[1] == "stop_vi_vsync");
+
+            // Missing GuestExecutionOps must fail cleanly.
+            snap_linux::GuestExecutionOps empty_ops{};
+            CHECK(!snap_linux::execute_run_pipeline(plan, empty_ops, run_res, err));
+            CHECK(loader::g_init_log.empty());
+        }
 
         snap_linux::shutdown_guest_runtime();
         CHECK(snap_linux::host_window() == nullptr);

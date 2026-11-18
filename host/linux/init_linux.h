@@ -34,6 +34,7 @@ struct InitResult {
     int tls_hooks_bound = 0;
     size_t hle_overrides_bound = 0;
     int audio_overrides_bound = 0;
+    int codec_stubs_bound = 0;
     int nvn_procs_bound = 0;
     bool nvn_bound = false;
     bool window_created = false;
@@ -47,10 +48,40 @@ struct InitResult {
     std::string error;
 };
 
+struct RunPlan {
+    bool valid = false;
+    Cpu *main_cpu = nullptr;
+    uint64_t startup_addr = 0;
+    uint64_t nnmain_addr = 0;
+    bool stop_after_init = false;
+    bool trace_enabled = false;
+};
+
+struct GuestExecutionOps {
+    int (*run_initializers)(Cpu *c, bool log) = nullptr;
+    void (*call_guest)(Cpu *c, uint64_t addr) = nullptr;
+    void (*stop_vi_vsync)() = nullptr;
+};
+
+struct RunResult {
+    bool ok = false;
+    int initializers_run = 0;
+    bool called_startup = false;
+    bool called_nnmain = false;
+    bool stopped_after_init = false;
+    bool stopped_vsync = false;
+};
+
 // Initializes the Linux guest runtime up to the point immediately before run_initializers().
 // Never calls run_initializers(), nninitStartup(), or nnMain().
 // If validate_archives is true, also validates opts.main_lib and opts.sdk_lib before load().
 bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult &out);
+
+// Stage 6E-D: Prepares the run pipeline (resolving nninitStartup / nnMain without executing guest code).
+bool prepare_run_pipeline(const BootOpts &opts, const InitResult &init, RunPlan &out, std::string &err);
+
+// Stage 6E-D: Executes a prepared RunPlan through injected GuestExecutionOps (mocked in tests).
+bool execute_run_pipeline(const RunPlan &plan, const GuestExecutionOps &ops, RunResult &out, std::string &err);
 
 // Non-blocking host window event pump (also invoked from the NVN present hook).
 WindowEvents pump_host_window_events();

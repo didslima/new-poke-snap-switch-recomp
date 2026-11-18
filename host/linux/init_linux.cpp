@@ -82,6 +82,31 @@ void hle_bind_one(const char *sym, GuestFn fn, void *) {
     else loader::add_weak_override(sym, fn);
 }
 
+uint64_t g_opus_vtbl[4];
+void opus_ctor(Cpu *c) {
+    if (c && c->x[0]) *reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(c->x[0])) = reinterpret_cast<uint64_t>(g_opus_vtbl);
+}
+void opus_nop(Cpu *) {}
+void opus_work_size(Cpu *c) {
+    if (c) c->x[0] = 0x20000ull * (c->x[2] ? c->x[2] : 1);
+}
+uint64_t g_ngc_vtbl[4];
+void ngc_ctor(Cpu *c) {
+    if (c && c->x[0]) *reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(c->x[0])) = reinterpret_cast<uint64_t>(g_ngc_vtbl);
+}
+
+int bind_codec_stubs() {
+    g_opus_vtbl[0] = loader::add_override("host:HardwareOpusDecoder::dtor", opus_nop)->addr;
+    g_opus_vtbl[1] = loader::add_override("host:HardwareOpusDecoder::deleting_dtor", opus_nop)->addr;
+    g_opus_vtbl[2] = loader::add_override("host:HardwareOpusDecoder::GetWorkBufferSize", opus_work_size)->addr;
+    loader::add_override("_ZN2nn5codec19HardwareOpusDecoderC1Ei", opus_ctor);
+
+    g_ngc_vtbl[0] = loader::add_override("host:ProfanityFilter::dtor", opus_nop)->addr;
+    g_ngc_vtbl[1] = loader::add_override("host:ProfanityFilter::deleting_dtor", opus_nop)->addr;
+    loader::add_override("_ZN2nn3ngc15ProfanityFilterC1Ev", ngc_ctor);
+    return 2;
+}
+
 }  // namespace
 
 const char *init_stage_name(InitStage s) {
@@ -164,6 +189,7 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
     snap_bind_nvn();
     out.nvn_bound = true;
     out.nvn_procs_bound = snap_nvn_bridge_count();
+    out.codec_stubs_bound = bind_codec_stubs();
     loader::add_override("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window_host);
     {
         static const NvnHostHooks hk{nullptr, hook_present, hook_submit};
@@ -266,12 +292,67 @@ HostWindow *host_window() {
 }
 
 void shutdown_guest_runtime() {
+    hle::vi_stop_vsync();
     if (g_hooks_active.exchange(false, std::memory_order_acq_rel)) {
         nvnHostSetHooks(nullptr);
     }
     snap_audio_log_checks();
     snap_audio_shutdown();
     g_host_win.destroy();
+}
+
+bool prepare_run_pipeline(const BootOpts &opts, const InitResult &init, RunPlan &out, std::string &err) {
+    out = RunPlan{};
+    err.clear();
+    if (!init.ok || init.stage != InitStage::ReadyBeforeInitializers || !init.main_cpu || !init.tpidr ||
+        init.tlr_tp_word != init.tpidr) {
+        err = "init_guest_runtime has not reached ReadyBeforeInitializers";
+        return false;
+    }
+    out.main_cpu = init.main_cpu;
+    out.startup_addr = loader::lookup("nninitStartup");
+    out.nnmain_addr = loader::lookup("nnMain");
+    out.stop_after_init = opts.stop_after_init;
+    out.trace_enabled = !opts.trace_file.empty();
+    out.valid = true;
+    return true;
+}
+
+bool execute_run_pipeline(const RunPlan &plan, const GuestExecutionOps &ops, RunResult &out, std::string &err) {
+    out = RunResult{};
+    err.clear();
+    if (!plan.valid || !plan.main_cpu) {
+        err = "invalid RunPlan";
+        return false;
+    }
+    if (!ops.run_initializers || !ops.call_guest) {
+        err = "GuestExecutionOps missing required entry points";
+        return false;
+    }
+    out.initializers_run = ops.run_initializers(plan.main_cpu, true);
+    if (plan.stop_after_init) {
+        out.stopped_after_init = true;
+        if (ops.stop_vi_vsync) {
+            ops.stop_vi_vsync();
+            out.stopped_vsync = true;
+        }
+        out.ok = true;
+        return true;
+    }
+    if (plan.startup_addr) {
+        ops.call_guest(plan.main_cpu, plan.startup_addr);
+        out.called_startup = true;
+    }
+    if (plan.nnmain_addr) {
+        ops.call_guest(plan.main_cpu, plan.nnmain_addr);
+        out.called_nnmain = true;
+    }
+    if (ops.stop_vi_vsync) {
+        ops.stop_vi_vsync();
+        out.stopped_vsync = true;
+    }
+    out.ok = true;
+    return true;
 }
 
 }  // namespace snap_linux
