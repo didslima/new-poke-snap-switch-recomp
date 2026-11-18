@@ -322,6 +322,7 @@ if(UNIX AND NOT APPLE)
   add_executable(snap_nvn_os_host_linux_test
     tests/nvn/nvn_os_host_linux_test.cpp
     runtime/nvn/linux/nvn_os_host_posix.cpp
+    runtime/nvn/linux/nvn_optional_stubs.cpp
     runtime/nvn/linux/nvn_upscale_stub.cpp)
   target_include_directories(snap_nvn_os_host_linux_test PRIVATE runtime/nvn runtime)
   target_compile_features(snap_nvn_os_host_linux_test PRIVATE cxx_std_20)

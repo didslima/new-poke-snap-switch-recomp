@@ -2,6 +2,12 @@
 // Stage 6E-A Groups 2A, 2B & 2C: Linux unit tests for nvn::os_host.
 #include "nvn_os_host.h"
 #include "nvn_os_host_vk.h"
+#include "nvn_btnicon.h"
+#include "nvn_framegen.h"
+#include "nvn_freecam.h"
+#include "nvn_hdphoto.h"
+#include "nvn_hdr.h"
+#include "nvn_shot.h"
 #include "ui/ui_present.h"
 #include "upscale/upscale_nvn.h"
 
@@ -302,12 +308,21 @@ void test_vulkan_surface_and_upscale_stubs() {
   snap_fs_drain_for_exit(0);
   snap_crashlog_fatal("test", "noop");
 
-  // 3. Upscaler stubs report unsupported explicitly.
+  // 3. Upscaler & optional Windows-only feature stubs report unsupported explicitly.
   float sc = 1.0f, oc = 1.0f;
   CHECK(!nvn::UpscaleApplyPolicy(&sc, &oc));
   float jx = 1.0f, jy = 1.0f;
   nvn::UpscaleSceneJitter(&jx, &jy);
   CHECK(jx == 0.0f && jy == 0.0f);
+  CHECK(!nvn::FgWanted());
+  CHECK(!nvn::FgActive());
+  CHECK(nvn::FgRecordGenerate(nullptr, VK_NULL_HANDLE, nullptr) == VK_NULL_HANDLE);
+  CHECK(!snap_hdr::Requested());
+  CHECK(!snap_hdr::IsScrgb());
+  CHECK(!nvn::BtnIconActive());
+  CHECK(!nvn::HdPhotoOn());
+  CHECK(!nvn::ShotWritePng("/tmp/unused.png", nullptr, 0, 0, false));
+  nvnHostFreecamShot();
 
   // 4. Neutral Vulkan surface guards.
   std::vector<const char*> exts;
