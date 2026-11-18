@@ -412,7 +412,10 @@ static HANDLE spawn(const std::wstring& cmd, bool visible, const fs::path& out_f
   }
   std::wstring mutable_cmd = cmd;
   PROCESS_INFORMATION pi{};
-  BOOL ok = CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, !visible, flags, nullptr, nullptr, &si, &pi);
+  // The builder never stands in the game's folder: an update renames out\, and Windows refuses that while a process has it as its
+  // working directory (2026-11-18: "used by another process" at the switch). The work folder is its parent.
+  const std::wstring cwd = g_work_dir.empty() ? std::wstring() : g_work_dir.wstring();
+  BOOL ok = CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, !visible, flags, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
   if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
   if (!ok) return nullptr;
   CloseHandle(pi.hThread);
@@ -1114,7 +1117,8 @@ bool prepare(Result& r) {
   r.active = true;
   hle::Json cfg, data;
   if (!read_json(cfg_path, cfg) || cfg.type != hle::Json::Obj) {
-    message("Snap Recomp", "config.json next to the game could not be read. Run the builder again.", MB_ICONERROR);
+    if (r.play) { std::fprintf(stderr, "launcher: config.json next to the game could not be read. Run the builder again.\n"); r.exit_code = 2; }
+    else message("Snap Recomp", "config.json next to the game could not be read. Run the builder again.", MB_ICONERROR);
     return true;
   }
   read_json(exe_dir / L"launcher_data.json", data);   // optional
@@ -1122,8 +1126,11 @@ bool prepare(Result& r) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (!r.action.empty()) { r.exit_code = run_action(r.action, exe_dir, cfg_path, cfg, data); return true; }
   const bool autoplay = std::getenv("SNAP_LAUNCHER_AUTOPLAY") != nullptr;
+  const bool quiet = autoplay || r.play;   // no message boxes: a test run, or --play from another launcher (the reason goes to stderr)
   // First start: offer FSR (pre-selected, never accepted for the user). A test run skips this unless SNAP_UPSCALER_AUTOACCEPT is set.
-  if (!cfg.get("upscalers_offered") && (!autoplay || std::getenv("SNAP_UPSCALER_AUTOACCEPT"))) {
+  // --play shows no window of ours (release standard 4: another launcher starts the game), so the offer waits for the first start
+  // without it; "upscalers_offered" stays unset until then.
+  if (!cfg.get("upscalers_offered") && ((!autoplay && !r.play) || std::getenv("SNAP_UPSCALER_AUTOACCEPT"))) {
     offer_upscalers(exe_dir, data, true);
     cfg.set("upscalers_offered", hle::Json::boolean_(true));
     std::string text;
@@ -1156,6 +1163,8 @@ bool prepare(Result& r) {
       if (autoplay) {   // a test run: the answer comes from SNAP_LAUNCHER_SAFE_ANSWER (yes | no), and the offer is logged
         std::fprintf(stderr, "launcher: safe mode offered: %s\n", why);
         if (const char* a = std::getenv("SNAP_LAUNCHER_SAFE_ANSWER")) safe = play_now = (a[0] == 'y' || a[0] == 'Y');
+      } else if (r.play) {   // --play never asks: say it and start normally (--safe-mode is the flag for it)
+        std::fprintf(stderr, "launcher: %s Starting normally because of --play; add --safe-mode to start in safe mode.\n", why);
       } else {
         const std::string q = std::string(why) + "\n\nStart in safe mode? Mods, HD packs, enhanced effects, frame generation, ray tracing and the shader cache are switched off for this one start. "
                               "Your saved settings and your save are not changed.";
@@ -1226,7 +1235,7 @@ bool prepare(Result& r) {
       if (autoplay) std::fprintf(stderr, "launcher: game folder %s in %d ms (%s)\n", bad.empty() ? "passed" : "failed", uv.ms.load(), uv.why.load() ? "walked the folder" : "remembered result");
     }
     if (!bad.empty()) {
-      if (autoplay) { std::fprintf(stderr, "launcher: %s\n", bad.c_str()); return true; }
+      if (quiet) { std::fprintf(stderr, "launcher: %s\n", bad.c_str()); if (r.play) r.exit_code = 1; return true; }
       message("Snap Recomp", bad, MB_ICONWARNING);
       continue;
     }
@@ -1237,18 +1246,19 @@ bool prepare(Result& r) {
   r.main_elf = s("main_elf");
   r.sdk_elf = s("sdk_elf");
   if (r.main_elf.empty() || r.sdk_elf.empty() || !fs::exists(fs::u8path(r.main_elf), ec) || !fs::exists(fs::u8path(r.sdk_elf), ec)) {
-    message("Snap Recomp", "The converted game files are missing (" + (r.main_elf.empty() ? "main_elf" : r.main_elf) +
-            "). Run the builder again.", MB_ICONERROR);
+    const std::string why = "The converted game files are missing (" + (r.main_elf.empty() ? "main_elf" : r.main_elf) + "). Run the builder again.";
+    if (quiet) { std::fprintf(stderr, "launcher: %s\n", why.c_str()); r.exit_code = 2; }
+    else message("Snap Recomp", why, MB_ICONERROR);
     return true;
   }
   for (const char* which : {"main", "sdk"}) {   // an empty or cut-off converted file gets a plain message here, not a crash in the loader
     std::string why;
     if (elf_check::check_file(std::string(which) == "main" ? r.main_elf.c_str() : r.sdk_elf.c_str(), which, why)) continue;
-    if (autoplay) { std::fprintf(stderr, "launcher: %s\n", why.c_str()); r.exit_code = 2; }
+    if (quiet) { std::fprintf(stderr, "launcher: %s\n", why.c_str()); r.exit_code = 2; }
     else message("Snap Recomp", why, MB_ICONERROR);
     return true;
   }
-  if (!autoplay) loader::g_fatal_hook = [](const char* m) { message("Snap Recomp", std::string(m), MB_ICONERROR); };   // a failure while loading shows the same way
+  if (!quiet) loader::g_fatal_hook = [](const char* m) { message("Snap Recomp", std::string(m), MB_ICONERROR); };   // a failure while loading shows the same way
   r.config_path = U8(cfg_path.wstring());
   r.proceed = true;
   if (!autoplay) _putenv_s("SNAP_LAUNCHER_STARTING", "1");   // the game window shows "Starting the game..." until its first picture (runtime/ui/ui_fps.cpp)

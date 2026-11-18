@@ -1138,7 +1138,7 @@ void script_load() {
       std::string spec = tgt;
       while (is >> o) {
         if (o.rfind("timeout=", 0) == 0) to = std::atof(o.c_str() + 8);
-        else if (w == "aim" && (o.rfind("tol=", 0) == 0 || o.rfind("range=", 0) == 0 || o.rfind("up=", 0) == 0 || o.rfind("zoom=", 0) == 0)) spec += " " + o;
+        else if (w == "aim" && (o.rfind("tol=", 0) == 0 || o.rfind("range=", 0) == 0 || o.rfind("up=", 0) == 0 || o.rfind("zoom=", 0) == 0 || o.rfind("cap=", 0) == 0)) spec += " " + o;
         else log("input script: unknown option '%s' in '%s'", o.c_str(), line.c_str());
       }
       if (w == "aim") g_script.seg_aim[g_script.load_seg] = spec;

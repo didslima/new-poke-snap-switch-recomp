@@ -91,7 +91,8 @@ def main():
     a = ap.parse_args()
     ci_gate.gate(a, 'release_setup')
     version = (ROOT / 'builder' / 'VERSION').read_text(encoding='utf-8').strip()
-    out = Path(a.out)
+    out = Path(a.out).resolve()   # llvm-rc runs in setup/, so a relative --out must not stay relative
+    a.prebuilt = str(Path(a.prebuilt).resolve())
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     root = Path(a.winsdk) if a.winsdk else winsdk.find()

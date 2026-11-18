@@ -65,6 +65,12 @@ int main() {
   CHECK(centered(Proj{0, 0, 12, true}, 0.06f, 15));
   CHECK(!centered(Proj{0, 0, 22, true}, 0.06f, 15));
 
+  // Window around the reticle (the act: sweep target and the stand-in actor check): both axes, in front only.
+  CHECK(in_window(Proj{0.1f, -0.1f, 5, true}, 0.12f));
+  CHECK(!in_window(Proj{0.13f, 0, 5, true}, 0.12f));
+  CHECK(!in_window(Proj{0, -0.13f, 5, true}, 0.12f));
+  CHECK(!in_window(Proj{0, 0, 5, false}, 0.12f));
+
   // Zoom: the gain falls with the field of view and never rises above the unzoomed ride camera.
   CHECK(std::fabs(zoom_gain(0.314f) - 1.0f) < 1e-4f);
   CHECK(zoom_gain(0.6f) == 1.0f);

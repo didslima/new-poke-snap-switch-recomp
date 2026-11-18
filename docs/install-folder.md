@@ -18,7 +18,9 @@ SnapRecomp.exe                               the file you downloaded
 setup\                                       the unpacked builder and the setup's own settings
 tools\                                       the build tools setup downloads (compiler, Ghidra, JDK)
 cache\                                       reusable build results
+game\                                        the game data setup extracted from your own files
 work\                                        the build
+work\ghidra_user\                            Ghidra's own settings, cache and temp files from the build
 work\out\SnapRecomp.exe                      the built game
 work\out\portable_data\Roaming\SnapRecomp    saves, settings, profiles, mods, screenshots
 work\out\portable_data\Local\SnapRecomp      shader cache, logs

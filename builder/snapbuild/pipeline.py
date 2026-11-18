@@ -470,6 +470,20 @@ def move_keys(work, inst=None):
     return {'install_root': str(inst), 'exe_rel': str((wr / 'out').relative_to(inst))}
 
 
+def leave_folder(folder, to):
+    """Windows does not rename a folder that a process has as its working directory. The game runs with out/ as its working
+    directory and the updater it starts inherits that, as does every process the updater starts, so the switch failed with "used by
+    another process" (2026-11-18, the first full update of a one-exe install). Step out to `to` first. True when the directory changed."""
+    try:
+        cwd, f = Path(os.getcwd()).resolve(), Path(folder).resolve()
+        if cwd == f or f in cwd.parents:
+            os.chdir(str(to))
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def promote(work, stage, build_id, log):
     """Switch out/ to the new build: the old out/ becomes builds/previous (one older build is kept), current.json records the id.
     Both moves are renames on one volume. A running game from out/ blocks the rename: the message says so."""
@@ -477,6 +491,7 @@ def promote(work, stage, build_id, log):
     out, builds = work / 'out', work / 'builds'
     prev = builds / 'previous'
     moved = []
+    leave_folder(out, work)
     try:
         if out.exists():
             # portable mode: portable.txt and portable_data go to the new build first (renames), so the player's data is never left in prev,

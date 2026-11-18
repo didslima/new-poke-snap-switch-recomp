@@ -44,9 +44,11 @@ def main():
         (game / 'config.json').write_text(json.dumps(cfg))
         logs = work / 'local' / 'SnapRecomp' / 'logs'
 
-        def run(args=(), extra_env=None):
+        def run(args=(), extra_env=None, autoplay=True):
             env = dict(os.environ, SNAP_CONFIG_DIR=str(work / 'cfg'), SNAP_PROFILES_DIR=str(work / 'profiles'), LOCALAPPDATA=str(work / 'local'),
                        APPDATA=str(work / 'appdata'), SNAP_LAUNCHER_AUTOPLAY='1')
+            if not autoplay:
+                env.pop('SNAP_LAUNCHER_AUTOPLAY')
             for k in ('SNAP_SAFE_MODE', 'SNAP_DATA_DIR', 'SNAP_PORTABLE', 'SNAP_REAL_APPDATA', 'SNAP_REAL_LOCALAPPDATA'):
                 env.pop(k, None)
             env.update(extra_env or {})
@@ -83,6 +85,25 @@ def main():
         check('planted dead start: safe mode offered', 'safe mode offered' in out, (code, out))
         code, out = run(['--set', 'SNAP_SAFE_MODE=1'])
         check('--set SNAP_SAFE_MODE=1: no offer', 'safe mode offered' not in out and 'launcher:' in out, (code, out))
+
+        # --play as another launcher uses it (no test switch): no window of ours may open, so every stop is a line on stderr and an
+        # exit code. A message box would hang this run until the timeout. Planted: a first start (no "upscalers_offered"), a dead
+        # start (the safe-mode question) and converted files that cannot be read.
+        first = dict(cfg)
+        del first['upscalers_offered']
+        (game / 'config.json').write_text(json.dumps(first))
+        (logs / 'launch.marker').write_text('pid=%d\r\nstart=1\r\nsafe=0\r\n' % dead_pid())
+        try:
+            code, out = run(['--play'], autoplay=False)
+            hung = False
+        except subprocess.TimeoutExpired:
+            code, out, hung = -1, 'timed out: a window is waiting for an answer', True
+        check('--play without the test switch: exits by itself (no window waits)', not hung, out)
+        check('--play: the safe-mode question is a stderr line and the start goes on', 'because of --play' in out and '--safe-mode' in out, (code, out))
+        check('--play: unreadable converted files give exit 1 or 2 and the reason', code in (1, 2) and 'launcher:' in out, (code, out))
+        check('--play: the upscaler offer is kept for a start with the window', 'upscalers_offered' not in (game / 'config.json').read_text(), (game / 'config.json').read_text())
+        (game / 'config.json').write_text(json.dumps(cfg))
+        (logs / 'launch.marker').unlink(missing_ok=True)
 
         # --data-dir: the data folders move, so the planted marker under LOCALAPPDATA is not seen and the new folders appear
         dd = work / 'my data'

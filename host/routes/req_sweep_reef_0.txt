@@ -1,0 +1,41 @@
+# fixture: story_complete
+# Request sweep (dev only, SNAP_AIM=1, NEO-ONE speed 2): Maricopia Reef entry 1. Photographs the received request events of this course that come up on a plain ride.
+wait ui=title timeout=200
+repeat @f60 @f30000 40 4 A
+wait ui=map_select:StageSelect timeout=420
+@f240 6 Right
+@f600 6 Right
+@f960 6 Right
+repeat @f1500 @f7320 240 6 A
+wait ui=map_select:CourseSelect timeout=240
+@f180 6 A
+wait ride timeout=300
+aim ev:Mis_Stage014_094|Sp_P068_02 cap=8 range=16 timeout=1 tol=0.08
+@f200 4 A
+repeat @f0 @f60000 40 6 A if=act=_
+repeat @f0 @f60000 300 1 shot=1
+repeat @f1500 @f60000 60 6 A if=!ride
+wait ui=photo_submit:FolderSelect timeout=560
+repeat @f0 @f1400 350 1 shot=1
+repeat @f100 @f900 90 8 Down if=!focus=AllCheck
+@f1000 8 A
+@f1150 8 Plus
+@f1260 8 Up
+@f1350 8 A
+wait ui=evaluation timeout=150
+repeat @f240 @f60000 90 8 A
+wait ui=evaluation:End timeout=400
+repeat @f0 @f1800 300 1 shot=1
+repeat @f600 @f60000 120 5 Down if=!ui=album_save
+repeat @f612 @f60000 120 5 Down if=!ui=album_save
+repeat @f45 @f599 90 8 A
+repeat @f660 @f60000 120 8 A if=!ui=album_save
+repeat @f20 @f60000 90 8 B if=ui=album_save
+repeat @f0 @f60000 90 8 B if=ui=map_select
+wait ui=main_menu:MainMenu timeout=400
+@f300 10 Y
+@f450 10 A
+@f640 1 shot=1
+repeat @f700 @f1300 150 8 R
+repeat @f840 @f1350 150 1 shot=1
+end @f1400

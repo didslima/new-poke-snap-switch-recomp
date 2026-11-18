@@ -26,6 +26,8 @@ def run_update(a):
     import json
     from snapbuild import update
     work = Path(a.work) if a.work else None
+    if work:   # started by the game, this process stands in out/, and so would the rebuild it starts: the switch needs that folder free
+        pipeline.leave_folder(work / 'out', work)
     state = Path(a.state_dir) if a.state_dir else update.default_state_dir(work)
     cfg_path = a.config or (work / 'out' / 'config.json' if work else '')
     channel = a.channel or (update.config_channel(cfg_path) if cfg_path else 'stable')   # --channel beats what the launcher saved

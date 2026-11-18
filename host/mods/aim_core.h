@@ -62,6 +62,9 @@ inline float zoom_gain(float half_y, float base = 0.314f) {
   return k < 0.05f ? 0.05f : k > 1 ? 1 : k;
 }
 
+// In front and within w half-screens of the reticle on both axes.
+inline bool in_window(const Proj& p, float w) { return p.front && std::fabs(p.x) <= w && std::fabs(p.y) <= w; }
+
 // Good to shoot: in front, within `tol` half-screens of the reticle on both axes and no farther than max_dist (0 = any distance).
 inline bool centered(const Proj& p, float tol, float max_dist) {
   return p.front && std::fabs(p.x) <= tol && std::fabs(p.y) <= tol && (max_dist <= 0 || p.dist <= max_dist);

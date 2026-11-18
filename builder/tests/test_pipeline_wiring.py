@@ -245,6 +245,31 @@ class SelftestPromoteTests(unittest.TestCase):
         self.assertTrue((work / 'out' / 'portable.txt').is_file())   # portable by default: written after the switch, never into the staged folder
         self.assertFalse((work / 'out' / 'portable_data').exists())  # the game makes it (and copies an existing %APPDATA% save) on its first start
 
+    def test_promote_from_inside_out(self):
+        """The updater is started by the game and stands in out/ (and so does the rebuild): the switch steps out first."""
+        import os
+        old = os.getcwd()
+        d = self.t / 'inside'
+        if True:
+            work = d / 'work'
+            (work / 'out' / 'sub').mkdir(parents=True)
+            (work / 'out' / 'marker.txt').write_text('old')
+            stage = work / 'builds' / 'b2'
+            stage.mkdir(parents=True)
+            (stage / 'marker.txt').write_text('new')
+            os.chdir(work / 'out' / 'sub')
+            try:
+                pipeline.promote(work, stage, 'b2', self.log)
+                self.assertEqual(Path(os.getcwd()).resolve(), work.resolve())
+                self.assertEqual((work / 'out' / 'marker.txt').read_text(), 'new')
+                self.assertEqual((work / 'builds' / 'previous' / 'marker.txt').read_text(), 'old')
+                # outside out/ nothing changes
+                os.chdir(d)
+                self.assertFalse(pipeline.leave_folder(work / 'out', work))
+                self.assertEqual(Path(os.getcwd()).resolve(), Path(d).resolve())
+            finally:
+                os.chdir(old)
+
     def test_failed_switch_restores_out(self):
         work = self.t / 'work'
         (work / 'builds').mkdir(parents=True)

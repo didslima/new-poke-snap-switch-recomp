@@ -11,7 +11,7 @@ SnapRecomp.exe --play [options]     start the game without the launcher window
 
 | Flag | What it does |
 | --- | --- |
-| `--play` | Skips the launcher window. The game-folder check still runs first. The process ends when the game closes, so the caller can wait on it. |
+| `--play` | Skips the launcher window. The game-folder check still runs first. The process ends when the game closes, so the caller can wait on it. No window of ours opens: a start that cannot go on prints the reason and ends with exit code 1 (the game folder failed its check) or 2 (the converted files are missing or damaged). The first-start upscaler offer waits for a start without `--play`, and after a start that failed the safe-mode question becomes a printed line; add `--safe-mode` to use it. |
 | `--safe-mode` | One start with mods, HD packs, enhanced effects and the shader cache off ([safe-mode.md](safe-mode.md)). |
 | `--fullscreen`, `--borderless` | Borderless full-screen window. Both names do the same thing. |
 | `--windowed` | Normal window. |

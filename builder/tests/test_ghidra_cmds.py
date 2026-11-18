@@ -31,6 +31,25 @@ class GhidraCmdTests(unittest.TestCase):
         self.assertEqual(env['GHIDRA_HEADLESS_MAXMEM'], '12G')
         self.assertEqual(env['JAVA_HOME'], 'J')
 
+    def test_portable_install_keeps_ghidra_files_in_its_folder(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / 'Snap'
+            work = root / 'work'
+            builder = root / 'setup' / 'app' / '1.2.0' / 'builder'
+            u = gm.user_dir_for(work, env={}, builder_dir=builder)
+            self.assertEqual(u, work / 'ghidra_user')
+            env = gm.java_env(Path('J'), u)
+            for name in ('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR'):
+                self.assertTrue(Path(env[name]).is_dir(), name)
+                self.assertEqual(Path(env[name]).parent, u, name)
+            # a source checkout or an unpacked zip: Ghidra's places are left alone
+            self.assertIsNone(gm.user_dir_for(work, env={}, builder_dir=Path(d) / 'repo' / 'builder'))
+            plain = gm.java_env(Path('J'))
+            self.assertEqual(plain.get('APPDATA'), os.environ.get('APPDATA'))
+            self.assertEqual(plain.get('TEMP'), os.environ.get('TEMP'))
+
     def test_missing_ghidra_message(self):
         from snapbuild.util import Log, StepError
         import tempfile

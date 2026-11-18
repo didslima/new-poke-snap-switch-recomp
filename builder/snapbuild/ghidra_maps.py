@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from . import nso as nsomod
+from . import paths
 from .util import StepError, run
 
 PROJECT = 'snap-v262144'
@@ -47,13 +48,29 @@ def build_commands(ghidra, py, repo, work, nso_sha256, build_id, timeout_min=60)
     return analyze, export, reconcile
 
 
-def java_env(jdk):
+def java_env(jdk, user_dir=None):
+    """The environment for Ghidra. user_dir: keep Ghidra's own settings, cache and temp files there instead of the user's AppData
+    and Temp (a portable install writes nothing outside its folder; 2026-11-18: a setup build left %APPDATA%\\ghidra,
+    %LOCALAPPDATA%\\ghidra and %TEMP%\\<user>-ghidra behind). Ghidra and Java take these places from the variables set here."""
     env = dict(os.environ)
     if jdk:
         env['JAVA_HOME'] = str(jdk)
         env['PATH'] = str(Path(jdk) / 'bin') + os.pathsep + env.get('PATH', '')
     env['GHIDRA_HEADLESS_MAXMEM'] = HEAP
+    if user_dir:
+        u = Path(user_dir)
+        places = {'APPDATA': u / 'Roaming', 'XDG_CONFIG_HOME': u / 'Roaming', 'LOCALAPPDATA': u / 'Local', 'XDG_CACHE_HOME': u / 'Local',
+                  'TEMP': u / 'Temp', 'TMP': u / 'Temp', 'XDG_RUNTIME_DIR': u / 'Temp'}
+        for name, d in places.items():
+            d.mkdir(parents=True, exist_ok=True)
+            env[name] = str(d)
     return env
+
+
+def user_dir_for(work, env=None, builder_dir=None):
+    """<work>\\ghidra_user for a portable install, None for a source checkout or an unpacked builder zip (there Ghidra keeps using the
+    developer's own settings, which may hold a Switch loader installed per user)."""
+    return Path(work) / 'ghidra_user' if paths.install_root(env, builder_dir) else None
 
 
 def run_ghidra(ghidra, jdk, py, repo, work, main_nso, log, timeout_min=60):
@@ -68,7 +85,7 @@ def run_ghidra(ghidra, jdk, py, repo, work, main_nso, log, timeout_min=60):
     nsomod.write_uncompressed(main_nso, head, L['nso'])
     with open(L['nso'], 'rb') as f:
         sha = hashlib.sha256(f.read()).hexdigest()   # Ghidra's export script records it; it is not printed
-    env = java_env(jdk)
+    env = java_env(jdk, user_dir_for(work))
     analyze, export, reconcile = build_commands(ghidra, py, repo, work, sha, head.build_id, timeout_min)
     t0 = time.time()
     log.write('ghidra: analyzing (about 13 minutes, 12 GB heap)')
