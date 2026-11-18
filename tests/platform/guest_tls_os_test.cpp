@@ -73,7 +73,7 @@ static GThread spawn(Cpu *c, void (*f)(Cpu *), uint64_t arg, int core = -1) {
 }
 static void join(Cpu *c, GThread t) { call(c, S_WAITT, t.tt); call(c, S_DESTROY, t.tt); }
 
-static const uint8_t kImage[8] = {0xff, 0xff, 0xff, 0xff, 0x95, 0x23, 0x73, 0x00};
+static const uint8_t kImage[8] = {0xff, 0xff, 0xff, 0xff, 0xef, 0xbe, 0xad, 0xde};   // synthetic: slot word -1, then the hash word 0xdeadbeef
 static bool mapped(uint64_t tp) {
     uint64_t end;
     char d[64];
@@ -156,7 +156,7 @@ static void th_entry(Cpu *c) {
     int32_t back;
     memcpy(&back, (const void *)(uintptr_t)(tp + 0x10), 4);
     if (back != slot) local.pattern_ok = false;
-    if (osk::gld<uint32_t>(tp + 0x14) != 0x00732395u) local.pattern_ok = false;   // the hash word of the image is still there
+    if (osk::gld<uint32_t>(tp + 0x14) != 0xdeadbeefu) local.pattern_ok = false;   // the hash word of the image is still there
     // a TLS slot of the OS layer and the thread pointer do not disturb each other
     std::lock_guard<std::mutex> lk(g_mu);
     Rec &d = g_rec[tt];

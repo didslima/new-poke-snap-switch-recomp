@@ -36,7 +36,7 @@ void fatal(const char *fmt, ...) {   // the one OS-layer function the hook bodie
 static std::atomic<int> g_fail{0}, g_checks{0};
 #define CHECK(c) do { g_checks++; if (!(c)) { std::fprintf(stderr, "CHECK FAILED %s:%d: %s\n", __FILE__, __LINE__, #c); g_fail++; } } while (0)
 
-static const uint8_t kImage[8] = {0xff, 0xff, 0xff, 0xff, 0x95, 0x23, 0x73, 0x00};
+static const uint8_t kImage[8] = {0xff, 0xff, 0xff, 0xff, 0xef, 0xbe, 0xad, 0xde};   // synthetic: slot word -1, then the hash word 0xdeadbeef
 static const size_t kSpan = 0xccb900 + 0x1000;
 
 // a stand-in for main: g_main.base/span are what loader.cpp reads the image from

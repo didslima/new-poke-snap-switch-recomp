@@ -107,7 +107,7 @@ static void *c_reserve(size_t size, size_t align, bool ww, osk::host::MemErr *er
 static bool c_commit(void *a, size_t n, osk::host::MemErr *e) { return osk::host::mem_commit(a, n, e); }
 static void c_release(void *a, size_t n) { g_releases++; osk::host::mem_release(a, n); }
 
-static const uint8_t kImage[8] = {0xff, 0xff, 0xff, 0xff, 0x95, 0x23, 0x73, 0x00};
+static const uint8_t kImage[8] = {0xff, 0xff, 0xff, 0xff, 0xef, 0xbe, 0xad, 0xde};   // synthetic: slot word -1, then the hash word 0xdeadbeef
 static std::atomic<int> g_bad{0}, g_ran{0};
 static uint32_t g_slot;
 static std::atomic<int> g_dtor_bad{0};

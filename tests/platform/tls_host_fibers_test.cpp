@@ -247,7 +247,7 @@ int main() {
     if (const char *h = getenv("SNAP_HOPS")) g_hops = atoi(h) > 0 ? atoi(h) : g_hops;
     // a stand-in main with the real image, as in guest_tls_loader_test
     static std::vector<uint8_t> module(0xccb900 + 0x1000, 0);
-    const uint8_t image[8] = {0xff, 0xff, 0xff, 0xff, 0x95, 0x23, 0x73, 0x00};
+    const uint8_t image[8] = {0xff, 0xff, 0xff, 0xff, 0xef, 0xbe, 0xad, 0xde};   // synthetic: slot word -1, then the hash word 0xdeadbeef
     memcpy(module.data() + hle::kMainTlsImageVaddr, image, 8);
     loader::g_main.base = (uint64_t)(uintptr_t)module.data();
     loader::g_main.span = module.size();
