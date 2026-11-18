@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Shiny capture effect: a game-styled "Shiny <name>!" badge with a star, gold sparkles and a short chime, shown for about 2.6 s
 // after a photo with a shiny Pokemon is saved (host/mods/shiny.cpp). Host overlay only; nothing of the game is touched.
-#include <windows.h>
-#include <mmsystem.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -15,6 +12,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include "ui_host.h"
 #include "ui_i18n.h"
 #include "ui_internal.h"
 #include "ui_theme.h"
@@ -65,7 +63,7 @@ extern "C" void snap_shiny_fx_trigger(const char* species) {
   { std::lock_guard<std::mutex> lk(g_mu); g_species = species ? species : ""; }
   g_start.store(now_secs());
   const auto& w = chime();
-  PlaySoundW(reinterpret_cast<LPCWSTR>(w.data()), nullptr, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+  snap::ui::host::play_wav_async(w.data(), w.size());
 }
 
 namespace snap::ui {

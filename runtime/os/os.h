@@ -49,6 +49,7 @@ void os_host_block_end(void);
 void os_io_begin(void);   // the same around blocking host I/O and retry sleeps, unless SNAP_SCHED_LEGACY=hostblock
 void os_io_end(void);
 uint64_t os_current_thread_type(void);   // guest ThreadType* of the calling thread, 0 if none
+Cpu *os_current_cpu(void);               // active guest Cpu* on the calling host thread (or NULL)
 
 // ---- polling hooks for the lifter and the runtime (proposed wiring in runtime/os/PROPOSED_SHARED_CHANGES.md)
 void os_spin_gate(Cpu *c, uint64_t head);   // body of rt_spin_gate: a pass of a spin-wait back-edge

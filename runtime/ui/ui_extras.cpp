@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 // F1 menu extras backed by the per-profile settings file (hle/settings.h): gyro aim and rumble (Controller tab, live) and the photo gallery
 // (inside the Photos page; opens the local gallery server in the browser). Graphics options moved to ui_options.cpp.
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
-#include <shellapi.h>
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -20,10 +15,9 @@
 #include "hle/input_core.h"
 #include "hle/profiles.h"
 #include "hle/settings.h"
+#include "ui_host.h"
 #include "ui_internal.h"
 #include "ui_i18n.h"
-
-#pragma comment(lib, "ws2_32.lib")
 
 namespace snap::ui {
 
@@ -35,28 +29,7 @@ std::atomic<int> g_gallery_state{0};   // 0 idle, 1 starting, 2 opened, 3 failed
 std::atomic<unsigned> g_gallery_port{0};   // port the server we started reported (8777, or whatever the OS picked)
 
 bool port_open(unsigned short port) {
-  WSADATA wd;
-  if (WSAStartup(MAKEWORD(2, 2), &wd) != 0) return false;
-  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  bool ok = false;
-  if (s != INVALID_SOCKET) {
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(port);
-    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    ok = connect(s, (sockaddr*)&a, sizeof a) == 0;
-    closesocket(s);
-  }
-  WSACleanup();
-  return ok;
-}
-
-std::wstring widen(const std::string& s) {
-  int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-  std::wstring w((size_t)std::max(n, 1), L'\0');
-  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
-  w.resize(w.size() - 1);
-  return w;
+  return host::tcp_port_open("127.0.0.1", port);
 }
 
 // Project root: the folder holding tools-src\gallery (the game runs from the project root; the exe sits in build\play or build\snap).
@@ -64,8 +37,7 @@ std::filesystem::path find_project_root() {
   namespace fs = std::filesystem;
   std::error_code ec;
   std::vector<fs::path> starts = {fs::current_path(ec)};
-  wchar_t exe[MAX_PATH * 2];
-  if (GetModuleFileNameW(nullptr, exe, MAX_PATH * 2)) starts.push_back(fs::path(exe).parent_path());
+  if (const std::string exe_dir = host::exe_dir(); !exe_dir.empty()) starts.push_back(fs::u8path(exe_dir));
   if (const char* r = std::getenv("SNAP_PLAY_ROOT")) starts.insert(starts.begin(), fs::u8path(r));
   for (fs::path p : starts) {
     for (int i = 0; i < 5 && !p.empty(); ++i, p = p.parent_path())
@@ -92,24 +64,16 @@ void open_gallery_async() {
       port = 0;
       fs::path root = find_project_root();
       if (root.empty()) { g_gallery_state = 3; return; }
-      fs::path py = root / "tools" / "venv-recomp" / "Scripts" / "python.exe";
       std::error_code ec;
-      std::wstring exe = fs::exists(py, ec) ? py.wstring() : L"python.exe";
-      fs::path pf = fs::temp_directory_path(ec) / ("snap_gallery_port_" + std::to_string(GetCurrentProcessId()) + ".txt");
+      fs::path pf = fs::temp_directory_path(ec) / ("snap_gallery_port_" + std::to_string(host::current_process_id()) + ".txt");
       fs::remove(pf, ec);
-      std::wstring cmd = L"\"" + exe + L"\" -E -P \"" + (root / "tools-src" / "gallery" / "serve.py").wstring() + L"\" --no-open --profile \"" + widen(prof) +
-                         L"\" --port 8777 --port-file \"" + pf.wstring() + L"\"";
-      STARTUPINFOW si{};
-      si.cb = sizeof si;
-      PROCESS_INFORMATION pi{};
-      if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr, root.wstring().c_str(), &si, &pi)) {
+      auto to_u8 = [](const fs::path& path) { const auto u = path.u8string(); return std::string(reinterpret_cast<const char*>(u.data()), u.size()); };
+      if (!host::launch_gallery_server(to_u8(root), prof, to_u8(pf))) {
         g_gallery_state = 3;
         return;
       }
-      CloseHandle(pi.hThread);
-      CloseHandle(pi.hProcess);   // the server outlives the game; it only listens on 127.0.0.1
       for (int i = 0; i < 240 && !ok; ++i) {   // extraction runs first, then the port file appears
-        Sleep(500);
+        host::sleep_ms(500);
         std::ifstream f(pf);
         unsigned p = 0;
         if (f >> p && p > 0 && p < 65536 && port_open((unsigned short)p)) { port = p; ok = true; }
@@ -118,8 +82,8 @@ void open_gallery_async() {
     }
     if (ok) {
       g_gallery_port = port;
-      std::wstring url = L"http://127.0.0.1:" + std::to_wstring(port) + L"/";
-      ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+      std::string url = "http://127.0.0.1:" + std::to_string(port) + "/";
+      host::open_url(url);
       g_gallery_state = 2;
     } else {
       g_gallery_state = 3;

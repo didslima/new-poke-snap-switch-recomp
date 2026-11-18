@@ -16,13 +16,8 @@
 #include "hle_config.h"
 #include "input_core.h"
 #include "profiles.h"
+#include "hle_host.h"
 #include "visual_defaults.h"   // Look row (gfx_look)
-
-#ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 namespace fs = std::filesystem;
 
@@ -90,16 +85,7 @@ void write_file() {
   }
   // Replace in one step and never delete the target first: a failed replace (antivirus or an indexer holding the .tmp) keeps the
   // old file. A few short retries, then give up, log, and drop the .tmp.
-  bool ok = false;
-  for (int i = 0; i < 5 && !ok; i++) {
-#ifdef _WIN32
-    ok = MoveFileExW(P(tmp).wstring().c_str(), P(g_path).wstring().c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-    if (!ok) Sleep(20);
-#else
-    fs::rename(P(tmp), P(g_path), ec);
-    ok = !ec;
-#endif
-  }
+  const bool ok = hle::host::atomic_replace_file(tmp, g_path);
   if (!ok) {
     std::fprintf(stderr, "settings: could not replace %s (kept the previous file)\n", g_path.c_str());
     fs::remove(P(tmp), ec);
@@ -154,11 +140,7 @@ void set_env_if_unset(const char* name, const std::string& value) {
   const char* cur = std::getenv(name);
   if (cur && *cur) return;
   if (value.empty()) return;
-#ifdef _WIN32
-  _putenv_s(name, value.c_str());
-#else
-  setenv(name, value.c_str(), 0);
-#endif
+  hle::host::set_env_var(name, value.c_str());
   g_exported.push_back(name);
 }
 }  // namespace
@@ -189,10 +171,10 @@ bool safe_keeps(const std::string& k) {
 void safe_clear_env() {
   static const char* const kExtra[] = {"SNAP_RT", "SNAP_RT_SHADOWS", "SNAP_RT_REFLECT", "SNAP_LOOK", "SNAP_PASS_OFF", "SNAP_SHINY", "SNAP_SHINY_ODDS", "SNAP_FRAMEGEN", "SNAP_UPSCALER",
                                        "SNAP_MODEL_REFINE", "SNAP_MODS_AB", "SNAP_MODEL_AB", "SNAP_SPAWN_RAND", "SNAP_INPUT_SCRIPT_MODS"};
-  for (auto& m : kEnvKeys) if (!safe_keeps(m.key)) _putenv_s(m.env, "");
-  for (const char* n : kExtra) _putenv_s(n, "");
-  _putenv_s("SNAP_VISUALS", "original");    // every visual row that is unset follows the original column
-  _putenv_s("SNAP_PIPELINE_SEED", "0");     // no seeded shader keys (the shader cache folder itself is swapped in nvn_pipeline.cpp)
+  for (auto& m : kEnvKeys) if (!safe_keeps(m.key)) hle::host::unset_env_var(m.env);
+  for (const char* n : kExtra) hle::host::unset_env_var(n);
+  hle::host::set_env_var("SNAP_VISUALS", "original");    // every visual row that is unset follows the original column
+  hle::host::set_env_var("SNAP_PIPELINE_SEED", "0");     // no seeded shader keys (the shader cache folder itself is swapped in nvn_pipeline.cpp)
 }
 }  // namespace
 
@@ -245,13 +227,7 @@ void set_bool(const std::string& key, bool v) { set(key, v ? "1" : "0"); }
 void set_float(const std::string& key, float v) { char b[32]; std::snprintf(b, sizeof b, "%.3f", v); set(key, b); }
 
 void forget_exported_env() {
-  for (auto& n : g_exported) {
-#ifdef _WIN32
-    _putenv_s(n.c_str(), "");
-#else
-    unsetenv(n.c_str());
-#endif
-  }
+  for (auto& n : g_exported) hle::host::unset_env_var(n.c_str());
   g_exported.clear();
 }
 

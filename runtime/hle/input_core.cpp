@@ -22,8 +22,7 @@
 #include "hle.h"
 
 extern "C" void snap_audio_log_checks(void);   // runtime/audio/audio_out.cpp: the "[audio] checks:" counter line, printed before a route ends the run
-extern "C" void snap_audio_log_checks_none(void) {}   // test builds without the audio layer link this instead
-#pragma comment(linker, "/alternatename:snap_audio_log_checks=snap_audio_log_checks_none")
+extern "C" void snap_audio_log_checks_none(void) {}   // test builds without the audio layer link this instead (bound in hle_host_win32.cpp / weak in hle_host_posix.cpp)
 namespace nvn { extern int g_presentCount; extern int g_fdBurst; }   // runtime/nvn/nvn_tex_vk.cpp: frame clock for '@f' script times; nvn_vk.cpp: NVN_FRAME_DUMP burst (script token shot=<n>)
 
 namespace hle::input {
@@ -34,13 +33,10 @@ bool consume_screenshot() { return g_shot_req.exchange(false); }
 extern "C" void snap_state_request(int op, const char* name);   // runtime/os/os_state.cpp: queue a save (1) or load (2); a worker thread does it
 extern "C" int snap_state_idle();
 extern "C" int snap_state_count(const char* kind);   // "saves..." / "loads..." (ok) or "done..." (ok or refused) finished since the process started
-// test builds without the OS layer (tests/hle) link these instead
+// test builds without the OS layer (tests/hle) link these instead (bound in hle_host_win32.cpp / weak in hle_host_posix.cpp)
 extern "C" void snap_state_request_none(int, const char*) {}
 extern "C" int snap_state_idle_none() { return 1; }
 extern "C" int snap_state_count_none(const char*) { return 0; }
-#pragma comment(linker, "/alternatename:snap_state_request=snap_state_request_none")
-#pragma comment(linker, "/alternatename:snap_state_idle=snap_state_idle_none")
-#pragma comment(linker, "/alternatename:snap_state_count=snap_state_count_none")
 // Route aim tool (host/mods/aim.cpp, developer tool, needs SNAP_AIM=1): the `aim`, `shoot` and `wait_pose` route lines. Test builds
 // and runs without the tool get the stand-ins: no target, always "ready", no stick.
 extern "C" void snap_aim_set(const char* spec);               // "<target> [tol=<f>] [range=<m>]" or "off"
@@ -50,20 +46,13 @@ extern "C" void snap_aim_shot(void);                          // a `shoot` line 
 extern "C" int snap_aim_pose(const char* text, char* why, int n);   // the target's current motion event name contains text
 extern "C" int snap_aim_act(const char* text, char* why, int n);    // the viewfinder is locked on an actor playing that event
 extern "C" int snap_aim_act_none(const char*, char* why, int n) { if (why && n > 0) std::snprintf(why, (size_t)n, "aim tool off"); return 0; }
-#pragma comment(linker, "/alternatename:snap_aim_act=snap_aim_act_none")
 extern "C" void snap_aim_set_none(const char*) {}
 extern "C" int snap_aim_ready_none(char* why, int n) { if (why && n > 0) std::snprintf(why, (size_t)n, "aim tool off"); return 1; }
 extern "C" int snap_aim_stick_none(float*, float*) { return 0; }
 extern "C" void snap_aim_shot_none(void) {}
 extern "C" int snap_aim_pose_none(const char*, char* why, int n) { if (why && n > 0) std::snprintf(why, (size_t)n, "aim tool off"); return 1; }
-#pragma comment(linker, "/alternatename:snap_aim_set=snap_aim_set_none")
-#pragma comment(linker, "/alternatename:snap_aim_ready=snap_aim_ready_none")
-#pragma comment(linker, "/alternatename:snap_aim_stick=snap_aim_stick_none")
-#pragma comment(linker, "/alternatename:snap_aim_shot=snap_aim_shot_none")
-#pragma comment(linker, "/alternatename:snap_aim_pose=snap_aim_pose_none")
 extern "C" void snap_import_counts_dump(const char* tag);   // host/loader.cpp (debug, needs SNAP_IMPORT_COUNT=1): imports called since the last dump
 extern "C" void snap_import_counts_dump_none(const char*) {}
-#pragma comment(linker, "/alternatename:snap_import_counts_dump=snap_import_counts_dump_none")
 
 // ---------------------------------------------------------------------------------------------------------------
 // names

@@ -4,9 +4,6 @@
 // the documented SNAP_* env vars at start, so an env var set by hand still wins and the page says so. Live window options go through the window API (host/window_opts.h,
 // remembered in window.json), the audio output mode through snap_audio_set_output (audio.json). "Apply and restart" uses restart_game().
 // Layout like the game's own options screen: options on the left, the explanation of the highlighted one on the right.
-#include <windows.h>
-#include <shellapi.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -37,7 +34,8 @@ namespace nvn { const char* FgNotice(); }   // nvn_framegen.cpp: why frame gener
 #include "hle/settings.h"
 #include "hle/visual_defaults.h"   // the one table of visual defaults (original look vs extras)
 #include "mods/mods_core.h"
-#include "window_opts.h"
+#include "window_opts_public.h"
+#include "ui_host.h"
 #include "ui_internal.h"
 #include "ui_skin.h"
 #include "ui_i18n.h"
@@ -208,13 +206,8 @@ void set_look(const std::string& v) {
 
 // ---- the picture rows: Look -> Internal resolution -> Anti-aliasing -> Performance scaling (owner 2026-11-15). They are views over gfx_render_scale, gfx_aa,
 // gfx_upscaler and gfx_upscale_quality, so saved settings keep working; hle/picture_rows.h has the rules and says what the runtime does with each combination.
-bool beside_exe(const wchar_t* rel) {
-  wchar_t path[MAX_PATH * 2] = {};
-  if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return false;
-  wchar_t* sl = wcsrchr(path, L'\\');
-  if (!sl) return false;
-  wcscpy(sl + 1, rel);
-  return GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES;
+bool beside_exe(const char* rel) {
+  return host::beside_exe(rel);
 }
 snappic::Cfg pic_cfg() {
   snappic::Cfg c;
@@ -229,7 +222,7 @@ snappic::Ctx pic_ctx() {
   snappic::Ctx x;
   x.enhanced = snapdef::enhanced();
   x.window_h = nvn::HostWindowHeight();
-  x.dlss = beside_exe(L"nvngx_dlss.dll"); x.fsr = beside_exe(L"upscalers\\amd_fidelityfx_upscaler_vk.dll"); x.xess = beside_exe(L"libxess.dll");
+  x.dlss = beside_exe("nvngx_dlss.dll"); x.fsr = beside_exe("upscalers\\amd_fidelityfx_upscaler_vk.dll"); x.xess = beside_exe("libxess.dll");
   return x;
 }
 void pic_store(const snappic::Cfg& c) {
@@ -1178,9 +1171,7 @@ bool mods_save() {
 }
 
 void open_folder(const std::string& dir) {
-  std::error_code ec;
-  fs::create_directories(fs::u8path(dir), ec);
-  ShellExecuteW(nullptr, L"explore", fs::u8path(dir).wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  host::open_folder(dir);
 }
 
 }  // namespace

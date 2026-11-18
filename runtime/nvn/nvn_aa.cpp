@@ -25,6 +25,7 @@
 #include "nvn_aa.h"
 #include "nvn_aa_spv.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_fx.h"   // [wide] FxReemitViewState
 #include "hle/visual_defaults.h"   // the one table of visual defaults
 
@@ -63,9 +64,7 @@ int HostWindowHeight() {
       }
     }
   }
-#ifdef _WIN32
-  if (big) { int mh = GetSystemMetrics(SM_CYSCREEN); if (mh > 0) return mh; }   // primary monitor; the window may sit on another one
-#endif
+  if (big) { int mh = nvn::os_host::primary_screen_height(); if (mh > 0) return mh; }   // primary monitor; the window may sit on another one
   return saved > 0 ? saved : 720;
 }
 namespace {

@@ -9,17 +9,11 @@
 #include <sstream>
 
 #include "hle.h"
+#include "hle_host.h"
 #include "save_gen.h"
 #include "json_lite.h"
 #include "profiles.h"
 #include "settings.h"
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <knownfolders.h>
-#include <shlobj.h>
-#endif
 
 namespace hle {
 
@@ -29,40 +23,10 @@ static Config g_cfg;
 static bool g_cfg_init = false;
 
 static std::string join(const std::string& a, const char* b) {
-#ifdef _WIN32
-  return a + "\\" + b;
-#else
-  return a + "/" + b;
-#endif
+  return a + hle::host::path_sep() + b;
 }
 
-#ifdef _WIN32
-// %APPDATA% as UTF-8. getenv returns the ANSI code page, which the u8path users (fs_core, settings, profiles) would misread for a
-// non-ASCII user name; _wgetenv (or the known-folder API when the variable is missing) is exact.
-std::string appdata_utf8() {
-  std::wstring w;
-  if (const wchar_t* e = _wgetenv(L"APPDATA"); e && *e) w = e;
-  else {
-    PWSTR p = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p)) && p) w = p;
-    if (p) CoTaskMemFree(p);
-  }
-  if (w.empty()) return ".";
-  int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-  std::string s((size_t)(n > 0 ? n : 0), '\0');
-  if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
-  return s;
-}
-#endif
-
-std::string default_data_root() {
-#ifdef _WIN32
-  return appdata_utf8() + "\\SnapRecomp";
-#else
-  const char* h = std::getenv("HOME");
-  return std::string(h ? h : ".") + "/.local/share/SnapRecomp";
-#endif
-}
+std::string default_data_root() { return hle::host::default_data_root(); }
 
 std::string default_input_path() {
   const char* d = std::getenv("SNAP_CONFIG_DIR");
@@ -81,14 +45,7 @@ std::string uid_dir_name(const uint64_t uid[2]) {
 // a differently spelled folder. When that folder has a save and the correct one has none, copy it over once (the old one stays).
 // Both roots are UTF-8. A string that is not valid UTF-8 is no folder any build could have used (std::filesystem::u8path throws
 // on it with the MSVC STL), so it is skipped, and no error here ever leaves this function: migration must never stop boot.
-static bool valid_utf8(const std::string& s) {
-#ifdef _WIN32
-  return s.empty() || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), nullptr, 0) > 0;
-#else
-  (void)s;
-  return true;
-#endif
-}
+static bool valid_utf8(const std::string& s) { return hle::host::valid_utf8_path(s); }
 
 // A save root holds a save when some <uid>/ under it has a loadable generation, by the mount's own rule (save_gen.h: CURRENT
 // or the newest complete, non-orphaned generation). The root's .snap.lock, empty folders or a marker-less partial copy do not.
@@ -132,23 +89,15 @@ static bool copy_tree(const std::filesystem::path& from, const std::filesystem::
   return !why;
 }
 
-#ifdef _WIN32
-// Cross-process lock for the migration: a byte lock on <new_root>/.migrate.lock (dies with its process). Waits up to `ms`.
 struct MigrateLock {
-  HANDLE h = INVALID_HANDLE_VALUE;
-  OVERLAPPED ov{};
+  void* h = nullptr;
   bool take(const std::filesystem::path& file, int ms) {
-    h = CreateFileW(file.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    for (int waited = 0;; waited += 50) {
-      if (LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) return true;
-      if (waited >= ms) { CloseHandle(h); h = INVALID_HANDLE_VALUE; return false; }
-      Sleep(50);
-    }
+    auto u = file.u8string();
+    h = hle::host::lock_file_begin(std::string(u.begin(), u.end()), ms);
+    return h != nullptr;
   }
-  ~MigrateLock() { if (h != INVALID_HANDLE_VALUE) { UnlockFileEx(h, 0, 1, 0, &ov); CloseHandle(h); } }
+  ~MigrateLock() { if (h) hle::host::lock_file_end(h); }
 };
-#endif
 
 // Runs once per data root, under a cross-process lock (two copies starting together never share or race on a stage).
 // The copy goes to a per-process stage <new_root>/save.migrating-<pid>, is checked against a manifest of the source (every
@@ -170,13 +119,9 @@ bool migrate_legacy_data_root(const std::string& old_root, const std::string& ne
     if (sf::exists(done, ec) || !sf::is_directory(o, ec) || !has_save(o)) return false;
     sf::create_directories(nr, ec);
     auto settle = [&]() { std::ofstream(done, std::ios::binary) << "legacy save migration settled\n"; };
-#ifdef _WIN32
     MigrateLock lock;
     if (!lock.take(nr / ".migrate.lock", 120000)) { log("config: save migration: another copy holds the migration lock; will retry at the next start"); return false; }
-    const sf::path stage = nr / ("save.migrating-" + std::to_string(GetCurrentProcessId()));
-#else
-    const sf::path stage = nr / "save.migrating";
-#endif
+    const sf::path stage = nr / ("save.migrating-" + std::to_string(hle::host::process_id()));
     if (sf::exists(done, ec)) return false;   // another copy finished while this one waited
     if (has_save(n)) { settle(); return false; }
     // stages of crashed earlier attempts (no one else is migrating: we hold the lock)
@@ -227,28 +172,11 @@ bool migrate_legacy_data_root(const std::string& old_root, const std::string& ne
   return false;
 }
 
-#ifdef _WIN32
-// The folder older builds used: %APPDATA% as the ANSI code page bytes (getenv), read as if they were UTF-8. Built from the wide
-// variable; empty when those bytes are not valid UTF-8 (such a build could not open the folder, so there is nothing to move).
-static std::string legacy_appdata_spelling() {
-  const wchar_t* w = _wgetenv(L"APPDATA");
-  if (!w || !*w) return "";
-  const int wn = (int)wcslen(w);
-  int n = WideCharToMultiByte(CP_ACP, 0, w, wn, nullptr, 0, nullptr, nullptr);
-  if (n <= 0) return "";
-  std::string ansi((size_t)n, '\0');
-  WideCharToMultiByte(CP_ACP, 0, w, wn, ansi.data(), n, nullptr, nullptr);
-  return valid_utf8(ansi) ? ansi : std::string();
-}
-#endif
-
 void apply_defaults() {
   Config& c = g_cfg;
   if (c.data_root.empty()) {
     c.data_root = default_data_root();
-#ifdef _WIN32
-    if (std::string a = legacy_appdata_spelling(); !a.empty()) migrate_legacy_data_root(a + "\\SnapRecomp", c.data_root);
-#endif
+    if (std::string a = hle::host::legacy_data_root(); !a.empty()) migrate_legacy_data_root(a, c.data_root);
   }
   if (c.save_root.empty()) c.save_root = join(c.data_root, "save");
   if (c.input_map_path.empty()) c.input_map_path = default_input_path();
@@ -276,7 +204,7 @@ bool load_config(const std::string& path_in) {
   if (path.empty()) {
     const char* e = std::getenv("SNAP_HLE_CONFIG");
     if (e && *e) path = e;
-    else path = join(join(default_data_root(), "config"), "hle.json");
+    else path = join(hle::host::default_config_dir(), "hle.json");
   }
   bool ok = true;
   std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
@@ -354,25 +282,7 @@ static std::string tag_from_locale_name(const std::string& n) {   // "de-DE", "z
   return "";
 }
 
-std::string windows_ui_language_tag() {
-#ifdef _WIN32
-  ULONG n = 0, len = 0;
-  if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &n, nullptr, &len) && len > 1) {
-    std::wstring buf(len, L' ');
-    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &n, buf.data(), &len)) {
-      for (size_t i = 0; i < buf.size() && buf[i];) {   // a double-NUL-terminated list, most preferred first
-        std::wstring w(buf.c_str() + i);
-        i += w.size() + 1;
-        std::string a;
-        for (wchar_t ch : w) a += ch < 128 ? (char)ch : '?';
-        const std::string tag = tag_from_locale_name(a);
-        if (!tag.empty()) return tag;
-      }
-    }
-  }
-#endif
-  return "en";
-}
+std::string windows_ui_language_tag() { return hle::host::ui_language_tag(); }
 
 const char* game_text_suffix(int lang) {
   const char* j = std::getenv("SNAP_TEXT_JA");   // test switch: jp (kana) or jk (kanji) for Japanese
@@ -403,7 +313,6 @@ int resolve_game_language() {
 // Picker window (runtime/ui/ui_picker.cpp); the stub keeps builds without it (unit tests) linking.
 extern "C" int snap_ui_pick_profile(const profiles::PickItem* items, int count);
 extern "C" int snap_ui_pick_profile_none(const profiles::PickItem*, int) { return -1; }
-#pragma comment(linker, "/alternatename:snap_ui_pick_profile=snap_ui_pick_profile_none")
 
 // The save folder an import or export targets (runtime/hle/save_port.cpp): SNAP_SAVE_DIR / save_root when set, else the profile the game would
 // start with (`profile` empty: SNAP_PROFILE, else the last used one), after the same legacy migration the game start does.
@@ -446,9 +355,7 @@ void activate_profiles() {
   const char* pk = std::getenv("SNAP_PROFILE_PICKER");
   bool no_picker = c.headless || (pk && *pk == '0');
   bool force = (pk && *pk == '1');
-#ifdef _WIN32
-  if (GetAsyncKeyState(VK_SHIFT) & 0x8000) force = true;   // hold Shift while starting to pick a profile even with only one
-#endif
+  if (hle::host::shift_held_at_launch()) force = true;
   profiles::Active a = profiles::startup(root, legacy, want ? want : "", no_picker ? nullptr : snap_ui_pick_profile, force);
   if (!a.save_dir.empty()) c.save_root = a.save_dir;
   profiles::set_active(a);

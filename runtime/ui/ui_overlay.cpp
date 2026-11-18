@@ -7,8 +7,6 @@
 //    the cursor is hidden/released per the hub's policy and the rest goes to ImGui while the menu is open.
 //  - While the menu is open the input hub reports an idle pad to the game; the menu reads keyboard/mouse through ImGui's Win32
 //    backend and the pad through the hub (SDL3 + XInput merged), so every controller the game accepts also drives the menu.
-#include <windows.h>
-#include <windowsx.h>
 
 #include <algorithm>
 #include <chrono>
@@ -25,14 +23,12 @@
 #include "hle/input_core.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
-#include "imgui_impl_win32.h"
 #include "ui_font.h"
+#include "ui_host.h"
 #include "ui_i18n.h"
 #include "ui_internal.h"
 #include "ui_present.h"
 #include "ui_theme.h"
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace snap::ui {
 
@@ -56,8 +52,7 @@ struct Core {
   std::atomic<bool> modal{false};      // shader prompt / progress screen
   bool was_modal = false;
   std::atomic<bool> imgui_ready{false};
-  HWND hwnd = nullptr;
-  WNDPROC orig = nullptr;
+  void* hwnd = nullptr;
   bool was_open = false;
   // Vulkan
   VkDevice device = VK_NULL_HANDLE;
@@ -73,73 +68,6 @@ struct Core {
 };
 Core g;
 
-// ---- window subclass ------------------------------------------------------------------------------------------------
-LRESULT ui_wndproc_impl(HWND h, UINT m, WPARAM w, LPARAM l) {
-  switch (m) {
-    case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
-      if (w == VK_F1) {
-        if (!(l & (1 << 30)) && !g.modal.load()) overlay_set_open(!g.open.load());   // key-down edge only, not the auto-repeat
-        return 0;
-      }
-      if (w == VK_F3 && fps_overlay_hotkey_free()) {   // performance overlay Off -> FPS -> Detailed (ui_fps.cpp); a bound F3 stays the game's
-        if (!(l & (1 << 30))) fps_overlay_cycle();
-        return 0;
-      }
-      if (w == VK_F4 && tune_hotkey_free()) {   // SNAP_DEV=1: GPU cost overlay (ui_tune.cpp)
-        if (!(l & (1 << 30))) tune_toggle_overlay();
-        return 0;
-      }
-      break;
-    case WM_KEYUP:
-    case WM_SYSKEYUP:
-      if (w == VK_F1) return 0;
-      if (w == VK_F3 && fps_overlay_hotkey_free()) return 0;
-      if (w == VK_F4 && tune_hotkey_free()) return 0;
-      break;
-    case WM_MOUSEWHEEL:
-      hle::input::post_wheel(GET_WHEEL_DELTA_WPARAM(w));
-      break;
-    case WM_KILLFOCUS:
-    case WM_CLOSE:
-    case WM_DESTROY:
-      ClipCursor(nullptr);   // never leave the cursor confined to a window that is going away or inactive
-      break;
-    case WM_ACTIVATE:
-      if (LOWORD(w) == WA_INACTIVE) ClipCursor(nullptr);
-      break;
-    case WM_SETCURSOR:
-      if (LOWORD(l) == HTCLIENT && hub().cursor_hidden() && !g.open.load() && !g.modal.load()) { SetCursor(nullptr); return TRUE; }
-      break;
-    default: break;
-  }
-  if ((g.open.load() || g.modal.load()) && g.imgui_ready.load()) {
-    std::lock_guard<std::recursive_mutex> lk(g.mu);
-    if (ImGui_ImplWin32_WndProcHandler(h, m, w, l)) return TRUE;
-  }
-  return CallWindowProcW(g.orig, h, m, w, l);
-}
-
-// No host exception may leave a window procedure (the OS turns it into STATUS_FATAL_USER_CALLBACK_EXCEPTION and kills the process).
-LRESULT CALLBACK ui_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
-  try {
-    return ui_wndproc_impl(h, m, w, l);
-  } catch (const std::exception& e) {
-    static int n = 0;
-    if (n++ < 20) hle::log("ui: exception in the window procedure (msg 0x%x): %s", m, e.what());
-  } catch (...) {
-    static int n = 0;
-    if (n++ < 20) hle::log("ui: unknown exception in the window procedure (msg 0x%x)", m);
-  }
-  return g.orig ? CallWindowProcW(g.orig, h, m, w, l) : DefWindowProcW(h, m, w, l);
-}
-
-void ensure_window(HWND h) {
-  if (!h || g.hwnd == h) return;
-  g.hwnd = h;
-  g.orig = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(h, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(ui_wndproc)));
-  hle::log("ui: overlay hooked into the game window (F1 or hold Back+Start for 0.5 s opens the controls menu)");
-}
 
 // ---- colors: the swapchain is often an sRGB format, which would brighten straight ImGui colors; pre-convert them
 float lin(float c) { return std::pow(std::clamp(c, 0.0f, 1.0f), 2.2f); }
@@ -248,10 +176,8 @@ bool g_font_explicit = true;   // the base font was added with an explicit size 
 unsigned g_font_done = 0;      // bit 0: Latin letters (Segoe UI), bit 1 + language: the file that covers that language's script
 
 void merge_system_font(const char* file, int face, float em_scale) {   // em_scale: the game font draws a bigger letter for the same size than these
-  const char* root = std::getenv("SystemRoot");
-  if (!root) return;
-  const std::string path = std::string(root) + "\\Fonts\\" + file;
-  if (GetFileAttributesA(path.c_str()) == INVALID_FILE_ATTRIBUTES) { hle::log("ui: fallback font %s not found (some characters will show as boxes)", file); return; }
+  const std::string path = host::system_font_path(file);
+  if (path.empty()) { hle::log("ui: fallback font %s not found (some characters will show as boxes)", file); return; }
   ImFontConfig fc;
   fc.MergeMode = true;
   fc.FontNo = face;
@@ -293,7 +219,8 @@ bool init_imgui(const SnapUiFrame* f) {
   g.format = f->format;
   g.srgb = f->format == VK_FORMAT_B8G8R8A8_SRGB || f->format == VK_FORMAT_R8G8B8A8_SRGB;
   g.device = f->device;
-  if (!ImGui_ImplWin32_Init(f->hwnd)) { hle::log("ui: ImGui_ImplWin32_Init failed"); g.failed = true; ImGui::DestroyContext(); return false; }
+  g.hwnd = f->hwnd;
+  if (!host::init_platform(f->hwnd)) { hle::log("ui: platform init failed"); g.failed = true; ImGui::DestroyContext(); return false; }
   ImGui_ImplVulkan_InitInfo ii{};
   ii.ApiVersion = VK_API_VERSION_1_3;
   ii.Instance = f->instance;
@@ -311,7 +238,7 @@ bool init_imgui(const SnapUiFrame* f) {
   ii.PipelineInfoMain.PipelineRenderingCreateInfo = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
   ii.PipelineInfoMain.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
   ii.PipelineInfoMain.PipelineRenderingCreateInfo.pColorAttachmentFormats = &color_format;
-  if (!ImGui_ImplVulkan_Init(&ii)) { hle::log("ui: ImGui_ImplVulkan_Init failed"); g.failed = true; ImGui_ImplWin32_Shutdown(); ImGui::DestroyContext(); return false; }
+  if (!ImGui_ImplVulkan_Init(&ii)) { hle::log("ui: ImGui_ImplVulkan_Init failed"); g.failed = true; host::shutdown_platform(); ImGui::DestroyContext(); return false; }
   g.vk_ready = true;
   // font: the game's own UI font decoded from the user's extracted files at run time (ui_font.h; never copied into the repo), else Segoe UI
   // from the Windows fonts folder when present (system file, not shipped), else the embedded vector font
@@ -327,10 +254,9 @@ bool init_imgui(const SnapUiFrame* f) {
       if (font_ok) { g_base_game_font = true; hle::log("ui: using the game's UI font (%s) decoded from the extracted files", game_font_family()); }
     }
   }
-  if (!font_ok)
-  if (const char* root = std::getenv("SystemRoot")) {
-    std::string path = std::string(root) + "\\Fonts\\" + theme().font_file;
-    if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES) font_ok = io.Fonts->AddFontFromFileTTF(path.c_str(), theme().font_px) != nullptr;
+  if (!font_ok) {
+    const std::string path = host::system_font_path(theme().font_file);
+    if (!path.empty()) font_ok = io.Fonts->AddFontFromFileTTF(path.c_str(), theme().font_px) != nullptr;
   }
   if (!font_ok) { io.Fonts->AddFontDefaultVector(); g_font_explicit = false; }
   ensure_fallback_fonts(g_base_game_font);
@@ -416,19 +342,22 @@ ImVec4 overlay_fb(const ImVec4& c) { return fb(c); }   // for ui_skin.cpp: the s
 
 bool overlay_open() { return g.open.load(); }
 void* overlay_hwnd() { return g.hwnd; }
+std::recursive_mutex& overlay_mutex() { return g.mu; }
+bool overlay_imgui_ready() { return g.imgui_ready.load(); }
+bool overlay_modal_active() { return g.modal.load(); }
 
 // Window thread (F1) and present thread (chord, scripted test) both call this.
 void overlay_set_open(bool open) {
   if (g.open.exchange(open) == open) return;
   hle::input::hub().set_menu_open(open || g.modal.load());
-  if (open) ClipCursor(nullptr);   // the cursor must reach the menu, not stay confined by the game
+  if (open) host::release_cursor_confine();   // the cursor must reach the menu, not stay confined by the game
   hle::log("ui: controls menu %s", open ? "opened" : "closed");
 }
 
 void overlay_set_modal(bool on) {
   if (g.modal.exchange(on) == on) return;
   hle::input::hub().set_menu_open(on || g.open.load());
-  if (on) ClipCursor(nullptr);
+  if (on) host::release_cursor_confine();
   hle::log("ui: shader screen %s", on ? "shown" : "closed");
 }
 
@@ -443,11 +372,11 @@ extern "C" void snap_ui_present(const SnapUiFrame* f) {
   try {
     // performance overlay cost (ui_fps.cpp): CPU time of the whole host-overlay frame while it is on, logged every 1200 presents
     if (snap::ui::fps_overlay_mode() != 0) {
-      LARGE_INTEGER a, b, fq; QueryPerformanceCounter(&a);
+      const auto a = std::chrono::steady_clock::now();
       ui_present_impl(f);
-      QueryPerformanceCounter(&b); QueryPerformanceFrequency(&fq);
+      const auto b = std::chrono::steady_clock::now();
       static float samp[1200]; static int n = 0;
-      samp[n] = (float)((double)(b.QuadPart - a.QuadPart) * 1e6 / (double)fq.QuadPart);
+      samp[n] = std::chrono::duration<float, std::micro>(b - a).count();
       if (++n == 1200) {   // median and p99 (the mean is dominated by the present thread being preempted on a busy PC)
         double sum = 0; for (float s : samp) sum += s;
         std::sort(samp, samp + n);
@@ -467,7 +396,7 @@ extern "C" void snap_ui_present(const SnapUiFrame* f) {
 static void ui_present_impl(const SnapUiFrame* f) {
   using namespace snap::ui;
   auto& hubr = hle::input::hub();
-  ensure_window(static_cast<HWND>(f->hwnd));
+  g.hwnd = f->hwnd;
   const double now = now_s();
   test_tick(now);
   const bool shader = shader_screen_active(now);
@@ -507,9 +436,8 @@ static void ui_present_impl(const SnapUiFrame* f) {
     if (std::fabs(scale - g.applied_scale) > 0.001f) apply_style(scale);
     ensure_fallback_fonts(g_base_game_font);   // the menu language can change while the game runs (Game language row)
     ImGui_ImplVulkan_NewFrame();
-    ImGui_ImplWin32_NewFrame();
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = size;
+    host::new_frame(io, size.x, size.y);
     feed_gamepad(io, (open || shader) && !hubr.capturing());
     ImGui::NewFrame();
     if (shader) {
@@ -550,4 +478,22 @@ static void ui_present_impl(const SnapUiFrame* f) {
   ImGui_ImplVulkan_RenderDrawData(dd, f->cb);
   vkCmdEndRendering(f->cb);
   barrier(f->cb, f->image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+}
+
+extern "C" void snap_ui_shutdown() {
+  std::lock_guard<std::recursive_mutex> lk(snap::ui::g.mu);
+  if (snap::ui::g.device != VK_NULL_HANDLE) {
+    for (auto& kv : snap::ui::g.views) vkDestroyImageView(snap::ui::g.device, kv.second, nullptr);
+  }
+  snap::ui::g.views.clear();
+  snap::ui::g.swapchain = VK_NULL_HANDLE;
+  snap::ui::g.device = VK_NULL_HANDLE;
+  if (snap::ui::g.vk_ready) { ImGui_ImplVulkan_Shutdown(); snap::ui::g.vk_ready = false; }
+  if (snap::ui::g.imgui_ready.exchange(false)) {
+    snap::ui::host::shutdown_platform();
+    ImGui::DestroyContext();
+  }
+  snap::ui::g.hwnd = nullptr;
+  snap::ui::g.format = VK_FORMAT_UNDEFINED;
+  snap::ui::g.failed = false;
 }

@@ -1,0 +1,6 @@
+# fixture for cmake/tests/check_selection.cmake (runtime/extra.cpp is deliberately left out: see bad_unclassified.txt)
+shared   runtime/a.cpp
+shared   runtime/b.cpp
+windows  runtime/win.cpp   # a reason
+linux    runtime/lin.cpp
+offline  host/tool.cpp

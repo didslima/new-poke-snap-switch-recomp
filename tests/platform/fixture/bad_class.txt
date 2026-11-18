@@ -1,0 +1,2 @@
+shared runtime/a.cpp
+cloud runtime/b.cpp

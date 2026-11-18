@@ -1,9 +1,6 @@
 // See perf.h. Output files (SNAP_PERF=<base>): <base>_frames.csv, <base>_threads.csv, <base>_events.csv.
 #include "perf.h"
 
-#include <windows.h>
-#include <tlhelp32.h>
-
 #include <cstdio>
 #include <algorithm>
 #include <array>
@@ -13,6 +10,7 @@
 #include <thread>
 
 #include "os.h"
+#include "os_host.h"
 
 namespace snap_perf {
 
@@ -25,7 +23,7 @@ static const char* kWtName[WT_COUNT] = {"core", "lock", "cvar", "key", "multi", 
 static uint64_t g_prev_role[R_COUNT][WT_COUNT], g_prev_fs_bytes, g_prev_cs_elided, g_prev_cs_forced;
 static std::mutex g_led_mu;
 static std::map<unsigned long, Ledger*> g_ledgers;
-unsigned long ledger_tid() { return GetCurrentThreadId(); }
+unsigned long ledger_tid() { return osk::host::thread_id(); }
 bool g_crit_on = false;
 std::atomic<bool> g_crit_active{false};
 static CritRec* g_crit_buf;
@@ -46,13 +44,7 @@ static void crit_dump(uint64_t t0) {
         auto it = names.find(tid);
         if (it != names.end()) return;
         char b[64] = "-";
-        if (HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid)) {
-            using Fn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
-            static Fn gd = (Fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
-            wchar_t* d = nullptr;
-            if (gd && SUCCEEDED(gd(th, &d)) && d) { if (*d) snprintf(b, sizeof b, "%ls", d); LocalFree(d); }
-            CloseHandle(th);
-        }
+        osk::host::thread_description(tid, b, sizeof b);
         for (char* c = b; *c; c++) if (*c == ',') *c = ';';
         names[tid] = b;
     };
@@ -68,7 +60,7 @@ static void crit_dump(uint64_t t0) {
     fclose(f);
 }
 void ledger_register() {
-    tl_ledger.tid = GetCurrentThreadId();
+    tl_ledger.tid = osk::host::thread_id();
     std::lock_guard<std::mutex> lk(g_led_mu);
     g_ledgers[tl_ledger.tid] = &tl_ledger;
     tl_ledger.reg = true;
@@ -97,46 +89,26 @@ static uint64_t g_prev_cycles;
 static std::once_flag g_once;
 
 static void sampler() {
-    std::map<DWORD, std::pair<HANDLE, uint64_t>> h;   // tid -> handle, last cpu time (100 ns)
+    std::map<uint32_t, uint64_t> last_cpu;   // tid -> cpu time at the previous sample (ns)
     uint64_t last = now_ns();
     for (;;) {
-        Sleep(1000);
+        osk::host::sleep_ms(1000);
         const uint64_t now = now_ns();
         const double t = (double)(now - g_t0) / 1e9, wall_ms = (double)(now - last) / 1e6;
         last = now;
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (snap == INVALID_HANDLE_VALUE) continue;
-        THREADENTRY32 te{sizeof te};
-        std::map<DWORD, bool> seen;
-        if (Thread32First(snap, &te)) {
-            do {
-                if (te.th32OwnerProcessID != GetCurrentProcessId()) continue;
-                seen[te.th32ThreadID] = true;
-                auto it = h.find(te.th32ThreadID);
-                if (it == h.end()) {
-                    HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
-                    if (!th) continue;
-                    it = h.emplace(te.th32ThreadID, std::make_pair(th, (uint64_t)0)).first;
-                }
-                FILETIME c, e, k, u;
-                if (!GetThreadTimes(it->second.first, &c, &e, &k, &u)) continue;
-                const uint64_t cpu = (((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime) + (((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime);
-                const double ms = (double)(cpu - it->second.second) / 1e4;
-                it->second.second = cpu;
-                if (ms < 2.0) continue;
-                wchar_t* d = nullptr;
-                using Fn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
-                static Fn gd = (Fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
-                char nm[64] = "";
-                if (gd && SUCCEEDED(gd(it->second.first, &d)) && d) { snprintf(nm, sizeof nm, "%ls", d); LocalFree(d); }
-                std::lock_guard<std::mutex> lk(g_ev_mu);
-                fprintf(g_threads, "%.2f,%lu,%s,%.1f,%.1f\n", t, te.th32ThreadID, nm[0] ? nm : "-", ms, wall_ms);
-            } while (Thread32Next(snap, &te));
-        }
-        CloseHandle(snap);
-        for (auto it = h.begin(); it != h.end();) {
-            if (!seen.count(it->first)) { CloseHandle(it->second.first); it = h.erase(it); } else ++it;
-        }
+        struct Ctx { std::map<uint32_t, uint64_t>* last; double t, wall_ms; } cx{&last_cpu, t, wall_ms};
+        osk::host::for_each_thread([](void* p, uint32_t tid, uint64_t cpu_ns) {
+            Ctx& c = *(Ctx*)p;
+            uint64_t& prev = (*c.last)[tid];
+            if (cpu_ns < prev) prev = 0;   // the thread id was reused by a new thread (Win32 forgot the handle of a dead thread, here the map keeps its last reading)
+            const double ms = (double)(cpu_ns - prev) / 1e6;
+            prev = cpu_ns;
+            if (ms < 2.0) return;
+            char nm[64] = "";
+            osk::host::thread_description(tid, nm, sizeof nm);
+            std::lock_guard<std::mutex> lk(g_ev_mu);
+            fprintf(g_threads, "%.2f,%lu,%s,%.1f,%.1f\n", c.t, (unsigned long)tid, nm[0] ? nm : "-", ms, c.wall_ms);
+        }, &cx);
         if (g_waits) {   // per-thread blocked time over the last second (threads that waited 1 ms or more)
             static std::map<unsigned long, std::array<uint64_t, WT_COUNT>> prev;
             std::lock_guard<std::mutex> lk(g_led_mu);
@@ -154,16 +126,7 @@ static void sampler() {
                 auto nit = names.find(tid);
                 if (nit == names.end()) {
                     char nm[64] = "-";
-                    using Fn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
-                    static Fn gd = (Fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
-                    if (HANDLE th = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid)) {
-                        wchar_t* dsc = nullptr;
-                        if (gd && SUCCEEDED(gd(th, &dsc)) && dsc) {
-                            if (*dsc) snprintf(nm, sizeof nm, "%ls", dsc);
-                            LocalFree(dsc);
-                        }
-                        CloseHandle(th);
-                    }
+                    osk::host::thread_description((uint32_t)tid, nm, sizeof nm);
                     for (char* c = nm; *c; c++) if (*c == ',') *c = ';';
                     nit = names.emplace(tid, nm).first;
                 }
@@ -225,18 +188,17 @@ void frame_mark(uint64_t present_no, double gpu_busy_ms, double gpu_span_ms, int
         if (present_no >= g_crit_from && present_no <= g_crit_to) {
             g_crit_active.store(true);
             CritRec r{};
-            r.t0 = r.t1 = now; r.tid = GetCurrentThreadId(); r.type = 1; r.key = (uint32_t)present_no;
+            r.t0 = r.t1 = now; r.tid = osk::host::thread_id(); r.type = 1; r.key = (uint32_t)present_no;
             crit_push(r);
         } else if (present_no > g_crit_to && g_crit_active.exchange(false)) {
             crit_dump(g_t0);
             g_crit_on = false;
         }
     }
-    ULONG64 cyc = 0;
-    QueryThreadCycleTime(GetCurrentThread(), &cyc);
+    const uint64_t cyc = osk::host::current_thread_cycles();
     std::lock_guard<std::mutex> lk(g_ev_mu);
     fprintf(g_frames, "%llu,%.4f,%.3f,%lu,%.3f,%.3f,%.3f,%d", (unsigned long long)present_no, (double)(now - g_t0) / 1e9, (double)(now - g_last_mark) / 1e6,
-            GetCurrentThreadId(), (double)(cyc - g_prev_cycles) / 1e6, gpu_busy_ms, gpu_span_ms, gpu_cbs);
+            (unsigned long)osk::host::thread_id(), (double)(cyc - g_prev_cycles) / 1e6, gpu_busy_ms, gpu_span_ms, gpu_cbs);
     g_prev_cycles = cyc;
     g_last_mark = now;
     for (int i = 0; i < C_COUNT; i++) {

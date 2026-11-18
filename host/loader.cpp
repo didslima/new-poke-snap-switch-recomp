@@ -3,11 +3,13 @@
 #include "loader.h"
 #include "elf_check.h"
 #include "hle/guest_tls.h"
+#include "os/guest_tls_block.h"
 
-#include <windows.h>
-#include <tlhelp32.h>
+#include "os/os_host.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <atomic>
 #include <mutex>
@@ -66,6 +68,20 @@ static void die(const char *msg) {
     exit(2);
 }
 
+// Read/write, zero-filled, committed guest memory: what VirtualAlloc(at, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) gave, from the host's virtual
+// memory primitives. `at` null: anywhere (64 KiB aligned); otherwise exactly there or null. The size is rounded up to whole pages. Nothing stays
+// reserved when the commit fails. These mappings live for the process (modules, tables, thread stacks), as before.
+static void *guest_vm(void *at, size_t size) {
+    size = (size + 0xfff) & ~(size_t)0xfff;
+    void *p = at ? osk::host::mem_reserve_at(at, size, false) : osk::host::mem_reserve(size, 0, false, nullptr);
+    if (!p) return nullptr;
+    if (!osk::host::mem_commit(p, size, nullptr)) {
+        osk::host::mem_release(p, size);
+        return nullptr;
+    }
+    return p;
+}
+
 // ------------------------------------------------------------------------------------------------ boot trace
 
 FILE *g_trace_file = nullptr;
@@ -75,12 +91,10 @@ uint64_t g_svc_counts[0x80];
 uint64_t g_exc_count = 0;
 void (*g_spin_gate_fn)(Cpu *, uint64_t) = nullptr;
 uint64_t (*g_ticks_fn)() = nullptr;
-static LARGE_INTEGER g_t0;
+static int64_t g_t0;
 double trace_now() {
-    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); QueryPerformanceCounter(&g_t0); return x; }();
-    LARGE_INTEGER n;
-    QueryPerformanceCounter(&n);
-    return (double)(n.QuadPart - g_t0.QuadPart) / (double)f.QuadPart;
+    static const int64_t f = [] { g_t0 = osk::host::counter(); return osk::host::counter_frequency(); }();
+    return (double)(osk::host::counter() - g_t0) / (double)f;
 }
 double g_last_trace_time = 0;
 void trace(const char *fmt, ...) {
@@ -219,7 +233,7 @@ static void map_module(GuestModule &m, const char *name, const char *path, uint6
         if (ph[i].type == 1 && (ph[i].flags & 1)) { m.text_off = ph[i].vaddr; m.text_size = ph[i].filesz; }
     }
     m.span = (hi + 0xFFFF) & ~0xFFFFull;
-    void *p = VirtualAlloc((void *)base, m.span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    void *p = guest_vm((void *)base, m.span);
     if (p != (void *)base) die("cannot map a module at its guest address");
     for (int i = 0; i < eh->phnum; i++)
         if (ph[i].type == 1) memcpy((uint8_t *)base + ph[i].vaddr, raw.data() + ph[i].off, ph[i].filesz);
@@ -250,7 +264,7 @@ static void map_module(GuestModule &m, const char *name, const char *path, uint6
 // Direct-indexed dispatch table: one slot per text word (main 22 MB, sdk 12 MB of host memory).
 static void build_dtab(GuestModule &m, const uint64_t *addrs, const GuestFn *ptrs, uint64_t n) {
     m.dtab_count = m.text_size >> 2;
-    m.dtab = (GuestFn *)VirtualAlloc(nullptr, m.dtab_count * sizeof(GuestFn), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    m.dtab = (GuestFn *)guest_vm(nullptr, m.dtab_count * sizeof(GuestFn));
     if (!m.dtab) die("cannot allocate a dispatch table");
     m.fn_count = n;
     for (uint64_t i = 0; i < n; i++) {
@@ -332,7 +346,7 @@ static void relocate(GuestModule &m, int who) {
 
 bool load(const char *main_elf, const char *sdk_elf) {
     // the thunk range (readable so that guest code can compare against it)
-    if (!VirtualAlloc((void *)THUNK_BASE, THUNK_SPAN, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) die("cannot map the thunk range");
+    if (!guest_vm((void *)THUNK_BASE, THUNK_SPAN)) die("cannot map the thunk range");
     map_module(g_main, "main", main_elf, GUEST_MAIN_BASE);
     map_module(g_sdk, "sdk", sdk_elf, GUEST_SDK_BASE);
     build_dtab(g_main, main_fn_addrs, main_fn_ptrs, main_fn_count);
@@ -398,37 +412,38 @@ GuestFn lookup_fn_bsearch(uint64_t pc) {
 
 // main's TLS image is read once, at the first thread (before any guest code runs, so it is the loaded bytes), and copied
 // into every guest thread's TLS block after that (runtime/hle/guest_tls.h says why it matters: the scan finds Pokemon).
+// The capture is the shared module's (runtime/os/guest_tls_block.h): once, thread safe, immutable.
+static const hle::GuestTlsImage *main_tls_image() {
+    const hle::GuestTlsImage *img = osk::guest_tls_main_image((const uint8_t *)g_main.base, g_main.span);
+    static std::atomic<bool> checked{false};
+    if (img && !checked.exchange(true) && *(const int32_t *)img->data() != -1)
+        trace("guest TLS: main image at +%#llx is not the 2.0.1 one (slot word %08x)", (unsigned long long)hle::kMainTlsImageVaddr, *(const uint32_t *)img->data());
+    return img;
+}
+// Fill a fresh (zeroed) TLS block made by the caller (host/boot.cpp's tp_init_hook): the image only, nothing else is written.
 void init_guest_tls(uint64_t tp) {
-    static uint8_t image[hle::kMainTlsImageSize];
-    static bool have;
-    if (!have && g_main.base && hle::kMainTlsImageVaddr + hle::kMainTlsImageSize <= g_main.span) {
-        memcpy(image, (const void *)(g_main.base + hle::kMainTlsImageVaddr), sizeof image);
-        have = true;
-        if (*(const int32_t *)image != -1) trace("guest TLS: main image at +%#llx is not the 2.0.1 one (slot word %08x)",
-                                                 (unsigned long long)hle::kMainTlsImageVaddr, *(const uint32_t *)image);
-    }
-    if (have) hle::guest_tls_init((uint8_t *)tp, image, sizeof image);
+    if (const hle::GuestTlsImage *img = main_tls_image()) hle::guest_tls_init((uint8_t *)tp, img->data(), img->size());
 }
 
 GuestThread *new_thread(size_t stack_size) {
     auto *t = new GuestThread();
-    t->c = (Cpu *)_aligned_malloc(sizeof(Cpu), 64);
+    t->c = (Cpu *)osk::host::heap_aligned_alloc(sizeof(Cpu), 64);
     memset(t->c, 0, sizeof(Cpu));
-    uint8_t *stack = (uint8_t *)VirtualAlloc(nullptr, stack_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    uint8_t *tls = (uint8_t *)VirtualAlloc(nullptr, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);   // no PT_TLS in the ELFs
-    uint8_t *tlr = (uint8_t *)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);    // Thread Local Region
-    uint8_t *tt = (uint8_t *)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);     // ThreadType
-    if (!stack || !tls || !tlr || !tt) die("cannot allocate a guest thread");
+    uint8_t *stack = (uint8_t *)guest_vm(nullptr, stack_size);
+    uint8_t *tlr = (uint8_t *)guest_vm(nullptr, 0x1000);    // Thread Local Region
+    uint8_t *tt = (uint8_t *)guest_vm(nullptr, 0x1000);     // ThreadType
+    // no PT_TLS in the ELFs: the TLS block is the shared module's (reserve + commit, zeroed, main's .tdata image at tp + 0x10), owned by this ThreadType
+    const uint64_t tls_tp = tt ? osk::guest_tls_block_create(main_tls_image(), (uint64_t)(uintptr_t)tt) : 0;
+    if (!stack || !tls_tp || !tlr || !tt) die("cannot allocate a guest thread");
     t->stack_lo = (uint64_t)stack;
     t->stack_hi = (uint64_t)stack + stack_size;
     // runtime/os/os_layout.h: TLR+0x1f0 = ELF thread pointer, TLR+0x1f8 = ThreadType*; ThreadType state byte at +0x40
-    *(uint64_t *)(tlr + 0x1f0) = (uint64_t)(tls + 0x8000);
+    *(uint64_t *)(tlr + 0x1f0) = tls_tp;
     *(uint64_t *)(tlr + 0x1f8) = (uint64_t)tt;
     tt[0x40] = 3;                                   // TS_STARTED
     *(uint64_t *)(tt + 0x50) = (uint64_t)stack;     // stack, stack size
     *(uint64_t *)(tt + 0x58) = stack_size;
-    t->c->tpidr = (uint64_t)(tls + 0x8000);
-    init_guest_tls(t->c->tpidr);
+    t->c->tpidr = tls_tp;
     t->c->tpidrro = (uint64_t)tlr;
     t->c->sp = (t->stack_hi - 64) & ~15ull;
     t->c->excl_addr = ~0ull;
@@ -597,7 +612,7 @@ std::vector<std::string> guest_chain(Cpu *c, uint64_t pc, int depth) {
     uint64_t fp = c->x[29];
     for (int i = 0; i < depth; i++) {
         if (!fp_ok(c, fp)) break;
-        if (IsBadReadPtr((void *)fp, 16)) break;   // another thread's stack read by the stall dump can be gone (thread exited)
+        if (!osk::host::mem_readable((void *)fp, 16)) break;   // another thread's stack read by the stall dump can be gone (thread exited)
         uint64_t lr = ((uint64_t *)fp)[1], next = ((uint64_t *)fp)[0];
         if (lr == 0 || lr == HOST_SENTINEL) { out.push_back(lr ? "host:sentinel" : "(end)"); break; }
         out.push_back(symbolize(lr));
@@ -789,11 +804,11 @@ static void fnpeek_hit(uint64_t x0) {
         bool ok = true;
         for (size_t i = 0; i + 1 < pp.first.size() && ok; i++) {
             uint64_t q = p + pp.first[i];
-            if (!p || IsBadReadPtr((void *)q, 8)) ok = false; else p = *(const uint64_t *)q;
+            if (!p || !osk::host::mem_readable((void *)q, 8)) ok = false; else p = *(const uint64_t *)q;
         }
         uint64_t q = p + pp.first.back();
         s += " [";
-        if (!ok || !p || IsBadReadPtr((void *)q, 8 * pp.second)) s += "bad";
+        if (!ok || !p || !osk::host::mem_readable((void *)q, 8 * pp.second)) s += "bad";
         else for (int k = 0; k < pp.second; k++) { snprintf(buf, sizeof buf, k ? " %llx" : "%llx", (unsigned long long)((const uint64_t *)q)[k]); s += buf; }
         s += "]";
     }
@@ -812,77 +827,38 @@ static uint8_t g_fnwatch_last[16];
 // function last entered on the writing thread.
 static thread_local uint64_t t_lastfn, t_lastlr, t_lrring[8];
 static thread_local unsigned t_lrpos;
-static LONG CALLBACK hwwatch_veh(EXCEPTION_POINTERS *e) {
-    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
-    DWORD64 dr6 = e->ContextRecord->Dr6;
-    if (!(dr6 & 7)) return EXCEPTION_CONTINUE_SEARCH;
-    static volatile LONG hits, logged;
+static void hwwatch_on_hit(uint64_t dr6, uint64_t rip) {
+    static std::atomic<long> hits{0}, logged{0};
     uint64_t q = g_fnwatch_addr;
     uint64_t v40 = q ? *(const uint64_t *)q : 0, v48 = q ? *(const uint64_t *)(q + 8) : 0;
     uint32_t v20 = q ? *(const uint32_t *)(q - 0x20) : 0;
     // The first 40 hits, then only unusual values (a flag set or a state other than 0/1), at most 2000 lines.
     bool odd = (v40 & 0xff) || (v48 & 0xffffffffull) || v20 > 1;
-    if (q && (InterlockedIncrement(&hits) <= 40 || odd) && InterlockedIncrement(&logged) <= 2000) {
+    if (q && (hits.fetch_add(1) < 40 || odd) && logged.fetch_add(1) < 2000) {
         std::string ring;
         for (unsigned i = 1; i <= 8; i++) {
             uint64_t lr = t_lrring[(t_lrpos - i) & 7];
             if (lr) { ring += " < "; ring += loader::symbolize(lr); }
         }
         loader::trace("hwwatch dr6=%llx rip=%#llx +40=%016llx +48=%016llx +20=%08x in fn %#llx callers%s", (unsigned long long)dr6,
-                      (unsigned long long)e->ContextRecord->Rip, (unsigned long long)v40, (unsigned long long)v48, v20,
+                      (unsigned long long)rip, (unsigned long long)v40, (unsigned long long)v48, v20,
                       (unsigned long long)t_lastfn, ring.c_str());
     }
-    e->ContextRecord->Dr6 = 0;
-    return EXCEPTION_CONTINUE_EXECUTION;
 }
-static DWORD WINAPI hwwatch_arm(void *arg) {
-    uint64_t q = (uint64_t)arg;
-    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (s == INVALID_HANDLE_VALUE) return 0;
-    THREADENTRY32 te;
-    te.dwSize = sizeof te;
-    DWORD pid = GetCurrentProcessId(), me = GetCurrentThreadId();
-    int armed = 0;
-    for (BOOL ok = Thread32First(s, &te); ok; ok = Thread32Next(s, &te)) {
-        if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
-        HANDLE h = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
-        if (!h) continue;
-        if (SuspendThread(h) != (DWORD)-1) {
-            CONTEXT c;
-            memset(&c, 0, sizeof c);
-            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            if (GetThreadContext(h, &c)) {
-                c.Dr0 = q; c.Dr1 = q + 8; c.Dr2 = q - 0x20; c.Dr6 = 0;
-                c.Dr7 = q ? (1 | 4 | 16 | (1ull << 16) | (2ull << 18) | (1ull << 20) | (2ull << 22) | (1ull << 24) | (3ull << 26)) : 0;
-                if (SetThreadContext(h, &c)) armed++;
-            }
-            ResumeThread(h);
-        }
-        CloseHandle(h);
-    }
-    CloseHandle(s);
-    loader::trace("hwwatch: armed %d threads at %#llx", armed, (unsigned long long)q);
-    return 0;
-}
-static void hwwatch_request(uint64_t q) {
-    static bool veh;
-    if (!veh) { AddVectoredExceptionHandler(1, hwwatch_veh); veh = true; }
-    HANDLE t = CreateThread(nullptr, 0, hwwatch_arm, (void *)q, 0, nullptr);
-    if (t) CloseHandle(t);
-}
+static void hwwatch_request(uint64_t q) { osk::host::hwwatch_request(q, hwwatch_on_hit); }
 static void fnwatch_resolve(uint64_t x0) {
     if (g_fnwatch_path.empty()) return;
     uint64_t p = x0;
     for (size_t i = 0; i + 1 < g_fnwatch_path.size(); i++) {
         uint64_t q = p + g_fnwatch_path[i];
-        if (!p || IsBadReadPtr((void *)q, 8)) return;
+        if (!p || !osk::host::mem_readable((void *)q, 8)) return;
         p = *(const uint64_t *)q;
     }
     uint64_t q = p ? p + g_fnwatch_path.back() : 0;
     static unsigned entries;
     if (g_hwwatch && q && q == g_fnwatch_addr && ++entries % 600 == 0) hwwatch_request(q);   // threads started since the last arm
     if (q == g_fnwatch_addr) return;
-    if (!q || IsBadReadPtr((void *)q, 16)) { g_fnwatch_addr = 0; return; }
+    if (!q || !osk::host::mem_readable((void *)q, 16)) { g_fnwatch_addr = 0; return; }
     g_fnwatch_addr = q;
     if (g_hwwatch) hwwatch_request(q);
     memcpy(g_fnwatch_last, (const void *)q, 16);
@@ -906,7 +882,8 @@ static void fnwatch_check(uint64_t a, uint64_t lr) {
 // "Sonar" / "System_PlayerRay" entries of the owner's system map (+0x250), logged on change; with SNAP_HWWATCH the Sonar state
 // word (+0x18 of the map value) gets the debug-register watch.
 static bool g_sonarprobe = getenv("SNAP_SONARPROBE") != nullptr;
-static bool rd(uint64_t a, uint64_t &v) { if (!a || IsBadReadPtr((void *)a, 8)) return false; v = *(const uint64_t *)a; return true; }
+static uint64_t loader_now_ms() { return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static bool rd(uint64_t a, uint64_t &v) { if (!a || !osk::host::mem_readable((void *)a, 8)) return false; v = *(const uint64_t *)a; return true; }
 static void sonarprobe_hit(uint64_t x0) {
     static std::map<uint64_t, std::string> lastby;
     static int lines;
@@ -960,7 +937,7 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
         Cpu *cc = loader::g_tls_cpu;
         uint64_t x1 = cc ? cc->x[1] : 0;
         if (n++ < 400) {
-            if (a == 0x71002a2970ull && x1 && !IsBadReadPtr((void *)x1, 32)) {
+            if (a == 0x71002a2970ull && x1 && osk::host::mem_readable((void *)x1, 32)) {
                 const float *f = (const float *)x1;
                 loader::trace("addbounds world=%llx box=(%g %g %g)..(%g %g %g) from %s", (unsigned long long)x0, f[0], f[1], f[2], f[4], f[5], f[6], loader::symbolize(lr).c_str());
             } else loader::trace("fn %#llx x0=%llx x1=%llx from %s", (unsigned long long)a, (unsigned long long)x0, (unsigned long long)x1, loader::symbolize(lr).c_str());
@@ -984,14 +961,14 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
                 snprintf(b, sizeof b, " [%llu/%llu %s h=%08x id=%08x type=%u x=%d..%d y=%d..%d extra=%llu", (unsigned long long)i, (unsigned long long)cnt,
                          sonar ? "SONAR" : "", (unsigned)h, (unsigned)ty, (unsigned)(ty >> 32), (int)c0, (int)(c0 >> 32), (int)c1, (int)(c1 >> 32), (unsigned long long)ex);
                 s += b;
-                if (sonar && !IsBadReadPtr(bb, 32)) {
+                if (sonar && osk::host::mem_readable(bb, 32)) {
                     snprintf(b, sizeof b, " aabb=(%g %g %g)..(%g %g %g)", bb[0], bb[1], bb[2], bb[4], bb[5], bb[6]);
                     s += b;
                 }
                 s += "]";
             }
             if (s.find("SONAR") == std::string::npos) s = " none";
-            else if (!IsBadReadPtr((void *)(g + 0x680), 32)) {   // world bounds the grid spans: max at +0x680, min at +0x690
+            else if (osk::host::mem_readable((void *)(g + 0x680), 32)) {   // world bounds the grid spans: max at +0x680, min at +0x690
                 const float *wb = (const float *)(g + 0x680);
                 uint64_t lb = 0, le = 0;
                 rd(0x7100cfb1d8ull, lb); rd(0x7100cfb1e0ull, le);
@@ -1030,13 +1007,13 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
                 // SNAP_PAIRKEY = comma list of name hashes; logs each matching collider's box (collider +0x70..+0x88: two xyz corners)
                 static uint32_t tks[8]; static int ntk = -1;
                 if (ntk < 0) { ntk = 0; const char *e = getenv("SNAP_PAIRKEY"); while (e && *e && ntk < 8) { tks[ntk++] = (uint32_t)strtoul(e, (char **)&e, 16); if (*e == ',') e++; else break; } if (!ntk) tks[ntk++] = 0x486b73a0u; }
-                static std::unordered_map<uint64_t, uint64_t> lastt; static int nt; static SRWLOCK lk = SRWLOCK_INIT;
+                static std::unordered_map<uint64_t, uint64_t> lastt; static int nt; static std::mutex lk;
                 for (int side = 0; started && side < 2 && nt < 40000; side++) {
-                    uint64_t c = side ? cb : ca, h = side ? hb : ha, t = side ? tb : ta, now = GetTickCount64();
+                    uint64_t c = side ? cb : ca, h = side ? hb : ha, t = side ? tb : ta, now = loader_now_ms();
                     bool want = false; for (int i = 0; i < ntk; i++) if ((uint32_t)h == tks[i]) want = true;
                     if (!want) continue;
                     uint32_t per = ((uint32_t)h == 0x740a86c9u || (uint32_t)h == 0x42abde07u) ? 100 : 1000;   // fruit/orb boxes 10x per second
-                    AcquireSRWLockExclusive(&lk); uint64_t &lt = lastt[c]; bool skip = lt && now - lt < per; if (!skip) { lt = now; nt++; } ReleaseSRWLockExclusive(&lk);
+                    bool skip; { std::lock_guard<std::mutex> g(lk); uint64_t &lt = lastt[c]; skip = lt && now - lt < per; if (!skip) { lt = now; nt++; } }
                     if (skip) continue;
                     float f[8]; for (int k = 0; k < 8; k++) { uint64_t v = 0; rd(c + 0x70 + k * 4, v); uint32_t u = (uint32_t)v; memcpy(&f[k], &u, 4); }
                     uint64_t oh = side ? ha : hb;
@@ -1080,16 +1057,16 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
         }
     }
     if (g_sonarprobe && a == 0x710036f160ull && getenv("SNAP_COLLOWNERS")) {   // every collider component update: owner, matrix offset, world translation (once per 2 s per owner)
-        static std::unordered_map<uint64_t, uint64_t> lo; static SRWLOCK lk2 = SRWLOCK_INIT; static int nn;
-        Cpu *cc = loader::g_tls_cpu; uint64_t x2 = cc ? cc->x[2] : 0, own = 0, col = 0, now = GetTickCount64(); rd(x0 + 0x20, own); rd(x0 + 0x48, col);
-        AcquireSRWLockExclusive(&lk2); uint64_t &l = lo[own]; bool go = (!l || now - l >= 2000) && nn < 30000; if (go) { l = now; nn++; } ReleaseSRWLockExclusive(&lk2);
+        static std::unordered_map<uint64_t, uint64_t> lo; static std::mutex lk2; static int nn;
+        Cpu *cc = loader::g_tls_cpu; uint64_t x2 = cc ? cc->x[2] : 0, own = 0, col = 0, now = loader_now_ms(); rd(x0 + 0x20, own); rd(x0 + 0x48, col);
+        bool go; { std::lock_guard<std::mutex> g(lk2); uint64_t &l = lo[own]; go = (!l || now - l >= 2000) && nn < 30000; if (go) { l = now; nn++; } }
         if (go && x2) { float t3[3]; for (int k = 0; k < 3; k++) { uint64_t v = 0; rd(x2 + 0x30 + k * 4, v); uint32_t u = (uint32_t)v; memcpy(&t3[k], &u, 4); } uint64_t h = 0; rd(col + 0x68, h);
             loader::trace("collowner own=%llx off=%lld col=%llx h=%08x t=%.2f %.2f %.2f", (unsigned long long)own, (long long)(x2 - own), (unsigned long long)col, (unsigned)h, t3[0], t3[1], t3[2]); }
     }
     if (g_sonarprobe && a == 0x710036f160ull && g_collptr) {   // collider component update: x0 = component (+0x48 collider, +0x20/+0x28 owner weak ptr), x2 = world matrix
         uint64_t col = 0; rd(x0 + 0x48, col);
         if (col == g_collptr) {
-            static uint64_t lastt; static int nl; uint64_t now = GetTickCount64();
+            static uint64_t lastt; static int nl; uint64_t now = loader_now_ms();
             if (now - lastt >= 2000 && nl < 400) {
                 lastt = now; nl++;
                 Cpu *cc = loader::g_tls_cpu; uint64_t x1 = cc ? cc->x[1] : 0, x2 = cc ? cc->x[2] : 0, own = 0; rd(x0 + 0x20, own);
@@ -1102,7 +1079,7 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
         }
     }
     if (g_sonarprobe && a == 0x71004eb690ull && g_collptr && x0 == g_collptr) {   // collider shape/box update (x1 actor world matrix, x2/x3 joint matrices or 0)
-        static uint64_t lastt; static int nl; uint64_t now = GetTickCount64();
+        static uint64_t lastt; static int nl; uint64_t now = loader_now_ms();
         if (now - lastt >= 1000 && nl < 2000) {
             lastt = now; nl++;
             Cpu *cc = loader::g_tls_cpu; uint64_t x1 = cc ? cc->x[1] : 0, x2 = cc ? cc->x[2] : 0, x3 = cc ? cc->x[3] : 0, x4 = cc ? cc->x[4] : 0;
@@ -1146,7 +1123,8 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
             if (stack_n > 0) {
                 Cpu *cc = loader::g_tls_cpu;
                 char chain[512];
-                int len = snprintf(chain, sizeof chain, "tid=%lu x1=%#llx lr=m+%#llx chain:", (unsigned long)GetCurrentThreadId(), (unsigned long long)(cc ? cc->x[1] : 0),
+                const unsigned long tid = (unsigned long)osk::host::thread_id();
+                int len = snprintf(chain, sizeof chain, "tid=%lu x1=%#llx lr=m+%#llx chain:", tid, (unsigned long long)(cc ? cc->x[1] : 0),
                                    (unsigned long long)(lr - 0x7100000000ull));
                 uint64_t fp = cc ? cc->x[29] : 0, prev = 0;
                 for (int k = 0; k < stack_n && fp && !(fp & 7) && fp > prev && len < 480; k++) {
@@ -1166,10 +1144,8 @@ void fnprof_hit(uint64_t a, uint64_t lr, uint64_t x0) {
 void rt_spin_gate(Cpu *c, uint64_t head) { if (g_spin_gate_fn) g_spin_gate_fn(c, head); }
 uint64_t rt_ticks(void) {
     if (g_ticks_fn) return g_ticks_fn();
-    static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
-    LARGE_INTEGER n;
-    QueryPerformanceCounter(&n);
-    uint64_t q = (uint64_t)n.QuadPart, fq = (uint64_t)f.QuadPart;   // cntpct_el0: 19.2 MHz
+    static const int64_t f = osk::host::counter_frequency();
+    uint64_t q = (uint64_t)osk::host::counter(), fq = (uint64_t)f;   // cntpct_el0: 19.2 MHz
     return (q / fq) * 19200000ull + (q % fq) * 19200000ull / fq;
 }
 

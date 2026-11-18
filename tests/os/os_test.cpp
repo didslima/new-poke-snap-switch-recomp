@@ -14,6 +14,10 @@
 #include <mutex>
 #include <immintrin.h>
 
+#if !defined(_WIN32)   // the MSVC CRT name the test uses for aligned guest objects
+#include <stdlib.h>
+static void *_aligned_malloc(size_t n, size_t align) { void *p = nullptr; return posix_memalign(&p, align, n) == 0 ? p : nullptr; }
+#endif
 #include "../../runtime/os/os.h"
 #include "../../runtime/os/os_layout.h"
 

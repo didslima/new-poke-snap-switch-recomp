@@ -30,11 +30,11 @@ static inline void gst32a(uint64_t a, int32_t v) { __atomic_store_n((int32_t *)(
 
 constexpr uint64_t OS_RET_HOST = 0x70200ff000ull;   // x30 sentinel of host->guest calls (same value as TotK RT_RET_HOST)
 constexpr int64_t NS_INFINITE = INT64_MAX;
-constexpr uint32_t R_OK = 0, R_TIMEOUT = oslay::RESULT_TIMED_OUT, R_INVALID_HANDLE = 0xe401, R_INVALID_STATE = 0xfa01;
+constexpr uint32_t R_SUCCESS = 0, R_TIMEOUT = oslay::RESULT_TIMED_OUT, R_INVALID_HANDLE = 0xe401, R_INVALID_STATE = 0xfa01;
 constexpr uint32_t PSEUDO_CURRENT_THREAD = 0xffff8000u;
 constexpr uint32_t PSEUDO_CURRENT_PROCESS = 0xffff8001u;
 constexpr uint32_t R_INVALID_ENUM_VALUE = 0x7801, R_INVALID_COMBINATION = 0xe001;   // svc module 1, desc 60 / 112
-// svcGetInfo memory-region values (os_memory.cpp): types 2-7, 12-17, 21, 22; returns R_OK or the Horizon result.
+// svcGetInfo memory-region values (os_memory.cpp): types 2-7, 12-17, 21, 22; returns R_SUCCESS or the Horizon result.
 uint32_t mem_get_info(uint32_t type, uint64_t *out);
 
 enum Wait : int { W_NONE, W_LOCK, W_CVAR, W_KEY, W_JOIN, W_MULTI, W_SLEEP };
@@ -221,7 +221,7 @@ bool keyq_remove(uint64_t key, Thread *t);
 Thread *keyq_pop_best(uint64_t key);
 bool keyq_empty(uint64_t key);
 int keyq_wake_all(uint64_t key, uint32_t result);
-// Generic blocking wait on a keyed queue: registers, releases the core, waits, reacquires. Returns R_OK if woken,
+// Generic blocking wait on a keyed queue: registers, releases the core, waits, reacquires. Returns R_SUCCESS if woken,
 // R_TIMEOUT on timeout.
 uint32_t block_on_key(Thread *t, Lock &lk, uint64_t key, int kind, Deadline d);
 void recompute_priority(Thread *t);
@@ -238,7 +238,7 @@ void cs_enter(uint64_t a);
 bool cs_try_enter(uint64_t a);
 void cs_leave(uint64_t a);
 bool cs_locked_by_me(uint64_t a);
-uint32_t cv_wait(uint64_t cv, uint64_t cs, int64_t ns);   // R_OK or R_TIMEOUT; the lock is held again on return
+uint32_t cv_wait(uint64_t cv, uint64_t cs, int64_t ns);   // R_SUCCESS or R_TIMEOUT; the lock is held again on return
 void cv_signal(uint64_t cv);
 void cv_broadcast(uint64_t cv);
 

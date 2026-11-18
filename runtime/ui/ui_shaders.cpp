@@ -4,10 +4,6 @@
 //   - progress screen while the game is held (mode NOW and a run in progress): percentage, ETA, Cancel / Continue in background
 //   - "Graphics" tab of the F1 menu: mode, status, "Compile all known shaders now", "Rebuild shader cache"
 // All three work with mouse, keyboard and controller (ImGui navigation).
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>

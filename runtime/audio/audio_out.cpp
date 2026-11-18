@@ -6,6 +6,7 @@
 //                               wait-free (SPSC rings), everything else takes at most the init mutex.
 //   device thread (backend)   : calls core_mix() once per device period. Never takes a lock.
 #include "audio_internal.h"
+#include "audio_host.h"
 #include "audio_cfg.h"
 #include "audio_mix.h"
 #include "spsc_ring.h"
@@ -23,11 +24,6 @@
 #include <thread>
 #include <vector>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 using namespace snap_audio;
 
@@ -124,49 +120,16 @@ struct Globals {
   ~Globals() { if (backend) backend->stop(); }
 };
 
-#if defined(_WIN32)
-// Paths are UTF-8 strings; getenv / fopen / MoveFileExA use the ANSI code page and break on a non-ASCII user name (review_hle #3).
-std::wstring widen(const std::string& u) {
-  if (u.empty()) return {};
-  int n = MultiByteToWideChar(CP_UTF8, 0, u.data(), (int)u.size(), nullptr, 0);
-  std::wstring w((size_t)(n > 0 ? n : 0), L'\0');
-  if (n > 0) MultiByteToWideChar(CP_UTF8, 0, u.data(), (int)u.size(), w.data(), n);
-  return w;
-}
-std::string narrow(const wchar_t* w) {
-  int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
-  std::string s((size_t)(n > 1 ? n - 1 : 0), '\0');
-  if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
-  return s;
-}
-FILE* fopen_u8(const std::string& path, const wchar_t* mode) { return _wfopen(widen(path).c_str(), mode); }
-#define FOPEN_RB L"rb"
-#define FOPEN_WB L"wb"
-#else
-FILE* fopen_u8(const std::string& path, const char* mode) { return std::fopen(path.c_str(), mode); }
-#define FOPEN_RB "rb"
-#define FOPEN_WB "wb"
-#endif
-
 std::string config_path() {
-  std::string d;
-#if defined(_WIN32)
-  if (const wchar_t* e = _wgetenv(L"SNAP_CONFIG_DIR"); e && *e) d = narrow(e);
-  else if (const wchar_t* a = _wgetenv(L"APPDATA"); a && *a) d = narrow(a) + "\\SnapRecomp";
-#else
-  if (const char* e = std::getenv("SNAP_CONFIG_DIR"); e && *e) d = e;
-#endif
-  else d = ".";
-  return d + "\\audio.json";
+  return snap_audio::host::config_dir() + snap_audio::host::path_sep() + "audio.json";
 }
 
 const char* const kVolKeys[SNAP_VOL_COUNT] = {"master", "bgm", "se", "voice"};
 
 // Tiny reader for {"master":1.0,"bgm":1.0,...}; missing or malformed keys keep the default 1.0.
 void load_volumes(Globals& g) {
-  FILE* f = fopen_u8(config_path(), FOPEN_RB);
-  if (f) {
-    char buf[1024]; size_t n = std::fread(buf, 1, sizeof buf - 1, f); buf[n] = 0; std::fclose(f);
+  char buf[1024];
+  if (snap_audio::host::read_text_file(config_path(), buf, sizeof buf, nullptr)) {
     for (int i = 0; i < SNAP_VOL_COUNT; ++i) {
       std::string key = std::string("\"") + kVolKeys[i] + "\"";
       const char* p = std::strstr(buf, key.c_str());
@@ -212,9 +175,8 @@ const char* mode_name(int m) { return m == SNAP_AUDIO_OUT_SPEAKERS ? "speakers" 
 
 // "output"/"channels"/"speakers" keys of audio.json (stored in g.cfg*). Env overrides are applied in ensure_init.
 void load_output(Globals& g) {
-  FILE* f = fopen_u8(config_path(), FOPEN_RB);
-  if (!f) return;
-  char buf[1024]; size_t n = std::fread(buf, 1, sizeof buf - 1, f); buf[n] = 0; std::fclose(f);
+  char buf[1024];
+  if (!snap_audio::host::read_text_file(config_path(), buf, sizeof buf, nullptr)) return;
   char v[32];
   if (read_json_string(buf, "output", v, sizeof v)) { int m = parse_mode(v); if (m >= 0) g.cfgOutMode = m; }
   for (int k = 0; k < 2; ++k) {
@@ -228,23 +190,13 @@ void load_output(Globals& g) {
 
 void save_volumes(Globals& g) {
   std::lock_guard<std::mutex> lk(g.volMu);
-  const std::string path = config_path(), tmp = path + ".tmp";
-#if defined(_WIN32)
-  if (const size_t cut = path.find_last_of("\\/"); cut != std::string::npos) CreateDirectoryW(widen(path.substr(0, cut)).c_str(), nullptr);   // first run: the folder may not exist
-#endif
-  FILE* f = fopen_u8(tmp, FOPEN_WB);
-  if (!f) return;
-  std::fprintf(f, "{\n  \"master\": %.4f,\n  \"bgm\": %.4f,\n  \"se\": %.4f,\n  \"voice\": %.4f,\n  \"output\": \"%s\",\n  \"channels\": %d,\n  \"speakers\": %d\n}\n",
-               g.fileVol[0].load(), g.fileVol[1].load(), g.fileVol[2].load(), g.fileVol[3].load(), mode_name(g.cfgOutMode), g.cfgGameCh, g.cfgSpk);
-  // a short write (disk full) or failed close must not replace the good file with a truncated one
-  const bool wrote = std::ferror(f) == 0;
-  const bool closed = std::fclose(f) == 0;
-#if defined(_WIN32)
-  if (!wrote || !closed || !MoveFileExW(widen(tmp).c_str(), widen(path).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) DeleteFileW(widen(tmp).c_str());
-#else
-  if (!wrote || !closed) { std::remove(tmp.c_str()); return; }
-  std::rename(tmp.c_str(), path.c_str());
-#endif
+  char buf[512];
+  const int n = std::snprintf(
+      buf, sizeof buf,
+      "{\n  \"master\": %.4f,\n  \"bgm\": %.4f,\n  \"se\": %.4f,\n  \"voice\": %.4f,\n  \"output\": \"%s\",\n  \"channels\": %d,\n  \"speakers\": %d\n}\n",
+      g.fileVol[0].load(), g.fileVol[1].load(), g.fileVol[2].load(), g.fileVol[3].load(), mode_name(g.cfgOutMode), g.cfgGameCh, g.cfgSpk);
+  if (n <= 0 || (size_t)n >= sizeof buf) return;
+  snap_audio::host::atomic_write_text(config_path(), buf, (size_t)n);
 }
 
 Globals::Globals() {
@@ -347,7 +299,7 @@ void capture_guest(const int16_t* p, uint32_t sc, uint32_t frames) {
     bool loud = false;
     for (uint32_t i = 0; i < frames * sc && !loud; ++i) loud = std::abs(p[i]) > 8;
     if (!loud) return;
-    std::string path = g.capDir + "\\guest_" + std::to_string(sc) + "ch.wav";
+    std::string path = g.capDir + snap_audio::host::path_sep() + "guest_" + std::to_string(sc) + "ch.wav";
     g.capGuest = std::fopen(path.c_str(), "wb+");
     if (!g.capGuest) return;
     g.capGuestCh = sc;
@@ -370,7 +322,7 @@ void capture_device(const float* d, uint32_t dc, uint32_t frames) {
     bool loud = false;
     for (uint32_t i = 0; i < frames * dc && !loud; ++i) loud = std::fabs(d[i]) > 2.5e-4f;
     if (!loud) return;
-    std::string path = g.capDir + "\\device_" + std::string(mode_name(g.activeMode.load())) + "_" + std::to_string(dc) + "ch.wav";
+    std::string path = g.capDir + snap_audio::host::path_sep() + "device_" + std::string(mode_name(g.activeMode.load())) + "_" + std::to_string(dc) + "ch.wav";
     g.capDev = std::fopen(path.c_str(), "wb+");
     if (!g.capDev) return;
     g.capDevCh = dc;
@@ -447,11 +399,9 @@ void ensure_init() {
     const char* e = std::getenv("SNAP_AUDIO_BACKEND");
     if (e && !std::strcmp(e, "null")) kind = SNAP_AUDIO_BACKEND_NULL;
     else if (e && !std::strcmp(e, "wasapi")) kind = SNAP_AUDIO_BACKEND_WASAPI;
+    else if (e && !std::strcmp(e, "sdl3")) kind = SNAP_AUDIO_BACKEND_SDL3;
   }
-#if defined(_WIN32)
-  if (kind == SNAP_AUDIO_BACKEND_AUTO) kind = SNAP_AUDIO_BACKEND_WASAPI;
-  if (kind == SNAP_AUDIO_BACKEND_WASAPI) g.backend.reset(make_wasapi_backend());
-#endif
+  if (kind != SNAP_AUDIO_BACKEND_NULL) g.backend.reset(snap_audio::host::create_backend(kind));
   if (!g.backend) g.backend.reset(make_null_backend());
   g.tapOn.store(g.cfg.enableTap);
   // Output mode: env SNAP_AUDIO_OUTPUT > SnapAudioConfig.outputMode > audio.json "output" > stereo.
@@ -473,7 +423,7 @@ void ensure_init() {
   }
   if (const char* d = std::getenv("SNAP_AUDIO_CAPTURE"); d && *d) {
     g.capDir = d;
-    CreateDirectoryA(d, nullptr);
+    snap_audio::host::ensure_dir(g.capDir);
     if (const char* n = std::getenv("SNAP_AUDIO_CAPTURE_SECS"); n && std::atoi(n) > 0) g.capSecs = (uint32_t)std::atoi(n);
   }
   if (const char* e = std::getenv("SNAP_AUDIO_UPMIX"); e && *e) g.upmixOn = std::atoi(e) != 0;
@@ -499,8 +449,6 @@ namespace snap_audio {
 
 // Mono audio (Accessibility, hle/access.h): defined in runtime/hle/access.cpp; a build without the HLE layer (audio tests) gets "off".
 extern "C" int snap_access_mono(void);
-extern "C" int snap_access_mono_none(void) { return 0; }
-#pragma comment(linker, "/alternatename:snap_access_mono=snap_access_mono_none")
 
 void core_mix(float* dst, uint32_t frames) {
   Globals& g = G();
@@ -871,9 +819,7 @@ SNAP_AUDIO_API uint32_t snap_audio_tap_channels(void) { return G().devChannels; 
 extern "C" {
 struct SnapStateHooks { void (*pre_save)(); int (*pre_load)(char* why, int cap); void (*post_load)(); void (*shot)(); };
 void snap_state_set_hooks(const SnapStateHooks* h);
-void snap_state_set_hooks_none(const SnapStateHooks*) {}   // an audio-only build (tests) has no save-state code
 }
-#pragma comment(linker, "/alternatename:snap_state_set_hooks=snap_state_set_hooks_none")
 
 namespace {
 struct AudioSlotSnap {

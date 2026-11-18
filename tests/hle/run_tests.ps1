@@ -9,7 +9,7 @@ $env:PATH = "$root\tools\llvm\bin;" + $env:PATH
 $out = Join-Path $PSScriptRoot 'out'
 New-Item -ItemType Directory -Force $out | Out-Null
 $hle = Join-Path $root 'runtime\hle'
-$srcs = @((Join-Path $PSScriptRoot 'hle_tests.cpp')) + (Get-ChildItem $hle -Filter *.cpp | ForEach-Object { $_.FullName }) + @((Join-Path $root 'runtime\os\perf.cpp'))
+$srcs = @((Join-Path $PSScriptRoot 'hle_tests.cpp')) + (Get-ChildItem $hle -Filter *.cpp | ForEach-Object { $_.FullName }) + @((Join-Path $root 'runtime\os\perf.cpp'), (Join-Path $root 'runtime\os\os_host_win32.cpp'))
 $exe = Join-Path $out 'hle_tests.exe'
 & clang++ -std=c++20 -O1 -g -D_CRT_SECURE_NO_WARNINGS -I"$root\runtime" @srcs -o $exe -luser32 -lshell32 -lole32
 if ($LASTEXITCODE -ne 0) { throw "build failed" }

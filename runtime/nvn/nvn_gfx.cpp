@@ -5,9 +5,6 @@
 // Signatures: the game's call sites (see analysis/runtime/nvn_usage.md for the census; BindTexture/GetTextureHandle
 // were found by reading the sampler-bind loop at 0x915e80) cross-checked against tools/ref/totk/runtime
 // nvn_api_*.c (MIT community reconstruction, [TOTK-NVN]); state-object defaults follow the same reference.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +12,7 @@
 #include <set>
 
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_state.h"
 #include "nvn_shiny.h"   // shiny mod
 
@@ -78,10 +76,11 @@ void TexturePoolRegisterTexture(const void* tp, int id, const void* tex, const v
   if (raceLog) {   // registrations that overlap a replay on another thread (the race the SlotTable makes safe)
     static std::atomic<int> total{0}, overlap{0};
     const unsigned long rt = g_replayTid.load(std::memory_order_relaxed);
-    const int o = (rt && rt != GetCurrentThreadId()) ? ++overlap : overlap.load();
+    const uint64_t tid = nvn::os_host::current_thread_id();
+    const int o = (rt && rt != tid) ? ++overlap : overlap.load();
     const int n = ++total;
-    if ((rt && rt != GetCurrentThreadId() && (o <= 5 || o % 200 == 0)) || n % 2000 == 0)
-      fprintf(stderr, "[race] TexturePoolRegisterTexture id %d tid %lu during replay on tid %lu: overlap %d of %d\n", id, GetCurrentThreadId(), rt, o, n);
+    if ((rt && rt != tid && (o <= 5 || o % 200 == 0)) || n % 2000 == 0)
+      fprintf(stderr, "[race] TexturePoolRegisterTexture id %d tid %llu during replay on tid %llu: overlap %d of %d\n", id, (unsigned long long)tid, (unsigned long long)rt, o, n);
   }
   TexSlot* s = p->slots.At(id);
   if (!s) { LogError("TexturePoolRegisterTexture: id %d out of range", id); return; }
@@ -89,7 +88,7 @@ void TexturePoolRegisterTexture(const void* tp, int id, const void* tex, const v
   uint32_t q = s->seq.load(std::memory_order_relaxed);
   for (;;) {
     if (!(q & 1) && s->seq.compare_exchange_weak(q, q + 1, std::memory_order_acquire, std::memory_order_relaxed)) break;
-    YieldProcessor();
+    nvn::os_host::cpu_yield();
     q = s->seq.load(std::memory_order_relaxed);
   }
   std::atomic_thread_fence(std::memory_order_release);
@@ -142,12 +141,12 @@ Boolean BufferInitialize(void* buf, const void* builder) {
       // the game's GPU arena allocator (main+0x911fc0, object at [main+0x12febc0]): per arena type t, +t*0x838 + 0x21e0 base,
       // 0x21e8 size, 0x21f0 largest allowed request. A null pool here means that allocator returned no space.
       const uint64_t* gp = reinterpret_cast<const uint64_t*>(0x7100000000ull + 0x12febc0);
-      if (!IsBadReadPtr(gp, 8) && *gp && !IsBadReadPtr(reinterpret_cast<const void*>(*gp + 9 * 0x838 + 0x21f8), 8))
+      if (nvn::os_host::readable_addr(gp, 8) && *gp && nvn::os_host::readable_addr(reinterpret_cast<const void*>(*gp + 9 * 0x838 + 0x21f8), 8))
         for (int t = 0; t < 10; t++) {
           const uint64_t* a = reinterpret_cast<const uint64_t*>(*gp + t * 0x838 + 0x21e0);
           if (a[0]) fprintf(stderr, "[arena] type %d base=0x%llx size=0x%llx maxreq=0x%llx\n", t, (unsigned long long)a[0], (unsigned long long)a[1], (unsigned long long)a[2]);
         }
-      if (!IsBadReadPtr(gp, 8) && *gp && !IsBadReadPtr(reinterpret_cast<const void*>(*gp + 0x10), 0x38)) {   // arena pools the free path (0x912140) compares
+      if (nvn::os_host::readable_addr(gp, 8) && *gp && nvn::os_host::readable_addr(reinterpret_cast<const void*>(*gp + 0x10), 0x38)) {   // arena pools the free path (0x912140) compares
         const uint64_t* pp = reinterpret_cast<const uint64_t*>(*gp + 0x10);
         fprintf(stderr, "[arena] pools +0x10..+0x40: %llx %llx %llx %llx %llx %llx %llx\n", (unsigned long long)pp[0], (unsigned long long)pp[1],
                 (unsigned long long)pp[2], (unsigned long long)pp[3], (unsigned long long)pp[4], (unsigned long long)pp[5], (unsigned long long)pp[6]);
@@ -166,7 +165,7 @@ Boolean BufferInitialize(void* buf, const void* builder) {
     Host* h = g_host;
     if (!off && h) {
       const uint64_t sz = (b->size + 0xFFF) & ~0xFFFull;
-      void* mem = _aligned_malloc((size_t)sz, 0x1000);
+      void* mem = nvn::os_host::aligned_alloc(0x1000, (size_t)sz);
       if (mem) {
         memset(mem, 0, (size_t)sz);
         auto* fp = new PoolImpl();
@@ -669,7 +668,7 @@ void PoolAcctDump(const char* why) {
 // it. The old private list compared one queue's stamp against whichever queue presented, and each queue has its own timeline.
 void OwnPoolRetire(PoolImpl* p) {
   if (!p) return;
-  RetireFn([p] { void* mem = p->storage; DestroyPool(p); _aligned_free(mem); });
+  RetireFn([p] { void* mem = p->storage; DestroyPool(p); nvn::os_host::aligned_free(mem); });
 }
 void OwnPoolReap(QueueImpl*) {}   // kept for the present path; GraveReap does the work
 
@@ -687,7 +686,7 @@ std::unordered_map<std::string, int> g_arIndex;
 int64_t g_arCharged[10] = {}, g_arUsedPeak[10] = {}, g_arLastStep[10] = {};
 const uint64_t* ArenaObj() {
   const uint64_t* gp = reinterpret_cast<const uint64_t*>(0x7100000000ull + 0x12febc0);
-  if (IsBadReadPtr(gp, 8) || !*gp || IsBadReadPtr(reinterpret_cast<const void*>(*gp + 9 * 0x838 + 0x21f8), 8)) return nullptr;
+  if (!nvn::os_host::readable_addr(gp, 8) || !*gp || !nvn::os_host::readable_addr(reinterpret_cast<const void*>(*gp + 9 * 0x838 + 0x21f8), 8)) return nullptr;
   return reinterpret_cast<const uint64_t*>(*gp);
 }
 const uint64_t* ArenaHeap(const uint64_t* obj, int t) { return reinterpret_cast<const uint64_t*>(reinterpret_cast<uintptr_t>(obj) + t * 0x838 + 0x21e0); }

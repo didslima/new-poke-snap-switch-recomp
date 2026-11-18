@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Ray tracing track: device setup (M0), transform-feedback geometry capture (M1), BLAS/TLAS build and ray-query debug overlay (M2).
 // Overview, switches and the design notes: nvn_rt.h and docs/lighting-rt-plan.md section 4. Everything is inert without SNAP_RT=1.
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
 
 #include <algorithm>
 #include <cmath>
@@ -21,6 +17,7 @@
 #include "hle/lighting_preset.h"   // snaplight::ab_on
 #include "nvn_dev.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_fx.h"   // photo-frame guard, scene depth, the post-tonemap slot
 #include "nvn_rt.h"
 #include "nvn_rt_spv.h"
@@ -32,7 +29,7 @@ namespace {
 
 bool EnvOn(const char* n, bool def = false) { const char* e = getenv(n); return e && *e ? e[0] != '0' : def; }
 int EnvInt(const char* n, int def) { const char* e = getenv(n); return e && *e ? atoi(e) : def; }
-double Now() { LARGE_INTEGER f, t; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t); return (double)t.QuadPart * 1000.0 / (double)f.QuadPart; }
+double Now() { return (double)nvn::os_host::monotonic_ns() * 1e-6; }
 
 bool g_on = false, g_capture = false, g_failed = false, g_reflFailed = false, g_giFailed = false, g_aoFailed = false;
 int g_reflOn = 1, g_giOn = 1, g_aoOn = 1;   // SNAP_RT_REFLECT live value (dev param), read by the render thread
@@ -387,8 +384,8 @@ ShCfg& Cfg() {
   static ShCfg c = [] {
     ShCfg k;
     if (const char* e = getenv("SNAP_RT_SHADOWS")) {
-      if (!_stricmp(e, "off") || !strcmp(e, "0")) k.mode = 0; else if (!_stricmp(e, "hard") || !_stricmp(e, "on") || !strcmp(e, "1")) k.mode = 1;
-      else if (!_stricmp(e, "soft") || !strcmp(e, "2")) k.mode = 2; else if (atoi(e) >= 3) k.mode = 3;
+      if (nvn::os_host::ascii_ieq(e, "off") || !strcmp(e, "0")) k.mode = 0; else if (nvn::os_host::ascii_ieq(e, "hard") || nvn::os_host::ascii_ieq(e, "on") || !strcmp(e, "1")) k.mode = 1;
+      else if (nvn::os_host::ascii_ieq(e, "soft") || !strcmp(e, "2")) k.mode = 2; else if (atoi(e) >= 3) k.mode = 3;
     }
     k.softRays = std::max(2, std::min(16, EnvInt("SNAP_RT_SHADOW_RAYS", 4)));
     k.dbg = EnvInt("SNAP_RT_SHADOW_DBG", 0);   // bring-up bits (captured clip -> map coordinates): 1 flip v, 2 depth is NDC (z * 0.5 + 0.5), 4 xy already in 0..1

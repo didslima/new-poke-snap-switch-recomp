@@ -1,0 +1,195 @@
+# Source classification of the game binary (host/, runtime/). Format: <class> <path>  [# why]
+# Classes and how to add a file: docs/linux-port.md; checked by tests/recomp/test_source_classification.py.
+#   shared   portable as written (scripts/source_classes.py finds no Windows header, Win32 API or MSVC construct, directly or through the
+#            repo headers it includes) and it compiles with clang on Linux
+#   windows  Windows-only today; the reason is the first thing the scanner found. When a Linux implementation lands the file moves to shared
+#   linux    Linux-only (none yet)
+#   offline  not compiled into the game by any target (spikes, tests, reference code)
+
+shared   host/elf_check.cpp
+shared   host/mods/drpfast.cpp
+shared   runtime/fma.c
+shared   runtime/fx/ocean_fft/ocean_gpu.cpp
+shared   runtime/hle/access.cpp
+shared   runtime/hle/btn_icons.cpp
+shared   runtime/hle/freecam.cpp
+shared   runtime/hle/fs.cpp
+shared   runtime/hle/fs_core.cpp
+shared   runtime/hle/hid.cpp
+shared   runtime/hle/hle_config.cpp
+windows  runtime/hle/hle_host_win32.cpp   # Win32 host helpers for HLE (stage 6B)
+linux    runtime/hle/linux/hle_host_posix.cpp   # POSIX/XDG host helpers and weak Stage 6B link seams for HLE
+linux    runtime/hle/linux/input_backend_sdl3.cpp   # Linux SDL3 input backend (NullBackend when built without SDL3)
+shared   runtime/hle/input_core.cpp
+shared   runtime/hle/overrides.cpp
+shared   runtime/hle/profiles.cpp
+shared   runtime/hle/services_net.cpp
+shared   runtime/hle/services_sys.cpp
+shared   runtime/hle/settings.cpp
+shared   runtime/hle/zip_read.cpp
+shared   runtime/mods/mods_core.cpp
+shared   runtime/nvn/nvn_astc.cpp
+shared   runtime/nvn/nvn_bc7.cpp
+shared   runtime/nvn/nvn_quirks.cpp
+shared   runtime/nvn/nvn_tex.cpp
+shared   runtime/os/abi.cpp
+shared   runtime/os/cheat_heap.cpp
+shared   runtime/os/guest_tls_block.cpp
+shared   runtime/os/os_kernel.cpp
+shared   runtime/os/os_memory.cpp
+shared   runtime/os/os_overrides.cpp
+shared   runtime/os/os_sync.cpp
+shared   runtime/os/os_thread.cpp
+shared   runtime/os/perf.cpp
+shared   runtime/ui/third_party/imgui/imgui.cpp
+shared   runtime/ui/third_party/imgui/imgui_draw.cpp
+shared   runtime/ui/third_party/imgui/imgui_impl_vulkan.cpp
+shared   runtime/ui/third_party/imgui/imgui_tables.cpp
+shared   runtime/ui/third_party/imgui/imgui_widgets.cpp
+shared   runtime/ui/ui_cheats.cpp
+shared   runtime/ui/ui_controls.cpp
+shared   runtime/ui/ui_i18n_table.cpp
+shared   runtime/ui/ui_savestate.cpp
+shared   runtime/ui/ui_skin.cpp
+shared   runtime/ui/ui_style.cpp
+shared   host/abi_audio.cpp
+windows  host/album.cpp   # #include <bcrypt.h>, #include <wincodec.h>, #include <windows.h> ...
+windows  host/benchmark.cpp   # #include <d3d11.h>, #include <dxgi.h>, #include <shellapi.h> ...
+windows  host/boot.cpp   # #include <dbghelp.h>, #include <tlhelp32.h>, #include <windows.h> ...
+shared   host/hooks.cpp
+linux    host/linux/boot_linux.cpp   # Linux runner executable entry point (stage 5B)
+linux    host/linux/crash_linux.cpp   # Linux POSIX signal handlers and async-signal-safe diagnostics (stage 5C)
+linux    host/linux/hooks_mods_stub.cpp   # explicit no-op stubs for unported host/mods/* called by host/hooks.cpp
+linux    host/linux/init_linux.cpp   # controlled Linux guest runtime initialization before initializers (stage 5D-B2)
+linux    host/linux/preflight_linux.cpp   # Linux preflight validator for guest ELFs and AOT archives (stage 5D-B1)
+linux    host/linux/runner_linux.cpp   # Linux runner bootstrap, CLI, CPU check, 256 MiB runner thread (stage 5B)
+linux    host/linux/window_sdl3.cpp   # Linux SDL3 host window and non-blocking event loop (stage 6E-B)
+windows  host/launcher.cpp   # #include <bcrypt.h>, #include <commctrl.h>, #include <shellapi.h> ...
+windows  host/launcher_ui.cpp   # #include <d3d11.h>, #include <dxgi.h>, #include <shellapi.h> ...
+windows  host/launcher_ui_test.cpp   # #include <windows.h>
+windows  host/launcher_upscalers.cpp   # #include <bcrypt.h>, #include <commctrl.h>, #include <shellapi.h> ...
+shared   host/loader.cpp
+windows  host/mods/abcap.cpp   # #include <windows.h>, CreateThread, DWORD ...
+windows  host/mods/aim.cpp   # #include <windows.h>
+windows  host/mods/crashlog.cpp   # #include <io.h>, #include <process.h>, #include <windows.h> ...
+windows  host/mods/crcfast.cpp   # #include <intrin.h> via crc32_clmul.h, __cpuid via crc32_clmul.h
+windows  host/mods/discord_presence.cpp   # #include <windows.h>, CreateFileA, DWORD ...
+windows  host/mods/evprobe.cpp   # #include <windows.h>
+windows  host/mods/freecam.cpp   # #include <windows.h>
+windows  host/mods/gamemods.cpp   # #include <windows.h>, BOOL, CALLBACK ...
+windows  host/mods/highfps.cpp   # #include <tlhelp32.h>, #include <windows.h>, BOOL ...
+windows  host/mods/install_check.cpp   # #include <bcrypt.h>, #include <windows.h>, DWORD ...
+windows  host/mods/introskip.cpp   # #include <tlhelp32.h>, #include <windows.h>, BOOL ...
+windows  host/mods/lodanim.cpp   # #include <windows.h>, QueryPerformanceCounter, QueryPerformanceFrequency ...
+windows  host/mods/look.cpp   # #include <windows.h>, QueryPerformanceCounter, QueryPerformanceFrequency
+windows  host/mods/modhooks.cpp   # #include <windows.h>
+windows  host/mods/nativeopt.cpp   # _WIN32 via audio_out.h, __declspec via audio_out.h
+windows  host/mods/neofilm.cpp   # #include <tlhelp32.h>, #include <windows.h>, BOOL ...
+windows  host/mods/photoexport.cpp   # #include <wincodec.h>, #include <windows.h>, CoCreateInstance ...
+windows  host/mods/problem_report.cpp   # #include <knownfolders.h>, #include <shlobj.h>, #include <windows.h> ...
+windows  host/mods/routes.cpp   # #include <windows.h>
+windows  host/mods/shiny.cpp   # #include <windows.h>
+windows  host/mods/skips.cpp   # #include <windows.h>
+windows  host/mods/texdump.cpp   # #include <windows.h>, CreateFileW, DWORD ...
+windows  host/mods/uipace.cpp   # #include <windows.h>
+windows  host/pgo.cpp   # #include <windows.h>, CreateThread, DWORD ...
+windows  host/portable.cpp   # #include <windows.h>, DWORD, GetEnvironmentVariableW ...
+windows  host/shaderprep.cpp   # #include <dxgi.h>, #include <windows.h>, BOOL ...
+windows  host/spike.cpp   # #include <windows.h>, VirtualAlloc, _aligned_malloc
+windows  host/window_opts.cpp   # #include <windows.h>, BOOL, CALLBACK ...
+shared   runtime/audio/audio_null.cpp
+shared   runtime/audio/audio_out.cpp
+windows  runtime/audio/audio_host_win32.cpp
+windows  runtime/audio/audio_wasapi.cpp
+linux    runtime/audio/linux/audio_host_posix.cpp
+linux    runtime/audio/linux/audio_sdl3.cpp
+windows  runtime/hle/cheats.cpp   # #include <windows.h>, DWORD, NOMINMAX ...
+windows  runtime/hle/input_backends.cpp   # #include <windows.h>, DWORD, FreeLibrary ...
+windows  runtime/hle/modhooks.cpp   # #include <windows.h>, _WIN32, __except ...
+windows  runtime/hle/save_backup.cpp   # #include <windows.h>, NOMINMAX, WIN32_LEAN_AND_MEAN ...
+windows  runtime/hle/save_port.cpp   # #include <windows.h>, CreateFileW, HANDLE ...
+windows  runtime/mods/mods.cpp   # #include <windows.h>, CreateFileA, DWORD ...
+shared   runtime/nvn/nvn_aa.cpp
+shared   runtime/nvn/nvn_alpha.cpp
+shared   runtime/nvn/nvn_atmos.cpp
+windows  runtime/nvn/nvn_btnicon.cpp   # #include <wincodec.h>, #include <windows.h>, CoCreateInstance ...
+shared   runtime/nvn/nvn_capture.cpp
+shared   runtime/nvn/nvn_contact.cpp
+shared   runtime/nvn/nvn_dev.cpp
+shared   runtime/nvn/nvn_downsample.cpp
+shared   runtime/nvn/nvn_draw.cpp
+shared   runtime/nvn/nvn_entry.cpp
+shared   runtime/nvn/nvn_foliage.cpp
+windows  runtime/nvn/nvn_framegen.cpp   # #include <windows.h>, DWORD, GetCurrentThread ...
+windows  runtime/nvn/nvn_freecam.cpp   # #include <wincodec.h>, #include <windows.h>, CoCreateInstance ...
+shared   runtime/nvn/nvn_fx.cpp
+shared   runtime/nvn/nvn_gfx.cpp
+shared   runtime/nvn/nvn_gtao.cpp
+windows  runtime/nvn/nvn_hdphoto.cpp   # #include <wincodec.h>, #include <windows.h>, CoCreateInstance ...
+windows  runtime/nvn/nvn_hdr.cpp   # #include <dxgi1_6.h>, #include <windows.h>, GetProcAddress ...
+shared   runtime/nvn/nvn_hud.cpp
+shared   runtime/nvn/nvn_lens_fx.cpp
+shared   runtime/nvn/nvn_life.cpp
+shared   runtime/nvn/nvn_lighting_fx.cpp
+shared   runtime/nvn/nvn_model.cpp
+shared   runtime/nvn/nvn_ocean.cpp
+windows  runtime/nvn/nvn_os_host_win32.cpp
+linux    runtime/nvn/linux/nvn_os_host_posix.cpp
+linux    runtime/nvn/linux/nvn_optional_stubs.cpp
+linux    runtime/nvn/linux/nvn_upscale_stub.cpp
+shared   runtime/nvn/nvn_pace.cpp
+shared   runtime/nvn/nvn_perf.cpp
+shared   runtime/nvn/nvn_pipeline.cpp
+shared   runtime/nvn/nvn_pom.cpp
+shared   runtime/nvn/nvn_rt.cpp
+shared   runtime/nvn/nvn_shader.cpp
+shared   runtime/nvn/nvn_shadowpcf.cpp
+shared   runtime/nvn/nvn_shadowrt.cpp
+shared   runtime/nvn/nvn_shiny.cpp
+windows  runtime/nvn/nvn_shot.cpp   # #include <shlobj.h>, #include <wincodec.h>, #include <windows.h> ...
+windows  runtime/nvn/nvn_soak.cpp   # #include <psapi.h>, #include <tlhelp32.h>, #include <windows.h> ...
+shared   runtime/nvn/nvn_ssr.cpp
+shared   runtime/nvn/nvn_state.cpp
+shared   runtime/nvn/nvn_submem.cpp
+shared   runtime/nvn/nvn_tex_vk.cpp
+shared   runtime/nvn/nvn_vk.cpp
+shared   runtime/nvn/nvn_wide.cpp
+shared   runtime/nvn/nvn_xfer.cpp
+windows  runtime/nvn/upscale/framegen.cpp   # #include <windows.h>, DWORD, GetLastError ...
+windows  runtime/nvn/upscale/upscale.cpp   # #include <windows.h>, NOMINMAX, QueryPerformanceCounter ...
+windows  runtime/nvn/upscale/upscale_dlss.cpp   # #include <windows.h>, DWORD, GetModuleHandleW ...
+windows  runtime/nvn/upscale/upscale_fsr.cpp   # #include <windows.h>, DWORD, GetLastError ...
+windows  runtime/nvn/upscale/upscale_xess.cpp   # #include <windows.h>, DWORD, GetProcAddress ...
+windows  runtime/os/hostprof.cpp   # #include <psapi.h>, #include <tlhelp32.h>, #include <windows.h> ...
+windows  runtime/os/os_ctx_win64.cpp   # #include <windows.h>, NOMINMAX, VirtualAlloc ... (Win64 context switch; Linux uses runtime/os/linux/os_ctx_sysv.cpp)
+linux    host/guest_tls_hooks.cpp   # binds the musl thread-pointer hooks for the Linux runner; not in host/build_snap.py's explicit list, so never compiled for Windows
+linux    runtime/os/linux/os_host_posix.cpp   # POSIX implementation of os_host.h; in a subdirectory so that host/build_snap.py's runtime/os/*.cpp glob never compiles it for Windows
+linux    runtime/os/linux/os_state_off.cpp   # save states are not supported on Linux: g_sphase stays 0, snap_state_* refuse (replaces os_state.cpp)
+linux    runtime/os/linux/os_ctx_sysv.cpp   # Linux x86-64 System V context switch; in a subdirectory so that host/build_snap.py's runtime/os/*.cpp glob never compiles it for Windows
+windows  runtime/os/os_host_win32.cpp   # #include <windows.h>, ... (Win32 implementation of os_host.h; Linux uses runtime/os/linux/os_host_posix.cpp)
+windows  runtime/os/os_state.cpp   # #include <dbghelp.h>, #include <windows.h>, BOOL ...
+windows  runtime/os/sampler.cpp   # #include <intrin.h>, #include <psapi.h>, #include <tlhelp32.h> ...
+windows  runtime/ui/third_party/imgui/imgui_impl_dx11.cpp   # Direct3D 11 backend of Dear ImGui
+windows  runtime/ui/third_party/imgui/imgui_impl_win32.cpp   # Win32 backend of Dear ImGui
+shared   runtime/ui/ui_audio.cpp
+shared   runtime/ui/ui_bench.cpp
+shared   runtime/ui/ui_extras.cpp
+shared   runtime/ui/ui_font.cpp
+shared   runtime/ui/ui_fps.cpp
+shared   runtime/ui/ui_i18n.cpp
+shared   runtime/ui/ui_options.cpp
+shared   runtime/ui/ui_overlay.cpp
+windows  runtime/ui/ui_host_win32.cpp
+linux    runtime/ui/linux/ui_host_posix.cpp
+linux    runtime/ui/linux/ui_linux_stubs.cpp
+windows  runtime/ui/ui_picker.cpp   # #include <windows.h>, CALLBACK, DWORD ...
+windows  runtime/ui/ui_saves.cpp   # #include <shellapi.h>, #include <windows.h>, BOOL ...
+shared   runtime/ui/ui_shaders.cpp
+shared   runtime/ui/ui_shiny.cpp
+windows  runtime/ui/ui_test.cpp   # #include <windows.h>, DWORD, ExitProcess ...
+shared   runtime/ui/ui_tune.cpp
+offline  runtime/fx/ocean_fft/ocean_cpu.cpp   # CPU reference of the FFT ocean (tests only)
+offline  runtime/fx/ocean_fft/tests/cpu_tests.cpp   # unit tests of the FFT ocean reference
+offline  runtime/hle/cheat/cheat_vm.cpp   # #included by runtime/hle/cheats.cpp, not a translation unit of its own
+offline  runtime/hle/cheat/tests/cheat_tests.cpp   # unit tests of the cheat VM
+offline  runtime/snap_rt_abort.c   # used only by the lifter differential test (tests/snap_func.py)

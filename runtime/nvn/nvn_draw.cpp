@@ -11,10 +11,8 @@
 //   * set 1: storage buffers; set 2: combined image samplers at stage*32 + n (NVN BindTexture index b =
 //       (handleIndex - 8) / 2, found from the game's own sampler-bind loop at 0x915e80); set 3: storage images.
 //   * Texture handles are `texId | samplerId << 20`; ids index the host tables of the bound texture/sampler pool.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
 #include <cmath>
-#include <windows.h>
+#include "nvn_os_host.h"
 
 #include <algorithm>
 #include <cstring>
@@ -634,7 +632,7 @@ ResolvedTex ResolveHandle(ReplayCtx& cx, DrawState& d, uint64_t handle, bool ima
   struct { TextureImpl* tex; TexView view; bool hasView; } slot{};
   for (;;) {   // sequence-lock read (TexSlot::seq): retry while a registration is rewriting this slot
     const uint32_t a = slotp->seq.load(std::memory_order_acquire);
-    if (a & 1) { YieldProcessor(); continue; }
+    if (a & 1) { nvn::os_host::cpu_yield(); continue; }
     slot.tex = slotp->tex;
     slot.hasView = slotp->hasView;
     if (slot.hasView) slot.view = slotp->view;
@@ -1501,6 +1499,16 @@ void DoDraw(ReplayCtx& cx, const Cmd& c0) {
   }
   if (rtShOk) vkCmdPushConstants(cx.cb, p->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof rtShPush, &rtShPush);   // M3: the receivers' ray-query constants
   if (g_pomDraw.push) { PomPush pp; if (PomFillPush(&pp)) vkCmdPushConstants(cx.cb, p->layout, VK_SHADER_STAGE_FRAGMENT_BIT, 128, sizeof pp, &pp); }   // parallax: camera, sun, fade (second half of the fragment push block)
+  auto emitCmd = [&]() {
+    if (rewrite) {
+      if (indexed) vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
+      else vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[4], 1), 0, 0, (uint32_t)c.i[3]);
+    } else if (indexed) {
+      vkCmdDrawIndexed(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
+    } else {
+      vkCmdDraw(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[4], 1), (uint32_t)c.i[1], (uint32_t)c.i[3]);
+    }
+  };
   if (rewrite) {
     VkBuffer ib = VK_NULL_HANDLE;
     uint8_t* m = NewScratch(cx, rw.size() * 4, &ib, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
@@ -1508,8 +1516,7 @@ void DoDraw(ReplayCtx& cx, const Cmd& c0) {
     memcpy(m, rw.data(), rw.size() * 4);
     vkCmdBindIndexBuffer(cx.cb, ib, 0, VK_INDEX_TYPE_UINT32);
     if (rtWant) rtCap.Begin(cx, rtInfo);
-    if (indexed) vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
-    else vkCmdDrawIndexed(cx.cb, (uint32_t)rw.size(), (uint32_t)std::max(c.i[4], 1), 0, 0, (uint32_t)c.i[3]);
+    emitCmd();
   } else if (indexed) {
     PoolImpl* pool = nullptr; uint64_t off = 0;
     if (!h->ResolveAddress(c.a[0], &pool, &off)) { LogError("index buffer address 0x%llx is not in any memory pool", (unsigned long long)c.a[0]); return; }
@@ -1518,11 +1525,12 @@ void DoDraw(ReplayCtx& cx, const Cmd& c0) {
     SyncPoolRangeOnce(pool, off, isz * (uint64_t)std::max(c.i[2], 0));
     vkCmdBindIndexBuffer(cx.cb, pool->buffer, off, c.i[1] == IDX_U32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (rtWant) rtCap.Begin(cx, rtInfo);
-    vkCmdDrawIndexed(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[5], 1), 0, c.i[3], (uint32_t)c.i[4]);
+    emitCmd();
   } else {
     if (rtWant) rtCap.Begin(cx, rtInfo);
-    vkCmdDraw(cx.cb, (uint32_t)c.i[2], (uint32_t)std::max(c.i[4], 1), (uint32_t)c.i[1], (uint32_t)c.i[3]);
+    emitCmd();
   }
+  if (cx.wideVfSide) WideDrawViewfinderSide(cx, [](void* u) { (*static_cast<decltype(emitCmd)*>(u))(); }, &emitCmd);
   ShinyQueryEnd(cx.cb, shinyQ);
   DrawCensus(cx, p, 'D');   // debug census (NVN_DRAW_CENSUS)
   rtCap.End();   // [rt] (a no-op unless this draw was captured; the build runs from the Fx post-tonemap slot, nvn_rt.cpp)

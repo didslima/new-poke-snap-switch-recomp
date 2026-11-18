@@ -259,6 +259,9 @@ def sdk_plan():
 
 
 def peak_rss_mb():
+    if os.name != 'nt':
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     import ctypes
     from ctypes import wintypes
 

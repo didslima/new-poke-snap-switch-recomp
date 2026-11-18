@@ -14,7 +14,6 @@
 //   Test aids: SNAP_LIGHT_AB=<P> (same-moment A/B: the effects are on in odd blocks of P presents, off in even ones), SNAP_BOKEH_FORCE=<zoom> (treat the camera as zoomed by
 //   that factor), SNAP_BOKEH_DEBUG=1 (CoC tint and a cyan reticle dot), SNAP_MBLUR_DEBUG=1 (velocity tint), SNAP_BOKEH_BASE_FOV=<deg> (fixed unzoomed vertical FOV),
 //   SNAP_BOKEH_K (CoC strength, default 120), SNAP_BOKEH_MAXCOC (max CoC in pixels at 1080p, default from the zoom), SNAP_LENS_LOG=1.
-#include <windows.h>
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +24,7 @@
 #include "hle/lighting_preset.h"
 #include "nvn_fx.h"
 #include "nvn_internal.h"
+#include "nvn_os_host.h"
 #include "nvn_lens_spv.h"
 
 namespace nvn {
@@ -42,8 +42,8 @@ struct G {
 float EnvF(const char* n, float def) { const char* e = getenv(n); return e && *e ? (float)atof(e) : def; }
 float Strength(const char* name) {
   const char* e = getenv(name);
-  if (!e || !*e || !_stricmp(e, "off")) return 0.f;
-  if (!_stricmp(e, "on")) return 1.f;
+  if (!e || !*e || nvn::os_host::ascii_ieq(e, "off")) return 0.f;
+  if (nvn::os_host::ascii_ieq(e, "on")) return 1.f;
   const float v = (float)atof(e);
   return v > 0.f ? std::min(v, 4.f) : 0.f;
 }
@@ -220,7 +220,7 @@ struct Track {
   float tanNow = 0.f, zoom = 1.f;
   double R[4][4] = {};           // previous view-projection * inverse of this frame's (identity when there is no usable previous frame)
   bool rValid = false;
-  LARGE_INTEGER lastQ{}; double dt = 1.0 / 60.0;   // smoothed seconds between scene frames
+  uint64_t lastNs = 0; double dt = 1.0 / 60.0;   // smoothed seconds between scene frames
   int frameNo = 0;
 } T;
 
@@ -229,9 +229,9 @@ void TrackFrame(const FxCam* cam) {
   const int gap = g_presentCount - T.prevPresent;
   T.present = g_presentCount;
   // seconds between scene frames (the blur length follows the real frame time, so the look stays the same at 60, 120 or 144 fps)
-  LARGE_INTEGER q, f; QueryPerformanceCounter(&q); QueryPerformanceFrequency(&f);
-  if (T.lastQ.QuadPart) { const double d = (double)(q.QuadPart - T.lastQ.QuadPart) / (double)f.QuadPart; if (d > 0.0005 && d < 0.1) T.dt += (d - T.dt) * 0.25; }
-  T.lastQ = q;
+  const uint64_t nowNs = nvn::os_host::monotonic_ns();
+  if (T.lastNs) { const double d = (double)(nowNs - T.lastNs) * 1e-9; if (d > 0.0005 && d < 0.1) T.dt += (d - T.dt) * 0.25; }
+  T.lastNs = nowNs;
   bool cut = false;
   if (T.have && gap <= 3) {
     double d2 = 0, dot = 0;

@@ -9,13 +9,8 @@
 #include <unordered_map>
 
 #include "hle.h"
+#include "hle_host.h"
 #include "svc_common.h"
-
-#ifdef _WIN32
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 
 namespace hle {
 
@@ -85,17 +80,11 @@ uint64_t now_unix_seconds() {
 
 std::string safe_cstr(uint64_t addr, size_t max) {
   if (addr < 0x10000) return addr ? "<bad pointer>" : "<null>";
-#ifdef _WIN32
-  MEMORY_BASIC_INFORMATION mbi;
-  if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
-      (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
-    return "<unreadable>";
-  size_t avail = (size_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)addr);
-  max = max < avail ? max : avail;
-#endif
+  if (!hle::host::readable_addr(addr, 1)) return "<unreadable>";
   const char* p = reinterpret_cast<const char*>(static_cast<uintptr_t>(addr));
   std::string s;
-  for (size_t i = 0; i < max && p[i]; ++i) s += (p[i] >= 32 && p[i] < 127) ? p[i] : '?';
+  for (size_t i = 0; i < max && hle::host::readable_addr(addr + i, 1) && p[i]; ++i)
+    s += (p[i] >= 32 && p[i] < 127) ? p[i] : '?';
   return s;
 }
 

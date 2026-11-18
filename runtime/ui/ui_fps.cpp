@@ -11,9 +11,8 @@
 // Cost when Off: one relaxed atomic load per present (fps_overlay_tick returns at once; the GPU timestamps stay off).
 // CPU and GPU ms come from the SNAP_PERF timing source (runtime/nvn/nvn_perf.cpp): GPU busy = timestamp pairs around every command
 // buffer, collected one present late; CPU = the presenting thread's CPU time per frame. They are switched on only in Detailed mode.
-#include <windows.h>
-
 #include <algorithm>
+#include <chrono>
 #include <atomic>
 #include <cfloat>
 #include <cmath>
@@ -44,7 +43,7 @@ std::atomic<int> g_corner{-1};   // 0 tl, 1 tr, 2 bl, 3 br
 constexpr int kRing = 1024;
 struct Stats {
   std::mutex mu;
-  LARGE_INTEGER freq{}, last{};
+  uint64_t last_ns = 0;
   float dt[kRing] = {};         // frame times, ms
   double at[kRing] = {};        // when each was taken, s
   int head = 0, n = 0;
@@ -74,7 +73,10 @@ void read_initial() {
   if (g_mode.compare_exchange_strong(x, m) && m == 2) snap_perf_overlay_timing(1);
 }
 
-double secs(LARGE_INTEGER t) { return (double)t.QuadPart / (double)S.freq.QuadPart; }
+uint64_t steady_ns() {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+double secs(uint64_t ns) { return (double)ns / 1e9; }
 }  // namespace
 
 namespace snap::ui {
@@ -91,7 +93,7 @@ void fps_overlay_set(const std::string& v) {
   const int old = g_mode.exchange(m);
   if (old != m) {
     snap_perf_overlay_timing(m == 2);
-    { std::lock_guard<std::mutex> lk(S.mu); S.n = 0; S.last.QuadPart = 0; S.gpu = S.cpu = -1; S.fps = 0; }
+    { std::lock_guard<std::mutex> lk(S.mu); S.n = 0; S.last_ns = 0; S.gpu = S.cpu = -1; S.fps = 0; }
     hle::log("ui: performance overlay %s", m == 1 ? "fps" : m == 2 ? "detailed" : "off");
   }
 }
@@ -120,15 +122,14 @@ bool fps_overlay_tick() {
   if (g_mode.load(std::memory_order_relaxed) == 0) return false;
   const int mode = fps_overlay_mode();
   if (mode == 0) return false;
-  LARGE_INTEGER t; QueryPerformanceCounter(&t);
+  const uint64_t t = steady_ns();
   std::lock_guard<std::mutex> lk(S.mu);
-  if (!S.freq.QuadPart) QueryPerformanceFrequency(&S.freq);
   const double now = secs(t);
-  if (S.last.QuadPart) {
-    const float d = (float)((now - secs(S.last)) * 1000.0);
+  if (S.last_ns) {
+    const float d = (float)((now - secs(S.last_ns)) * 1000.0);
     S.dt[S.head] = d; S.at[S.head] = now; S.head = (S.head + 1) % kRing; S.n = std::min(S.n + 1, kRing);
   }
-  S.last = t;
+  S.last_ns = t;
   if (now >= S.next_avg && S.n > 0) {   // the shown numbers refresh twice a second
     S.next_avg = now + 0.5;
     double sum = 0; int c = 0;
@@ -175,14 +176,15 @@ void draw_safe_banner(ImVec2 size) {
 // a minute or more while the shader cache fills and the files load). SNAP_LAUNCHER_STARTING=1 (set by the launcher) turns the note on; the NVN
 // present path reports the first picture through snap_ui_first_picture(). Gives up by itself after five minutes.
 static std::atomic<int> g_start_note{-1};   // -1: not read yet (the launcher sets the variable after static initialisation); 0 off; 1 on
-static ULONGLONG g_start_t0 = 0;
+static uint64_t g_start_t0_ns = 0;
 
 bool start_note_on() {
   int on = g_start_note.load(std::memory_order_relaxed);
   if (on < 0) { const char* e = std::getenv("SNAP_LAUNCHER_STARTING"); on = e && e[0] == '1'; g_start_note.store(on); }
   if (!on) return false;
-  if (!g_start_t0) g_start_t0 = GetTickCount64();
-  if (GetTickCount64() - g_start_t0 > 300000ull) { g_start_note.store(0); return false; }
+  const uint64_t now = steady_ns();
+  if (!g_start_t0_ns) g_start_t0_ns = now;
+  if (now - g_start_t0_ns > 300000000000ull) { g_start_note.store(0); return false; }
   return true;
 }
 
@@ -211,7 +213,7 @@ void draw_fps_overlay(ImVec2 size) {
   {
     std::lock_guard<std::mutex> lk(S.mu);
     fps = S.fps; avg = S.avg_ms; low1 = S.low1; gpu = S.gpu; cpu = S.cpu;
-    now = S.last.QuadPart ? secs(S.last) : 0;
+    now = S.last_ns ? secs(S.last_ns) : 0;
     for (int i = S.n - 1; i >= 0; i--) {   // oldest first, the last 2.5 s
       const int k = (S.head - 1 - i + kRing) % kRing;
       if (now - S.at[k] <= 2.5) graph[gn++] = S.dt[k];
