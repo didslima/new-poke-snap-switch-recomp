@@ -77,6 +77,35 @@ static void run_fatal_child(int sig) {
     CHECK(err_out.find("rip=") != std::string::npos);
 }
 
+// True when `sig` is ignored in this environment (nohup, some CI); the installer keeps SIG_IGN for the asynchronous signals, so they are untestable.
+static bool async_ignored(int sig) {
+    struct sigaction sa{};
+    if (sigaction(sig, nullptr, &sa) != 0) return true;
+    return !(sa.sa_flags & SA_SIGINFO) && sa.sa_handler == SIG_IGN;
+}
+
+// Runs a child that installs the handlers, delivers `sigs` to itself in order, then reports through its exit status:
+//   exits with the handler's own _exit(128 + sig) when the second request forced it out,
+//   97 when it survived and shutdown_requested() was false after the first signal (handler did not record it),
+//   0 when it survived all signals with the request recorded.
+static int run_signal_child(const int *sigs, int n) {
+    std::fflush(nullptr);
+    pid_t pid = fork();
+    CHECK(pid >= 0);
+    if (pid == 0) {
+        if (!snap_linux::install_signal_handlers(true)) _exit(99);
+        for (int i = 0; i < n; ++i) {
+            raise(sigs[i]);
+            if (!snap_linux::shutdown_requested()) _exit(97);
+        }
+        _exit(0);
+    }
+    int status = 0;
+    CHECK(waitpid(pid, &status, 0) == pid);
+    CHECK(WIFEXITED(status));
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 int main() {
     const int kAllSigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGINT, SIGTERM, SIGHUP};
     struct sigaction orig_sa[7]{};
@@ -159,6 +188,40 @@ int main() {
         }
         snap_linux::clear_shutdown_request();
         snap_linux::uninstall_signal_handlers();
+    }
+
+    // 4b. check_present_exit (the present loop's stop test): nothing pending keeps running, a window close exits 0, and a pending signal exits
+    //     128 + signal and wins over a window close.
+    {
+        snap_linux::clear_shutdown_request();
+        int code = -1;
+        CHECK(!snap_linux::check_present_exit(false, &code));
+        CHECK(!snap_linux::check_present_exit(false, nullptr));
+        CHECK(snap_linux::check_present_exit(true, &code) && code == 0);
+        CHECK(snap_linux::check_present_exit(true, nullptr));
+        if (!async_ignored(SIGTERM)) {
+            CHECK(snap_linux::install_signal_handlers(true));
+            CHECK(raise(SIGTERM) == 0);
+            code = -1;
+            CHECK(snap_linux::check_present_exit(false, &code) && code == 128 + SIGTERM);
+            code = -1;
+            CHECK(snap_linux::check_present_exit(true, &code) && code == 128 + SIGTERM);
+            snap_linux::clear_shutdown_request();
+            CHECK(!snap_linux::check_present_exit(false, &code));
+            snap_linux::uninstall_signal_handlers();
+        }
+    }
+
+    // 4c. First request only records; a second one before it is honored leaves at once with 128 + signal (nobody is polling).
+    if (!async_ignored(SIGTERM) && !async_ignored(SIGINT) && !async_ignored(SIGHUP)) {
+        const int one[] = {SIGTERM};
+        CHECK(run_signal_child(one, 1) == 0);
+        const int twice[] = {SIGTERM, SIGTERM};
+        CHECK(run_signal_child(twice, 2) == 128 + SIGTERM);
+        const int mixed[] = {SIGINT, SIGTERM};
+        CHECK(run_signal_child(mixed, 2) == 128 + SIGTERM);
+        const int hup[] = {SIGHUP, SIGHUP};
+        CHECK(run_signal_child(hup, 2) == 128 + SIGHUP);
     }
 
     // 5. Synchronous fatal signals in isolated child subprocesses.

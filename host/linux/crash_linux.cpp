@@ -156,9 +156,11 @@ void sync_signal_handler(int sig, siginfo_t *info, void *uctx) {
 }
 
 void async_signal_handler(int sig) {
-    if (g_shutdown_sig == 0) {
-        g_shutdown_sig = sig;
+    if (g_shutdown_sig != 0) {
+        // Second request while the first is still unanswered: nobody is polling shutdown_requested(). Only async-signal-safe calls here.
+        _exit(128 + sig);
     }
+    g_shutdown_sig = sig;
 }
 
 void rollback_partial(int installed_count) {
@@ -258,5 +260,18 @@ bool shutdown_requested() { return g_shutdown_sig != 0; }
 int shutdown_signal() { return (int)g_shutdown_sig; }
 
 void clear_shutdown_request() { g_shutdown_sig = 0; }
+
+bool check_present_exit(bool quit_requested, int *out_exit_code) {
+    const int sig = (int)g_shutdown_sig;
+    if (sig != 0) {
+        if (out_exit_code) *out_exit_code = 128 + sig;
+        return true;
+    }
+    if (quit_requested) {
+        if (out_exit_code) *out_exit_code = 0;
+        return true;
+    }
+    return false;
+}
 
 }  // namespace snap_linux

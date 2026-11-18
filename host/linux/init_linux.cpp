@@ -3,6 +3,7 @@
 #include "init_linux.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -46,6 +47,23 @@ void apply_ultrawide_from_window(const HostWindow &win) {
     nvnHostSetUltrawide(HostWindow::compute_ultrawide_factor(win.pixel_width(), win.pixel_height()));
 }
 
+// The factor is applied once, before the guest creates its render targets: nvn_wide.cpp sizes every 16:9 target from it at creation, and the
+// Windows host sets it once in boot.cpp. The pump runs from the present hook, after those targets exist, so a later resize or monitor change
+// must not rewrite it: existing targets keep the factor they were made with, and the replay threads read it without a lock. The swapchain still
+// follows the window (nvnHostNotifyWindowResize); the 3D view keeps its aspect until the next start. Logged once per distinct value.
+void note_ultrawide_aspect_change(const HostWindow &win) {
+    if (ultrawide_disabled_by_env() || !win.is_open()) return;
+    const float want = HostWindow::compute_ultrawide_factor(win.pixel_width(), win.pixel_height());
+    const float have = nvnHostGetUltrawide();
+    static float last_noted = 0.0f;
+    if (std::fabs(want - have) > 0.01f && std::fabs(want - last_noted) > 0.01f) {
+        last_noted = want;
+        std::fprintf(stderr,
+                     "init_linux: window aspect now needs ultrawide factor %.3f, render targets were created with %.3f; keeping %.3f until the next start\n",
+                     want, have, have);
+    }
+}
+
 void vi_get_native_window_host(Cpu *c) {
     if (c && c->x[0]) {
         *reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(c->x[0])) =
@@ -62,11 +80,20 @@ void hook_present(void *, int slot, int w, int h) {
                       static_cast<unsigned long long>(n), slot, w, h,
                       static_cast<unsigned long long>(g_submits.load(std::memory_order_relaxed)));
     }
-    if (ev.quit_requested) {
+    int exit_code = 0;
+    if (check_present_exit(ev.quit_requested, &exit_code)) {
+        if (shutdown_requested()) {
+            std::fprintf(stderr, "init_linux: exiting present loop on shutdown signal %d\n", shutdown_signal());
+        }
+        // Why _Exit and not a normal return: this runs on a guest thread, and the guest's own threads (main, workers, audio) cannot be stopped
+        // cooperatively, so there is nothing to join and a normal exit() would run static destructors under live guest threads (undefined
+        // behavior). What can be done safely first: let a save commit in progress finish (the same drain the Windows host does), and flush stdio,
+        // because _Exit does not. The SDL window is not destroyed here on purpose: this is not the thread that created it, other threads may be
+        // presenting to its surface right now, and the compositor drops it when the process ends.
         snap_audio_log_checks();
         snap_fs_drain_for_exit(5000);
-        g_host_win.destroy();
-        std::_Exit(0);
+        std::fflush(nullptr);
+        std::_Exit(exit_code);
     }
 }
 
@@ -278,7 +305,7 @@ WindowEvents pump_host_window_events() {
     if (!g_host_win.is_open()) return {};
     const WindowEvents ev = g_host_win.poll_events();
     if (ev.resized || ev.display_changed) {
-        apply_ultrawide_from_window(g_host_win);
+        note_ultrawide_aspect_change(g_host_win);
         nvnHostNotifyWindowResize(g_host_win.native_handle());
     }
     return ev;

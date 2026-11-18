@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,8 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#include "linux/crash_linux.h"
 
 #include "hle/guest_tls.h"
 #include "linux/init_linux.h"
@@ -220,8 +223,16 @@ int main() {
 
         const std::string main_p = base + "/main.elf";
         const std::string sdk_p = base + "/sdk.elf";
-        CHECK(write_test_elf(main_p, false));
-        CHECK(write_test_elf(sdk_p, true));
+        const bool elfs_written = write_test_elf(main_p, false) && write_test_elf(sdk_p, true);
+        CHECK(elfs_written);
+        if (!elfs_written) {
+            // Everything below needs these files. Without them (usually a full or read-only /tmp) the run used to continue into a crash.
+            std::fprintf(stderr, "init_linux_test: cannot write the synthetic ELFs under %s (is the filesystem full or read-only?); aborting this test\n", dir);
+            std::error_code rm_ec;
+            std::filesystem::remove_all(base, rm_ec);
+            std::printf("init_linux_test: %d checks, %d failures\n", g_checks.load(), g_fail.load());
+            return 1;
+        }
 
         snap_linux::BootOpts opts;
         opts.main_elf = main_p;
@@ -325,6 +336,23 @@ int main() {
 
         snap_linux::shutdown_guest_runtime();
         CHECK(snap_linux::host_window() == nullptr);
+
+        // Verify present loop shutdown checks respect both window-close and async SIGTERM.
+        {
+            snap_linux::clear_shutdown_request();
+            int exit_code = -1;
+            CHECK(!snap_linux::check_present_exit(false, &exit_code));
+            CHECK(snap_linux::check_present_exit(true, &exit_code) && exit_code == 0);
+
+            CHECK(snap_linux::install_signal_handlers(false));
+            std::raise(SIGTERM);
+            CHECK(snap_linux::shutdown_requested());
+            CHECK(snap_linux::shutdown_signal() == SIGTERM);
+            CHECK(snap_linux::check_present_exit(false, &exit_code));
+            CHECK(exit_code == 128 + SIGTERM);
+            snap_linux::clear_shutdown_request();
+            snap_linux::uninstall_signal_handlers();
+        }
 
         std::error_code ec;
         std::filesystem::remove_all(base, ec);

@@ -17,7 +17,9 @@
 #include "cpu.h"
 #include "loader.h"
 
-extern "C" float nvnHostGetUltrawide(void);   // runtime/nvn/nvn_wide.cpp
+// The real ultrawide factor lives in runtime/nvn/nvn_wide.cpp. Targets that link this stub without the NVN renderer (hooks, audio runtime, ...)
+// get 1.0 = no widening. The definition is weak on purpose: where the renderer is linked its strong definition wins, so this never overrides it.
+extern "C" __attribute__((weak)) float nvnHostGetUltrawide(void) { return 1.0f; }
 
 namespace {
 
@@ -128,8 +130,9 @@ void rt_gm_film_c(Cpu *) {}
 void rt_gm_skip_wait(Cpu *) {}
 void rt_gm_route_ui_event(Cpu *) {}
 void rt_gm_route_ui_setstate(Cpu *) {}
-void rt_gm_ui_enter(Cpu *) {}
-void rt_gm_ui_event(Cpu *) {}
+// Branch hooks (recomp/snap_gen.py UI_PACE_BRANCH): x[16] != 0 falls through to normal execution.
+void rt_gm_ui_enter(Cpu *c) { if (c) c->x[16] = 1; }
+void rt_gm_ui_event(Cpu *c) { if (c) c->x[16] = 1; }
 void rt_gm_ui_pad(Cpu *) {}
 void rt_gm_ui_pointer(Cpu *) {}
 void rt_ui_opt_event(Cpu *) {}

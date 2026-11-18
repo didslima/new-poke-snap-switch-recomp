@@ -35,7 +35,5 @@ SNAP_TEST_WEAK void snap_fn_observe(uint64_t, uint64_t, uint64_t) {}
 SNAP_TEST_WEAK void snap_skips_observe(uint64_t, uint64_t, uint64_t) {}
 SNAP_TEST_WEAK void snap_neo_observe(uint64_t, uint64_t, uint64_t) {}
 SNAP_TEST_WEAK void snap_highfps_observe(uint64_t, uint64_t, uint64_t) {}
-// host/linux/hooks_mods_stub.cpp reads the ultrawide factor from runtime/nvn/nvn_wide.cpp; no renderer is linked here, so 1.0 = off.
-SNAP_TEST_WEAK float nvnHostGetUltrawide(void) { return 1.0f; }
 #undef SNAP_TEST_WEAK
 }

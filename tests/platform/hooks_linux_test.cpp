@@ -13,6 +13,8 @@
 extern "C" {
 void rt_hook_setjmp(Cpu *c);
 void rt_hook_longjmp(Cpu *c);
+void rt_gm_ui_enter(Cpu *c);
+void rt_gm_ui_event(Cpu *c);
 }
 void snap_memev(char k, uint64_t a, uint64_t sz, uint64_t lr);
 void snap_memlog_find(uint64_t addr);
@@ -89,6 +91,21 @@ int main() {
     }
     for (auto &th : ths) th.join();
     snap_memlog_find(0x7000000000ull);
+
+    // 6. UI branch hooks must set x[16] = 1 to fall through (ABI3 UI_PACE_BRANCH contract).
+    {
+        Cpu uic{};
+        uic.x[16] = 0;
+        rt_gm_ui_enter(&uic);
+        CHECK(uic.x[16] == 1);
+
+        uic.x[16] = 0;
+        rt_gm_ui_event(&uic);
+        CHECK(uic.x[16] == 1);
+
+        rt_gm_ui_enter(nullptr);
+        rt_gm_ui_event(nullptr);
+    }
 
     std::printf("hooks_linux_test: %d checks, %d failures\n", g_checks.load(), g_fail.load());
     return g_fail.load() ? 1 : 0;

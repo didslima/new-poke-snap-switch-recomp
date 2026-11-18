@@ -2,7 +2,8 @@
 #
 # The Windows game is built by host/build_snap.py; nothing here replaces it. This project exists so that the sources that are already
 # portable can be compiled on Linux, and so that the shared / Windows / Linux split of the sources is explicit and checked.
-# The game itself does not build on Linux yet: the stages after this one add the OS layer, the runner and the Vulkan backend.
+# On Linux it also builds the host runtime (OS layer, runner, HLE, audio, NVN to Vulkan, SDL3 window) and its tests. Running the game on it is
+# experimental and opt-in; docs/linux-port.md ("Current state") says what was and was not checked.
 cmake_minimum_required(VERSION 3.20)
 project(snap_recomp LANGUAGES C CXX)
 
@@ -225,7 +226,8 @@ if(UNIX AND NOT APPLE)
     snap_os_test(snap_boot_linux ${SNAP_LINUX_RUNNER_SOURCES}
                  host/linux/init_linux.cpp host/linux/hooks_mods_stub.cpp host/linux/window_sdl3.cpp
                  host/loader.cpp host/hooks.cpp host/guest_tls_hooks.cpp host/mods/drpfast.cpp
-                 host/abi_audio.cpp generated/unimplemented.cpp generated/boot/nvn_bridge.cpp)
+                 host/abi_audio.cpp runtime/audio/linux/audio_sdl3.cpp runtime/hle/linux/input_backend_sdl3.cpp
+                 generated/unimplemented.cpp generated/boot/nvn_bridge.cpp)
     target_compile_definitions(snap_boot_linux PRIVATE SNAP_LINUX_HAS_AOT=1)
     target_compile_options(snap_boot_linux PRIVATE -w)
     target_link_options(snap_boot_linux PRIVATE -Wl,-u,snap_runtime_abi_3)

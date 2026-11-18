@@ -27,9 +27,16 @@ void uninstall_signal_handlers();
 bool signal_handlers_installed();
 
 // Asynchronous shutdown observation (safe to poll from normal runner code).
+// The first SIGINT/SIGTERM/SIGHUP only records the request; the code that polls decides when it is safe to stop. A second one while the
+// first is still pending means nobody is polling (the guest stopped presenting, or is stuck), so the handler leaves at once with
+// _exit(128 + signal), which is async-signal-safe.
 bool shutdown_requested();
 int shutdown_signal();
 void clear_shutdown_request();
+
+// For the present loop. True when the process should stop now: a pending shutdown signal (exit code 128 + signal) or a window close
+// request (exit code 0). The signal wins when both are set. out_exit_code may be null.
+bool check_present_exit(bool quit_requested, int *out_exit_code = nullptr);
 
 // Test-only hook: injects a simulated sigaction failure at step `fail_at_step` (>= 0) to verify rollback.
 bool install_signal_handlers_for_test(bool install_altstack, int fail_at_step);
