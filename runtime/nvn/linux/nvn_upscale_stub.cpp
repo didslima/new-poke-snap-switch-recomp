@@ -46,3 +46,9 @@ void UpscaleOnDraw(ReplayCtx& /*cx*/, const uint8_t* const* /*vsUbo*/, const uin
 void UpscaleOnPresent() {}
 
 }  // namespace nvn
+
+namespace snap_upscale {
+const char* Name() { return "off"; }
+}  // namespace snap_upscale
+
+extern "C" void snap_upscale_state_loaded() {}

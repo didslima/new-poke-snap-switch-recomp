@@ -465,9 +465,20 @@ void pace_vblank_close(void* /*handle*/) {}
   std::_Exit(code);
 }
 
+#ifdef HLE_WITH_SDL3
+static bool ensure_sdl_vulkan_loaded() {
+  static std::once_flag loaded;
+  static bool ok = false;
+  std::call_once(loaded, [] {
+    ok = SDL_Vulkan_LoadLibrary(nullptr);
+  });
+  return ok;
+}
+#endif
+
 void append_vulkan_surface_instance_extensions(std::vector<const char*>& out) {
 #ifdef HLE_WITH_SDL3
-  if (SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+  if (SDL_WasInit(SDL_INIT_VIDEO) != 0 && ensure_sdl_vulkan_loaded()) {
     Uint32 count = 0;
     if (const char* const* exts = SDL_Vulkan_GetInstanceExtensions(&count); exts && count > 0) {
       for (Uint32 i = 0; i < count; ++i) {
@@ -484,6 +495,7 @@ bool physical_device_presentation_support(VkInstance instance, VkPhysicalDevice 
   if (phys == VK_NULL_HANDLE) return false;
 #ifdef HLE_WITH_SDL3
   if (instance != VK_NULL_HANDLE && SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+    if (!ensure_sdl_vulkan_loaded()) return false;
     return SDL_Vulkan_GetPresentationSupport(instance, phys, queue_family);
   }
 #else
@@ -509,7 +521,7 @@ bool create_vulkan_surface(VkInstance instance,
   *out_surface = VK_NULL_HANDLE;
   if (instance == VK_NULL_HANDLE || !native_window) return false;
 #ifdef HLE_WITH_SDL3
-  if (SDL_WasInit(SDL_INIT_VIDEO) == 0) return false;
+  if (SDL_WasInit(SDL_INIT_VIDEO) == 0 || !ensure_sdl_vulkan_loaded()) return false;
   return SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(native_window), instance, allocator, out_surface);
 #else
   (void)allocator;

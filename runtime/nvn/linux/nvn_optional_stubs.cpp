@@ -100,3 +100,11 @@ bool Record(const Frame& /*f*/) { return false; }
 void DumpPQ(const char* /*base*/, const void* /*px*/, uint32_t /*w*/, uint32_t /*h*/) {}
 
 }  // namespace snap_hdr
+
+extern "C" {
+void snap_framegen_state_loaded() {}
+__attribute__((weak)) int snap_mods_ab_live = 0;
+__attribute__((weak)) int snap_mods_ab_original = 0;
+__attribute__((weak)) double snap_mods_ab_period = 0.0;
+__attribute__((weak)) void snap_shiny_fx_trigger(int) {}
+}

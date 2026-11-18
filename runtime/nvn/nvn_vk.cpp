@@ -1680,7 +1680,15 @@ bool WindowImpl::Recreate() {
   ci.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | (caps.supportedUsageFlags & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));   // color attachment: overlay
   ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.preTransform = caps.currentTransform;
-  ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+  for (VkCompositeAlphaFlagBitsKHR cand : {
+           VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+           VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+           VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+           VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR}) {
+    if (caps.supportedCompositeAlpha & cand) { alpha = cand; break; }
+  }
+  ci.compositeAlpha = alpha;
   ci.presentMode = mode;
   snap_pace::SetImmediate(mode == VK_PRESENT_MODE_IMMEDIATE_KHR);   // [pace] tearing mode: release right after the vblank
   ci.clipped = VK_TRUE;
