@@ -1,6 +1,97 @@
 # Cross-platform build and the Linux port
 
-Status: **stage 3 of the Linux port: part A (System V context switch) done and tested; part B (OS layer integration) blocked, see "Stage 3".** The game does not build or run on Linux yet. This page records what exists, how to extend it, what was tested and what is still missing. Statements are facts that were checked unless a line says otherwise.
+Status (2026-11-18): **the Linux host builds, and its unit and integration tests pass; running the game end to end is experimental and not covered by any automated test.** This page records what exists, how to build and test it, what is stubbed, and what was and was not checked. Statements are facts that were checked unless a line says otherwise.
+
+The sections from "Goal" to "Stage 4c" are the records written when each stage landed. Their counts ("159 files", "26 shared") and their "not yet" sentences are **not** kept up to date; this section and "Known limits" are. `cmake/source_manifest.txt` is the current source classification (94 `shared`, 20 `linux`, 66 `windows`, 5 `offline` at the time of writing).
+
+## Current state
+
+### What was checked, and where
+
+Checked on 2026-11-18 in the `snap-recomp-linux` distrobox (Fedora 43 container image, clang 21.1.8, CMake 3.31, Ninja 1.13, SDL 3.4.20, kernel 7.3.3), configured with `-G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++`:
+
+- `ninja` (all targets) builds with no failure, and **all 45 ctest tests pass**.
+- The `snap_boot_linux` runner also builds and links in its AOT configuration (`-DSNAP_AOT_MAIN_LIB=... -DSNAP_AOT_SDK_LIB=...` pointing at locally built `libsnap_main.a` / `libsnap_sdk.a`), and `snap_boot_linux --help` runs. That binary was **not** used to execute guest code.
+- **What the passing tests do not show.** `nvn_renderer_linux`, `ui_overlay_linux` and `window_sdl3_linux` have explicit skip branches for a machine with no Vulkan 1.3 GPU or no real SDL video. In the container above they took those branches (the renderer test reports "no Vulkan 1.3 ICD/GPU available; DeviceInitialize returned 0 cleanly"), so **no test run here rendered a frame**. The audio tests use SDL's dummy audio driver: no real audio device was opened.
+- **Not built or run:** the Windows build (`host/build_snap.py`, `tests/os/build.bat`, `tests/hle/run_tests.ps1`). Windows-side edits made by the Linux port were reviewed by reading only. This holds for every Windows file the port touched.
+
+### Components
+
+| Component | State | Where | Covered by (ctest) |
+|---|---|---|---|
+| OS layer: scheduler, threads, fibers, virtual memory (POSIX primitives, System V context switch) | ported | `runtime/os/`, `runtime/os/linux/` | `ctx_sysv*`, `os_host*`, `os_scheduler*`, `os_state_off`, `os_posix_header` |
+| Guest TLS and `.tdata` handling | ported | `runtime/os/guest_tls_block.*`, `host/guest_tls_hooks.*`, `runtime/hle/guest_tls.h` | `guest_tls*`, `tls_host_fibers*` (synthetic images only) |
+| Loader integration, ELF and AOT archive preflight | ported | `host/loader.cpp`, `host/linux/preflight_linux.*`, `host/linux/init_linux.*` | `preflight_linux`, `init_linux`, `hooks_linux` (synthetic ELFs only) |
+| AOT library build (`libsnap_main.a`, `libsnap_sdk.a`) | ported | `recomp/snap_build_linux.py` | `aot_build_linux` (synthetic sources) |
+| Runner, signal handling, crash diagnostics | ported | `host/linux/runner_linux.*`, `host/linux/crash_linux.*` | `boot_linux*`, `crash_linux` |
+| HLE: filesystem, profiles, save lock, config | ported | `runtime/hle/`, `runtime/hle/linux/` | `hle_core_linux`, `fs_linux`, `profiles_linux` |
+| Input: keyboard, mouse, SDL3 gamepads | ported | `runtime/hle/linux/input_backend_sdl3.cpp` | `hid_linux`, `sdl3_backend_linux` |
+| Audio (SDL3 backend) | ported | `runtime/audio/linux/` | `audio_core_linux`, `audio_sdl3_linux`, `audio_runtime_linux` (dummy driver) |
+| NVN to Vulkan renderer | builds; **not exercised on a GPU in the test run** | `runtime/nvn/`, `runtime/nvn/linux/` | `nvn_os_host_linux`, `nvn_renderer_linux` (skip branch), `window_sdl3_linux` (skip branch) |
+| SDL3 window, event loop, swapchain size | ported | `host/linux/window_sdl3.*` | `window_sdl3_linux` (skip branch), `init_linux` |
+| ImGui overlay (ImGui 1.93.0, Vulkan + SDL3 backends) | builds; not exercised on a GPU in the test run | `runtime/ui/`, `runtime/ui/linux/` | `ui_overlay_linux` (skip branch) |
+| ShaderHarness (shader translation) run as a child process | implemented; not run here (needs the separately built .NET harness) | `runtime/nvn/linux/nvn_os_host_posix.cpp` `run_shader_harness` | `nvn_os_host_linux` (child-process cases with stand-in scripts, not the real harness) |
+| Ultrawide 32:9 | experimental, see below | `runtime/nvn/nvn_wide.cpp`, `host/linux/hooks_mods_stub.cpp`, `host/linux/window_sdl3.cpp` | none automated |
+
+### Stubbed or not ported (explicit, not silent)
+
+- **Not supported on Linux, reported as such:** temporal upscalers (DLSS, FSR, XeSS), frame generation, HDR10/scRGB output, and the Windows-imaging features (screenshot writer, HD photo capture, free-camera clean shot, button-icon replacement) (`runtime/nvn/linux/nvn_optional_stubs.cpp`, `nvn_upscale_stub.cpp`).
+- **Overlay tabs:** the saves tab, the problem-report export, window-mode options and the scripted UI test are placeholders (`runtime/ui/linux/ui_linux_stubs.cpp`).
+- **Mods:** the photo export, shiny, NEO-ONE/film and skip mods are not installed (`host/linux/hooks_mods_stub.cpp`). Of the game-inline hooks (`rt_gm_*`) all are no-ops except `rt_gm_ui_enter` and `rt_gm_ui_event`, which must set `x[16] = 1`: generated code reads that register as the branch decision (`0` = skip), so a no-op would branch at random. The cheat tick is a weak no-op, so cheats do not run.
+- **Save states** are off (`os_state_off.cpp`): requests are refused and say so.
+- **Write tracking** does not exist (`write_watch_supported()` is false): the NVN layer copies whole ranges, which is correct and slower. `NVN_WB_WATCH` is unavailable.
+- **Weak link seams:** `runtime/hle/linux/hle_host_posix.cpp` and the test stubs define weak defaults (for example `snap_pace_vsync_wait`, `snap_state_*`, a null input backend, `snap_ui_pick_profile`). Where the real implementation is linked it wins; where it is not, the weak default is used **without a message**. `show_error_dialog` does nothing on Linux, so such errors reach stderr only.
+- **Runner commands:** only `validate`, `init` and `run` do anything. `info`, `shared`, `eh`, `lua`, `bench` and `all` are accepted but report "not wired yet".
+
+### Building and testing
+
+Requirements: clang (the configure step refuses other compilers), CMake, Ninja, Python 3, the Vulkan headers, and SDL3 development files. SDL3 is optional (`SNAP_ENABLE_SDL3`, default on): without it the SDL-dependent targets are not built. Vendored: ImGui under `runtime/ui/third_party/imgui`.
+
+```
+cmake -S . -B build/linux -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build/linux
+ctest --test-dir build/linux --output-on-failure
+```
+
+Notes from the runs above:
+
+- Several tests create their files under a **fixed `/tmp`** and ignore `TMPDIR`. If `/tmp` is full or read-only, `init_linux` cannot write its synthetic ELFs; it now says so and stops, where it used to continue into a crash. That failure was reproduced on purpose with a 4 KiB `/tmp` and is what an earlier "known failure" of this test turned out to be; it has nothing to do with SDL's dummy driver.
+- `source_classification` calls `git ls-files`, so it needs a git checkout (it fails in an exported tree).
+
+### Running the guest (experimental)
+
+Needs files that this repository never contains and that you provide from your own copy of the game: the `main` and `sdk` modules as ELF (`--main`, `--sdk`), and the two AOT archives built from your own generated sources (`--main-lib`, `--sdk-lib`), built for runtime ABI 3 (`SNAP_RUNTIME_ABI` in `runtime/cpu.h`; archives from another ABI do not link). `recomp/snap_build_linux.py` builds the archives from `generated/v262144/{main,sdk}`; producing that directory is not covered by the Linux tests.
+
+- `snap_boot_linux validate ...` checks the artifacts without loading them for execution; `init` maps the modules and stops before any guest instruction.
+- `snap_boot_linux run ...` prepares the pipeline and stops. **Guest execution is off unless `--allow-guest-exec` is given** (add `--stop-after-init` to stop after the initializers). Nothing in the automated suite executes the game, and this page makes no statement about whether it plays.
+- A window is created before the guest starts. `--no-window` or `SNAP_HEADLESS` skips it. `SNAP_WINDOW_W`, `SNAP_WINDOW_H` (at least 64), `SNAP_FULLSCREEN=1`, `SNAP_DISPLAY=<1-based index>`, `SNAP_ULTRAWIDE=off` are read by the window code. `NVN_SHADER_HARNESS` and `SNAP_HARNESS_TIMEOUT_MS` (default 600000) apply to the ShaderHarness.
+
+### Shutdown and signals
+
+`install_signal_handlers` (`host/linux/crash_linux.cpp`) handles `SIGSEGV`, `SIGBUS`, `SIGILL` and `SIGFPE` with an async-signal-safe report on an alternate stack, then re-raises. It refuses to install over a handler someone else already registered. `SIGINT`, `SIGTERM` and `SIGHUP` only record a request; the present loop (`hook_present` in `init_linux.cpp`) polls it every frame through `check_present_exit` and leaves with `128 + signal` (a window close leaves with `0`; a pending signal wins). A **second** such signal before the first is honored means nobody is polling (the guest stopped presenting) and the handler ends the process at once with `_exit(128 + signal)`.
+
+Why the present loop ends with `_Exit` and not a normal return: it runs on a guest thread, and the guest's own threads cannot be stopped cooperatively, so there is nothing to join and `exit()` would run static destructors under live guest threads. Before `_Exit` it waits for a save commit in progress (`snap_fs_drain_for_exit`) and flushes stdio. It does not destroy the SDL window: that is not the thread that created it and other threads may be presenting to it. Until the first present, and whenever the guest stops presenting, only the second signal ends the process. `crash_linux` tests the first-request and second-signal behavior in child processes; **the present-loop path itself runs only with guest code, which no test executes.**
+
+### Ultrawide 32:9 (experimental)
+
+What it does (code read and built; behavior reported by the author, see below):
+
+- The factor is `k = pixel_width / pixel_height / (16/9)`, used when above 1.01 and capped at 4.0 (`HostWindow::compute_ultrawide_factor`); 5120x1440 gives 2.0. `SNAP_ULTRAWIDE=off` (or `0`) disables it.
+- The swapchain takes the window's real pixel size (`window_pixel_size`, from `SDL_GetWindowSizeInPixels`) when the surface does not fix an extent, clamped to the surface limits. The SDL window is synchronized (`SDL_SyncWindow`) after creation and after a fullscreen change so the size is final before it is read.
+- The ride and lab camera's aspect is widened at its `tanf` call (main offset `0x296400`, build 2.0.1) only when it is exactly 16:9, so the vertical field of view is unchanged. The interface and saved photos stay 16:9. The photo Evaluation is given the 16:9 projection back (`snap_wide_eval_copy`; the same code as the Windows host). The photo-mode viewfinder mask keeps its 16:9 opening and grey side strips are drawn outside it (`WideDrawViewfinderSide`).
+- The factor is applied **once**, before the guest creates its render targets, as on Windows. Resizing the window or moving it to another monitor later does not change it (the swapchain follows, the 3D view keeps its aspect until the next start); a note is logged when the window would now want another factor.
+
+What was and was not checked: the author reports a manual check on one 5120x1440 display (swapchain size, widened camera, viewfinder mask). That is not an automated test and was **not reproduced** while writing this page. Photo scores were not compared with and without ultrawide on Linux.
+
+Known limitations: the course-selection / SKIP transition screen is still pillarboxed (reported by the author); other screens may need their own adjustments; the camera site and the viewfinder-mask shader key are specific to build 2.0.1; the widening logic is duplicated between `host/mods/lodanim.cpp` (Windows) and `host/linux/hooks_mods_stub.cpp` (Linux) and can drift.
+
+### Known issues and risks (not fixed)
+
+- SDL events are polled in `hook_present`, on the thread that presents, while SDL's video subsystem was initialized on the runner thread. SDL documents that event pumping belongs to the thread that initialized video. This was not investigated on a real display.
+- The signal handlers use an alternate stack only on the thread that installed them, so a stack overflow on another thread (a guest fiber, a worker) is not reported by the handler.
+- `-w` (all warnings off) is used on most Linux test and runner targets, as in the Windows build.
+- A weak default can hide a missing implementation (see above).
+- Duplicated ultrawide logic (above).
 
 ## Goal
 
@@ -319,7 +410,7 @@ Part A of stage 4 only: a platform-independent module and its unit tests. The lo
 |---|---|
 | Block of `0x10000` bytes, `tp = block + 0x8000` | `host/loader.cpp:412` and `:424`, `host/boot.cpp:672` and `:673` |
 | The imported ELFs have no `PT_TLS` | the program headers of a local `main.elf` (7 headers, none of type `PT_TLS`); the test checks this when `SNAP_MAIN_ELF` is set |
-| 8-byte image at `main + 0xccb900` (build 2.0.1), bytes `ff ff ff ff 95 23 73 00` | the same file: the 8 bytes follow 8 bytes of zero padding in a 16-byte `.data` section at `0xccb8f8`; read from the `PT_LOAD` that contains it |
+| 8-byte image at `main + 0xccb900` (build 2.0.1); its values are deliberately not recorded here | the same file: the 8 bytes follow 8 bytes of zero padding in a 16-byte `.data` section at `0xccb8f8`; read from the `PT_LOAD` that contains it |
 | Image goes to `tp + 0x10` (after the 16-byte TCB) | `hle::kTlsBlockOffset`, `guest_tls_init` |
 | The `TLR+0x1f0` (tp) and `TLR+0x1f8` (ThreadType) offsets are relative to the **Thread Local Region** (`c->tpidrro`), not to `tp` | `runtime/os/os_layout.h` (`TLR_TP`, `TLR_THREAD`), `os_kernel.cpp::host_entry` |
 
@@ -340,7 +431,7 @@ The block is allocated and released by the caller. The plan for stage 4b is the 
 
 **Capture timing is not decided here.** The upstream loader captures lazily, on the first thread, before any guest code runs, in a function-local static. `GuestTlsImage` is a plain value, so *when* and *where* the one capture happens (and who guards it) is left to the caller in stage 4b.
 
-**Tests** (ctest `guest_tls`, and `guest_tls_sanitized` when the compiler supports AddressSanitizer + UBSan; `tests/platform/guest_tls_test.cpp`, about 35,000 checks): the image is copied exactly, to the right offset, to several independent blocks, and the captured image stays intact when a block is damaged; images of 1, 2, 7, 8, 9, 16, 100, 4096 and the largest size that fits are copied byte for byte, and one byte more is refused (the real image ends in a zero byte, so a copy that is one byte short would not show with it alone); every byte outside the image is zero for blocks pre-filled with 0x00, 0x01, 0x5a, 0x80, 0xff and a per-byte ramp, and canary bytes around each block never change; three blocks changed independently stay independent, and a block made after the others were changed starts from the original image; the image is the bytes of capture time after the source is overwritten, and two captures share no storage; null pointers, empty images, one byte short, bad tp offsets, misalignment, overlap with the image and every overflowing capture range fail with the right status and leave the block, the guards and the output unchanged; with `SNAP_MAIN_ELF` set (a local file, read only, never committed) the constants are checked against the game's bytes.
+**Tests** (ctest `guest_tls`, and `guest_tls_sanitized` when the compiler supports AddressSanitizer + UBSan; `tests/platform/guest_tls_test.cpp`, about 35,000 checks): the image is copied exactly, to the right offset, to several independent blocks, and the captured image stays intact when a block is damaged; images of 1, 2, 7, 8, 9, 16, 100, 4096 and the largest size that fits are copied byte for byte, and one byte more is refused (a copy that is one byte short has to be caught as well, so the sizes are tested on their own; the tests use a synthetic image with the shape of the real one); every byte outside the image is zero for blocks pre-filled with 0x00, 0x01, 0x5a, 0x80, 0xff and a per-byte ramp, and canary bytes around each block never change; three blocks changed independently stay independent, and a block made after the others were changed starts from the original image; the image is the bytes of capture time after the source is overwritten, and two captures share no storage; null pointers, empty images, one byte short, bad tp offsets, misalignment, overlap with the image and every overflowing capture range fail with the right status and leave the block, the guards and the output unchanged; with `SNAP_MAIN_ELF` set (a local file, read only, never committed) the constants are checked against the real module, for its shape only (no `PT_TLS`, the slot word is `-1`); the expected bytes are not kept in the repository.
 
 **Do the tests detect a wrong module?** 16 mutations of the header were each run against the test built with the sanitizers, and each was detected: copy offset `+0x18`; copy size `n-1`; no zeroing; zeroing only from `tp`; zeroing 16 bytes past the block; all images sharing one storage; an image that re-reads its source; no block-size check; block-size check off by one; no tp-offset check; no alignment check; no overlap check; no capture range check; an overflowing capture range check; a failed capture that clobbers its output; a capture at the wrong module offset. Two of them (no overlap check, no capture range check) are detected by AddressSanitizer rather than by a check, and the first run of the copy-size mutation was *not* detected until the multi-size test above was added.
 
@@ -421,14 +512,14 @@ Evidence for the questions stage 4b left open. One behaviour change in productio
 
 Observed:
 
-- The game does not build on Linux. The 128-odd `windows` files still need later stages; there is no Linux runner and no Vulkan/SDL3 backend in this branch. What runs on Linux today is the OS layer (scheduler, threads, fibers, VAMM and heap) under its own test program, not the game.
+- The host builds and its tests pass on Linux (see "Current state"). The files still classified `windows` in `cmake/source_manifest.txt` are not compiled there. Whether the game runs end to end on Linux is **not established** by any test: guest execution is opt-in (`--allow-guest-exec`) and experimental. The renderer, the overlay and the window were built but not exercised on a GPU in the test run.
 - Save states do not exist on Linux (`os_state_off.cpp`): a request is refused and says so. The UI and the route code that call `snap_state_*` get honest answers.
-- Write tracking does not exist on Linux: guest reservations are plain and `runtime/nvn/nvn_vk.cpp` must copy whole ranges. `nvn_vk.cpp` does not know that yet (stage 7 has to ask `snap_os_write_watch_active()`).
+- Write tracking does not exist on Linux: guest reservations are plain and `runtime/nvn/nvn_vk.cpp` copies whole ranges. It asks `write_watch_supported()` and falls back to full copies when that is false (the existing fallback; slower, not incorrect). A kernel-assisted replacement (see the options above) is not implemented.
 - POSIX differences that are documented and not hidden: `yield` is `sched_yield`; thread CPU times come from `schedstat` (or `stat`, 10 ms ticks, where the kernel has no `schedstat`); the profiler's "mcycles" column is nanoseconds of CPU time on Linux; thread names are cut to 15 characters.
 - Virtual memory limits that Windows does not have: every commit/decommit that splits a mapping adds a kernel mapping, and a process may have `vm.max_map_count` of them (65530 by default). Heavy fragmentation of a reservation could reach it; the error is `ENOMEM`, which the VAMM treats as transient and retries for the configured time before failing. Under `vm.overcommit_memory=2` (strict accounting) `MAP_NORESERVE` is ignored and large reservations may be refused. Neither was exercised beyond the random-sequence test.
 - `os_scheduler` pinned to one CPU (`taskset -c 0`) is not a supported condition: no check failed, but the run did not finish in 240 s (`sched yield any` took 70 s instead of 80 ms; the stress and migration tests also took several seconds longer). The test spins and yields waiting for other threads, and `sched_yield` on one CPU hands the CPU over less readily than `SwitchToThread`. This is a hypothesis; it was not investigated, and it was not run on Windows for comparison. `os_host_test` passes on one CPU.
 - No Windows toolchain exists in this environment: nothing Windows was built or run. The Windows-side changes are listed under "Windows side".
-- The `linux_nvn_host*` tests (which lost focus under Wayland in the earlier port) do not exist in this branch yet; they belong to the Vulkan stage and must be kept with their coverage when they arrive. None of the stage 3 tests needs a window, a GPU or focus.
+- The renderer, overlay and window tests exist (`nvn_os_host_linux`, `nvn_renderer_linux`, `window_sdl3_linux`, `ui_overlay_linux`) but skip their GPU and display parts when no Vulkan 1.3 GPU or SDL video is present, as in the container used for the test run. A run on a machine with a GPU and a display has to be done to know what they cover. The earlier port's `linux_nvn_host*` tests, which lost focus under Wayland, are not part of this branch.
 
 Hypotheses (not checked):
 
@@ -440,6 +531,9 @@ Hypotheses (not checked):
 | Stage | Needs from this one |
 |---|---|
 | 3 OS layer (`os_ctx`, `os_state`) | Done in parts A and B. Left in `runtime/os`: `hostprof.cpp` and `sampler.cpp` (profilers, `windows`), `os_state.cpp` (Windows only; Linux has `os_state_off.cpp`) |
-| 4 TLS | 4a done (above). 4b: `host/loader.cpp` (`windows`) and the thread-start hook call the module; blocks from `host::mem_reserve`/`mem_commit`; capture timing; the TLS contract in "Stage 2" |
-| 5 Linux runner | A `linux` class for the new files |
-| 7 Vulkan backend | `runtime/nvn/*` (most are `windows`: `VK_USE_PLATFORM_WIN32_KHR` comes in through `nvn_internal.h`); `SyncPoolRange` must consult `snap_os_write_watch_active()` (full copies when 0); the uffd-wp evaluation, with measurements |
+| 4 TLS | Done (4a, 4b, 4c above) |
+| 5 Linux runner | Done: `host/linux/` (runner, init, crash and signal handling, preflight, window) |
+| 6 HLE, audio, input, UI | Done for the parts listed in "Current state"; the rest is stubbed explicitly |
+| 7 Vulkan backend | Ported and built (`runtime/nvn/linux/`); `nvn_vk.cpp` falls back to full copies without write tracking. Open: running it on a GPU, and the uffd-wp evaluation with measurements |
+
+(This table was written for the stages ahead and is kept with its rows updated; see "Current state" for what exists.)
