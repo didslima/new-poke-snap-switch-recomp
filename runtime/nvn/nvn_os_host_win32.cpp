@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <intrin.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 
 #include <atomic>
 #include <cstdio>
@@ -331,6 +333,177 @@ bool watch_writeback_page(void* addr, size_t size, const int* present_count_ptr)
   std::call_once(installed, [] { AddVectoredExceptionHandler(1, WbWatchHandler); });
   DWORD old = 0;
   return VirtualProtect(addr, size, PAGE_READWRITE | PAGE_GUARD, &old) != 0;
+}
+
+namespace {
+
+struct Win32ThreadTimer {
+  HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  ~Win32ThreadTimer() {
+    if (h) CloseHandle(h);
+  }
+};
+
+double win32_query_hz(const wchar_t* gdi_name) {
+  UINT32 np = 0, nm = 0;
+  if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) == ERROR_SUCCESS && np) {
+    std::vector<DISPLAYCONFIG_PATH_INFO> p(np);
+    std::vector<DISPLAYCONFIG_MODE_INFO> m(nm);
+    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, p.data(), &nm, m.data(), nullptr) == ERROR_SUCCESS) {
+      for (UINT32 i = 0; i < np; i++) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sn{};
+        sn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        sn.header.size = sizeof sn;
+        sn.header.adapterId = p[i].sourceInfo.adapterId;
+        sn.header.id = p[i].sourceInfo.id;
+        if (DisplayConfigGetDeviceInfo(&sn.header) != ERROR_SUCCESS || wcscmp(sn.viewGdiDeviceName, gdi_name)) continue;
+        const UINT32 mi = p[i].targetInfo.modeInfoIdx;
+        if (mi != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && mi < nm && m[mi].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET) {
+          const auto& v = m[mi].targetMode.targetVideoSignalInfo.vSyncFreq;
+          if (v.Denominator && v.Numerator) return static_cast<double>(v.Numerator) / v.Denominator;
+        }
+        const auto& r = p[i].targetInfo.refreshRate;
+        if (r.Denominator && r.Numerator) return static_cast<double>(r.Numerator) / r.Denominator;
+      }
+    }
+  }
+  DEVMODEW dm{};
+  dm.dmSize = sizeof dm;
+  if (EnumDisplaySettingsW(gdi_name, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) {
+    double f = dm.dmDisplayFrequency;
+    if (dm.dmDisplayFrequency % 60 == 59) f = (f + 1) * 1000.0 / 1001.0;
+    return f;
+  }
+  return 0.0;
+}
+
+struct KmtOpen {
+  WCHAR DeviceName[32];
+  UINT hAdapter;
+  LUID AdapterLuid;
+  UINT VidPnSourceId;
+};
+struct KmtWait {
+  UINT hAdapter;
+  UINT hDevice;
+  UINT VidPnSourceId;
+};
+struct KmtClose {
+  UINT hAdapter;
+};
+
+struct KmtApi {
+  HMODULE gdi = nullptr;
+  LONG(APIENTRY* open)(KmtOpen*) = nullptr;
+  LONG(APIENTRY* wait)(const KmtWait*) = nullptr;
+  LONG(APIENTRY* close)(const KmtClose*) = nullptr;
+  bool valid = false;
+};
+
+const KmtApi& kmt_api() {
+  static const KmtApi api = [] {
+    KmtApi a;
+    a.gdi = LoadLibraryW(L"gdi32.dll");
+    if (a.gdi) {
+      a.open = reinterpret_cast<LONG(APIENTRY*)(KmtOpen*)>(GetProcAddress(a.gdi, "D3DKMTOpenAdapterFromGdiDisplayName"));
+      a.wait = reinterpret_cast<LONG(APIENTRY*)(const KmtWait*)>(GetProcAddress(a.gdi, "D3DKMTWaitForVerticalBlankEvent"));
+      a.close = reinterpret_cast<LONG(APIENTRY*)(const KmtClose*)>(GetProcAddress(a.gdi, "D3DKMTCloseAdapter"));
+      a.valid = (a.open && a.wait && a.close);
+    }
+    return a;
+  }();
+  return api;
+}
+
+struct Win32VBlankHandle {
+  KmtOpen open{};
+};
+
+}  // namespace
+
+void sleep_until_steady_ns(int64_t target_ns, int64_t spin_ns) {
+  thread_local Win32ThreadTimer tt;
+  const HANDLE timer = tt.h;
+  static std::once_flag period;
+  const int64_t margin = (spin_ns > 100000) ? spin_ns : 100000;
+  for (;;) {
+    const int64_t left = target_ns - static_cast<int64_t>(monotonic_ns());
+    if (left <= margin) break;
+    if (timer) {
+      LARGE_INTEGER due;
+      due.QuadPart = -(left - margin) / 100;
+      SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
+      WaitForSingleObject(timer, INFINITE);
+    } else {
+      std::call_once(period, [] { timeBeginPeriod(1); });
+      if (left < 1500000 + margin) break;
+      Sleep(1);
+    }
+  }
+  if (spin_ns > 0) {
+    while (static_cast<int64_t>(monotonic_ns()) < target_ns) YieldProcessor();
+  }
+}
+
+bool pace_query_display(void* native_window, int monitor_override, PaceDisplayInfo* out) {
+  if (!out) return false;
+  *out = PaceDisplayInfo{};
+  HMONITOR m = MonitorFromWindow(static_cast<HWND>(native_window), MONITOR_DEFAULTTOPRIMARY);
+  out->monitor_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(m));
+  wchar_t wname[32] = {};
+  if (monitor_override > 0) {
+    _snwprintf_s(wname, _countof(wname), _TRUNCATE, L"\\\\.\\DISPLAY%d", monitor_override);
+  } else {
+    MONITORINFOEXW mi{};
+    mi.cbSize = sizeof mi;
+    if (GetMonitorInfoW(m, &mi)) wcsncpy_s(wname, mi.szDevice, _TRUNCATE);
+  }
+  if (wname[0]) {
+    const int n = WideCharToMultiByte(CP_UTF8, 0, wname, -1, out->name, sizeof(out->name), nullptr, nullptr);
+    if (n <= 0) out->name[0] = '\0';
+    out->refresh_hz = win32_query_hz(wname);
+  }
+  return out->refresh_hz > 0.0;
+}
+
+bool pace_vblank_supported() {
+  return kmt_api().valid;
+}
+
+void* pace_vblank_open(const char* display_name) {
+  const auto& api = kmt_api();
+  if (!api.valid || !display_name || !*display_name) return nullptr;
+  auto* h = new Win32VBlankHandle{};
+  const int n = MultiByteToWideChar(CP_UTF8, 0, display_name, -1, h->open.DeviceName, 32);
+  if (n <= 0 || api.open(&h->open) != 0) {
+    delete h;
+    return nullptr;
+  }
+  return h;
+}
+
+bool pace_vblank_wait(void* handle, int* out_status) {
+  const auto& api = kmt_api();
+  if (!api.valid || !handle) {
+    if (out_status) *out_status = -1;
+    return false;
+  }
+  const auto* h = static_cast<const Win32VBlankHandle*>(handle);
+  KmtWait w{h->open.hAdapter, 0, h->open.VidPnSourceId};
+  const LONG st = api.wait(&w);
+  if (out_status) *out_status = static_cast<int>(st);
+  return st == 0;
+}
+
+void pace_vblank_close(void* handle) {
+  if (!handle) return;
+  const auto& api = kmt_api();
+  auto* h = static_cast<Win32VBlankHandle*>(handle);
+  if (api.valid) {
+    KmtClose c{h->open.hAdapter};
+    api.close(&c);
+  }
+  delete h;
 }
 
 }  // namespace nvn::os_host

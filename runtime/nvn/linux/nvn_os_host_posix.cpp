@@ -8,10 +8,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <mutex>
 #include <pthread.h>
@@ -26,6 +28,10 @@
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
+#endif
+
+#ifdef HLE_WITH_SDL3
+#include <SDL3/SDL.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -362,5 +368,82 @@ bool watch_writeback_page(void* /*addr*/, size_t /*size*/, const int* /*present_
   });
   return false;
 }
+
+void sleep_until_steady_ns(int64_t target_ns, int64_t spin_ns) {
+  const int64_t now = static_cast<int64_t>(monotonic_ns());
+  if (target_ns <= now) return;
+
+  const int64_t sleep_target = (spin_ns > 0 && target_ns - now > spin_ns) ? (target_ns - spin_ns) : target_ns;
+  if (sleep_target > now) {
+    struct timespec ts {};
+    ts.tv_sec = static_cast<time_t>(sleep_target / 1000000000LL);
+    ts.tv_nsec = static_cast<long>(sleep_target % 1000000000LL);
+    while (::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR) {
+    }
+  }
+  if (spin_ns > 0) {
+    while (static_cast<int64_t>(monotonic_ns()) < target_ns) {
+      cpu_yield();
+    }
+  }
+}
+
+bool pace_query_display(void* native_window, int monitor_override, PaceDisplayInfo* out) {
+  if (!out) return false;
+  *out = PaceDisplayInfo{};
+#ifdef HLE_WITH_SDL3
+  if (SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+    SDL_DisplayID id = 0;
+    if (monitor_override > 0) {
+      int count = 0;
+      SDL_DisplayID* displays = SDL_GetDisplays(&count);
+      if (displays) {
+        if (monitor_override <= count) {
+          id = displays[monitor_override - 1];
+        }
+        SDL_free(displays);
+      }
+    } else if (native_window) {
+      id = SDL_GetDisplayForWindow(static_cast<SDL_Window*>(native_window));
+    } else {
+      id = SDL_GetPrimaryDisplay();
+    }
+    if (id != 0) {
+      out->monitor_id = static_cast<uint64_t>(id);
+      if (const char* dname = SDL_GetDisplayName(id)) {
+        std::snprintf(out->name, sizeof(out->name), "%s", dname);
+      } else {
+        std::snprintf(out->name, sizeof(out->name), "SDL_Display_%llu", static_cast<unsigned long long>(id));
+      }
+      if (const SDL_DisplayMode* dm = SDL_GetCurrentDisplayMode(id)) {
+        if (dm->refresh_rate > 0.0f) {
+          out->refresh_hz = static_cast<double>(dm->refresh_rate);
+          return true;
+        }
+      }
+    }
+  }
+#else
+  (void)native_window;
+  (void)monitor_override;
+#endif
+  return false;
+}
+
+bool pace_vblank_supported() {
+  // No D3DKMT vblank-wait equivalent on Linux yet; use steady-clock grid fallback without fake VSync precision.
+  return false;
+}
+
+void* pace_vblank_open(const char* /*display_name*/) {
+  return nullptr;
+}
+
+bool pace_vblank_wait(void* /*handle*/, int* out_status) {
+  if (out_status) *out_status = -1;
+  return false;
+}
+
+void pace_vblank_close(void* /*handle*/) {}
 
 }  // namespace nvn::os_host

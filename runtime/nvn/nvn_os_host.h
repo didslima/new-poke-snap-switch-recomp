@@ -61,6 +61,23 @@ std::string glslang_sdk_candidate(const std::string& root);
 // Returns false explicitly on Linux where PAGE_GUARD cannot be emulated safely without global signal handlers.
 bool watch_writeback_page(void* addr, size_t size, const int* present_count_ptr);
 
+// High-resolution steady-clock sleep until target_ns (same epoch as monotonic_ns()),
+// optionally spinning for the last spin_ns.
+void sleep_until_steady_ns(int64_t target_ns, int64_t spin_ns);
+
+// Display & VBlank helpers for frame pacing (Group 2C-2).
+struct PaceDisplayInfo {
+  uint64_t monitor_id = 0;
+  char name[64] = {};
+  double refresh_hz = 0.0;
+};
+
+bool pace_query_display(void* native_window, int monitor_override, PaceDisplayInfo* out);
+bool pace_vblank_supported();
+void* pace_vblank_open(const char* display_name);
+bool pace_vblank_wait(void* handle, int* out_status);
+void pace_vblank_close(void* handle);
+
 inline bool ascii_ieq(const char* a, const char* b) {
   if (!a || !b) return a == b;
   while (*a && *b) {

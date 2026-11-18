@@ -1,8 +1,5 @@
 // Frame pacing: one frame clock for the host limiter and the guest vsync event. See nvn_pace.h and analysis/perf/pacing.md.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <mmsystem.h>
+#include "nvn_os_host.h"
 
 #include "nvn_pace.h"
 #include "nvn_quirks.h"   // driver quirk table (present_wait)
@@ -21,78 +18,19 @@
 namespace snap_pace {
 namespace {
 
-int64_t NowNs() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+int64_t NowNs() { return static_cast<int64_t>(nvn::os_host::monotonic_ns()); }
 bool EnvZero(const char* n) { const char* e = getenv(n); return e && e[0] == '0'; }
-const bool kLegacy = [] { const char* e = getenv("SNAP_PACE"); return e && !_stricmp(e, "legacy"); }();
+const bool kLegacy = [] { const char* e = getenv("SNAP_PACE"); return e && nvn::os_host::ascii_ieq(e, "legacy"); }();
 const char* const kLogPath = getenv("SNAP_PACE_LOG");
 const int64_t kT0 = NowNs();   // free-grid anchor (shared by the limiter and the guest vsync)
 
-// Sleep until t on the steady clock: high-resolution waitable timer, then at most spinNs of spinning. Without that timer
-// (pre-1803 Windows) Sleep(1) with a 1 ms system timer period.
-struct ThreadTimer {   // one high-resolution timer per waiting thread, closed when the thread exits
-  HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-  ~ThreadTimer() { if (h) CloseHandle(h); }
-};
-void WaitUntil(int64_t t, int64_t spinNs) {
-  thread_local ThreadTimer tt;
-  const HANDLE timer = tt.h;
-  static std::once_flag period;
-  const int64_t margin = std::max<int64_t>(spinNs, 100000);
-  for (;;) {
-    const int64_t left = t - NowNs();
-    if (left <= margin) break;
-    if (timer) {
-      LARGE_INTEGER due; due.QuadPart = -(left - margin) / 100;
-      SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
-      WaitForSingleObject(timer, INFINITE);
-    } else {
-      std::call_once(period, [] { timeBeginPeriod(1); });
-      if (left < 1500000 + margin) break;
-      Sleep(1);
-    }
-  }
-  if (spinNs > 0) while (NowNs() < t) YieldProcessor();
-}
+void WaitUntil(int64_t t, int64_t spinNs) { nvn::os_host::sleep_until_steady_ns(t, spinNs); }
 
-// ---- display: monitor of the window and its exact refresh rate
-double QueryHz(const wchar_t* gdiName) {
-  UINT32 np = 0, nm = 0;
-  if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm) == ERROR_SUCCESS && np) {
-    std::vector<DISPLAYCONFIG_PATH_INFO> p(np);
-    std::vector<DISPLAYCONFIG_MODE_INFO> m(nm);
-    if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, p.data(), &nm, m.data(), nullptr) == ERROR_SUCCESS) {
-      for (UINT32 i = 0; i < np; i++) {
-        DISPLAYCONFIG_SOURCE_DEVICE_NAME sn{};
-        sn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME; sn.header.size = sizeof sn;
-        sn.header.adapterId = p[i].sourceInfo.adapterId; sn.header.id = p[i].sourceInfo.id;
-        if (DisplayConfigGetDeviceInfo(&sn.header) != ERROR_SUCCESS || wcscmp(sn.viewGdiDeviceName, gdiName)) continue;
-        const UINT32 mi = p[i].targetInfo.modeInfoIdx;
-        if (mi != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && mi < nm && m[mi].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_TARGET) {
-          const auto& v = m[mi].targetMode.targetVideoSignalInfo.vSyncFreq;
-          if (v.Denominator && v.Numerator) return (double)v.Numerator / v.Denominator;
-        }
-        const auto& r = p[i].targetInfo.refreshRate;
-        if (r.Denominator && r.Numerator) return (double)r.Numerator / r.Denominator;
-      }
-    }
-  }
-  DEVMODEW dm{}; dm.dmSize = sizeof dm;
-  if (EnumDisplaySettingsW(gdiName, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1) {
-    double f = dm.dmDisplayFrequency;
-    if (dm.dmDisplayFrequency % 60 == 59) f = (f + 1) * 1000.0 / 1001.0;   // 59 / 119 Hz are NTSC rates
-    return f;
-  }
-  return 0;
-}
-
-// ---- vblank clock: a thread blocked in D3DKMTWaitForVerticalBlankEvent on the window's monitor
-struct KmtOpen { WCHAR DeviceName[32]; UINT hAdapter; LUID AdapterLuid; UINT VidPnSourceId; };
-struct KmtWait { UINT hAdapter; UINT hDevice; UINT VidPnSourceId; };
-struct KmtClose { UINT hAdapter; };
+// ---- vblank clock: a thread blocked in the platform vblank-wait API when supported (D3DKMT on Windows)
 struct VBlank {
   std::mutex m;
   std::condition_variable cv;
-  wchar_t want[32] = {};        // monitor (GDI name) to follow
+  char want[64] = {};           // monitor name to follow
   std::atomic<int64_t> tvRef{0};  // exact vblank period from QueryDisplayConfig (0 = measure)
   int64_t lastV = 0;            // phase estimate of the latest vblank (steady ns, tracks the earliest wake-ups)
   uint64_t seq = 0;             // vblank counter
@@ -109,52 +47,50 @@ std::atomic<bool> g_vbOpenFailed{false};   // D3DKMTOpenAdapterFromGdiDisplayNam
 std::atomic<bool> g_requery{false};        // VBlankMain -> UpdateDisplay: re-read the refresh rate now
 
 void VBlankMain() {
-  HMODULE g = LoadLibraryW(L"gdi32.dll");
-  auto open = g ? (LONG(APIENTRY*)(KmtOpen*))GetProcAddress(g, "D3DKMTOpenAdapterFromGdiDisplayName") : nullptr;
-  auto wait = g ? (LONG(APIENTRY*)(const KmtWait*))GetProcAddress(g, "D3DKMTWaitForVerticalBlankEvent") : nullptr;
-  auto close = g ? (LONG(APIENTRY*)(const KmtClose*))GetProcAddress(g, "D3DKMTCloseAdapter") : nullptr;
-  if (!open || !wait || !close) { fprintf(stderr, "[pace] D3DKMT vblank wait unavailable: steady-clock pacing\n"); g_vbDead = true; return; }
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-  KmtOpen o{};
-  wchar_t cur[32] = {};
-  bool isOpen = false;
+  if (!nvn::os_host::pace_vblank_supported()) {
+    fprintf(stderr, "[pace] vblank wait unavailable: steady-clock pacing\n");
+    g_vbDead = true;
+    return;
+  }
+  nvn::os_host::set_current_thread_above_normal();
+  void* vbHandle = nullptr;
+  char cur[64] = {};
   int fails = 0;
   int openRetry = 0;
   bool quiet = false;   // a forced reopen of the same monitor: don't repeat the log line
   for (;;) {
     {
       std::lock_guard<std::mutex> lk(g_vb.m);
-      if (wcscmp(cur, g_vb.want)) {
-        if (isOpen) { KmtClose c{o.hAdapter}; close(&c); isOpen = false; }
-        wcscpy_s(cur, g_vb.want);
-        o = KmtOpen{}; wcscpy_s(o.DeviceName, cur);
-        isOpen = cur[0] && open(&o) == 0;
+      if (strcmp(cur, g_vb.want)) {
+        if (vbHandle) { nvn::os_host::pace_vblank_close(vbHandle); vbHandle = nullptr; }
+        snprintf(cur, sizeof cur, "%s", g_vb.want);
+        vbHandle = cur[0] ? nvn::os_host::pace_vblank_open(cur) : nullptr;
         g_vb.lastV = 0; g_vb.tvMeas = 0; g_vb.ok = false;
         g_vb.refStale = false; g_vb.mism = g_vb.match = g_vb.multi = 0;
-        if (cur[0]) g_vbOpenFailed = !isOpen;
+        if (cur[0]) g_vbOpenFailed = (vbHandle == nullptr);
         openRetry = 0;
-        if (!quiet) fprintf(stderr, "[pace] vblank clock on %ls: %s\n", cur, isOpen ? "open" : "D3DKMTOpenAdapterFromGdiDisplayName failed");
+        if (!quiet) fprintf(stderr, "[pace] vblank clock on %s: %s\n", cur, vbHandle ? "open" : "open failed");
         quiet = false;
       }
     }
-    if (!isOpen) {
+    if (!vbHandle) {
       // a named monitor whose open failed (or whose stale handle was dropped) is retried about once a second
       if (cur[0] && ++openRetry >= 20) { openRetry = 0; cur[0] = 0; quiet = true; }
-      Sleep(50); continue;
+      nvn::os_host::sleep_ms(50); continue;
     }
-    KmtWait w{o.hAdapter, 0, o.VidPnSourceId};
-    const LONG st = wait(&w);
+    int st = 0;
+    const bool ok = nvn::os_host::pace_vblank_wait(vbHandle, &st);
     const int64_t t = NowNs();
-    if (st != 0) {
-      if (++fails == 20) fprintf(stderr, "[pace] vblank wait failing (0x%lx)\n", (unsigned long)st);
+    if (!ok) {
+      if (++fails == 20) fprintf(stderr, "[pace] vblank wait failing (0x%x)\n", (unsigned)st);
       { std::lock_guard<std::mutex> lk(g_vb.m); g_vb.ok = false; }
-      // stale handle or source id (GPU reset, topology change on the same GDI name): drop it and reopen,
+      // stale handle or source id (GPU reset, topology change on the same name): drop it and reopen,
       // at 20 failures and every ~5 s after
       if (fails >= 20 && (fails - 20) % 50 == 0) {
-        KmtClose c{o.hAdapter}; close(&c); isOpen = false; cur[0] = 0; quiet = true; openRetry = 0;
+        nvn::os_host::pace_vblank_close(vbHandle); vbHandle = nullptr; cur[0] = 0; quiet = true; openRetry = 0;
         continue;
       }
-      Sleep(fails > 20 ? 100 : 5);
+      nvn::os_host::sleep_ms(fails > 20 ? 100 : 5);
       continue;
     }
     fails = 0;
@@ -248,8 +184,8 @@ bool g_chained = false;
 
 // ---- limiter state (present thread)
 struct Rel {
-  HMONITOR mon = nullptr;
-  wchar_t name[32] = {};
+  uint64_t mon = 0;
+  char name[64] = {};
   double hz = 0;
   int64_t hzAt = 0;
   int mode = 0;          // 0 none, 1 free grid, 2 locked to vblanks
@@ -296,23 +232,22 @@ void LogRow() {
 
 void UpdateDisplay(void* hwnd, int64_t now) {
   Rel& R = g_rel;
-  static const char* monEnv = getenv("SNAP_PACE_MONITOR");   // test override: monitor number (\\.\DISPLAY<n>)
+  static const char* monEnv = getenv("SNAP_PACE_MONITOR");   // test override: monitor number
   static const double hzEnv = getenv("SNAP_PACE_REFRESH") ? atof(getenv("SNAP_PACE_REFRESH")) : 0.0;
-  HMONITOR m = MonitorFromWindow((HWND)hwnd, MONITOR_DEFAULTTOPRIMARY);
+  const int monOverride = (monEnv && *monEnv) ? atoi(monEnv) : 0;
+  nvn::os_host::PaceDisplayInfo info{};
+  nvn::os_host::pace_query_display(hwnd, monOverride, &info);
   const bool force = g_requery.exchange(false);   // the vblank thread saw the refresh disagree with tvRef
-  if (!force && m == R.mon && now - R.hzAt < 30000000000LL) return;
-  R.mon = m;
+  if (!force && info.monitor_id == R.mon && now - R.hzAt < 30000000000LL) return;
+  R.mon = info.monitor_id;
   R.hzAt = now;
-  wchar_t name[32] = {};
-  if (monEnv && *monEnv) swprintf(name, 32, L"\\\\.\\DISPLAY%d", atoi(monEnv));
-  else { MONITORINFOEXW mi{}; mi.cbSize = sizeof mi; if (GetMonitorInfoW(m, &mi)) wcscpy_s(name, mi.szDevice); }
-  const double hz = hzEnv > 0 ? hzEnv : (name[0] ? QueryHz(name) : 0.0);
-  const bool changed = wcscmp(name, R.name) != 0 || std::fabs(hz - R.hz) > 0.001;
-  wcscpy_s(R.name, name);
+  const double hz = hzEnv > 0 ? hzEnv : info.refresh_hz;
+  const bool changed = strcmp(info.name, R.name) != 0 || std::fabs(hz - R.hz) > 0.001;
+  snprintf(R.name, sizeof R.name, "%s", info.name);
   R.hz = hz;
   g_vb.tvRef = hz > 1 ? (int64_t)std::llround(1e9 / hz) : 0;
-  { std::lock_guard<std::mutex> lk(g_vb.m); wcscpy_s(g_vb.want, name); }
-  if (changed) { R.mode = 0; fprintf(stderr, "[pace] display %ls %.3f Hz\n", name, hz); }
+  { std::lock_guard<std::mutex> lk(g_vb.m); snprintf(g_vb.want, sizeof g_vb.want, "%s", info.name); }
+  if (changed) { R.mode = 0; fprintf(stderr, "[pace] display %s %.3f Hz\n", info.name[0] ? info.name : "(unknown)", hz); }
 }
 
 // Waits for the present two frames back (queue depth cap). Never past `deadline`; after 3 timeouts in a row (minimized, hidden
@@ -368,7 +303,7 @@ void DeviceCreated(VkDevice dev) {
   if (g_pwOn) g_waitPresent = (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(dev, "vkWaitForPresentKHR");
   if (!g_waitPresent) g_pwOn = false;
   if (!kLegacy) fprintf(stderr, "[pace] model display (SNAP_PACE=legacy for the old limiter), present wait %s\n", g_pwOn ? "on" : "off");
-  if (const char* e = getenv("SNAP_PACE")) if (*e && !kLegacy && _stricmp(e, "display"))
+  if (const char* e = getenv("SNAP_PACE")) if (*e && !kLegacy && !nvn::os_host::ascii_ieq(e, "display"))
     fprintf(stderr, "[pace] warning: SNAP_PACE=%s is not a known value (legacy or display); using display\n", e);
 }
 

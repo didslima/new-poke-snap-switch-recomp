@@ -235,6 +235,34 @@ void test_writeback_watch() {
   CHECK(buf[0] == 0x5A && buf[sizeof(buf) - 1] == 0xA5);
 }
 
+void test_pacing_helpers() {
+  // Past target returns immediately without stalling.
+  const int64_t t_now = static_cast<int64_t>(nvn::os_host::monotonic_ns());
+  nvn::os_host::sleep_until_steady_ns(t_now - 1000000, 0);
+
+  // Future target sleeps at least until target_ns on the same CLOCK_MONOTONIC epoch.
+  const int64_t t_start = static_cast<int64_t>(nvn::os_host::monotonic_ns());
+  const int64_t t_target = t_start + 3000000;  // +3 ms
+  nvn::os_host::sleep_until_steady_ns(t_target, 300000);
+  const int64_t t_end = static_cast<int64_t>(nvn::os_host::monotonic_ns());
+  CHECK(t_end >= t_target);
+
+  // VBlank wait is explicitly unsupported on Linux (steady-clock fallback).
+  CHECK(!nvn::os_host::pace_vblank_supported());
+  CHECK(nvn::os_host::pace_vblank_open("HDMI-A-1") == nullptr);
+  int st = 0;
+  CHECK(!nvn::os_host::pace_vblank_wait(nullptr, &st));
+  CHECK(st == -1);
+  nvn::os_host::pace_vblank_close(nullptr);
+
+  // Headless/uninitialized display query falls back cleanly without crashing.
+  nvn::os_host::PaceDisplayInfo info{};
+  info.refresh_hz = 999.0;
+  CHECK(!nvn::os_host::pace_query_display(nullptr, 0, &info));
+  CHECK(info.refresh_hz == 0.0);
+  CHECK(!nvn::os_host::pace_query_display(nullptr, 0, nullptr));
+}
+
 }  // namespace
 
 int main() {
@@ -247,6 +275,7 @@ int main() {
   test_cache_dir_xdg();
   test_filesystem_and_harness();
   test_writeback_watch();
+  test_pacing_helpers();
   std::printf("nvn_os_host_linux_test: %d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }

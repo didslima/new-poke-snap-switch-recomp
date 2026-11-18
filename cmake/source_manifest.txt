@@ -132,7 +132,7 @@ shared   runtime/nvn/nvn_model.cpp
 shared   runtime/nvn/nvn_ocean.cpp
 windows  runtime/nvn/nvn_os_host_win32.cpp
 linux    runtime/nvn/linux/nvn_os_host_posix.cpp
-windows  runtime/nvn/nvn_pace.cpp   # #include <mmsystem.h>, #include <windows.h>, GetCurrentThread ...
+shared   runtime/nvn/nvn_pace.cpp
 shared   runtime/nvn/nvn_perf.cpp
 shared   runtime/nvn/nvn_pipeline.cpp
 shared   runtime/nvn/nvn_pom.cpp
