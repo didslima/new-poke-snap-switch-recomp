@@ -7,7 +7,7 @@
 //     (NVN_FRAME_DUMP_POST dumps, which are the finished swapchain image, do show it). F4 toggles it unless F4 is bound to a game button.
 //   - shader compile errors of the hot reload, in red at the bottom of the screen until the shader compiles again.
 // With SNAP_DEV unset nothing here runs: tune_tick returns false after one cached-bool test and the tab is not listed.
-#include <windows.h>
+#include "ui_host.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -149,7 +149,7 @@ void tab_tune() {
   if (ImGui::Button("Copy as PowerShell")) { ImGui::SetClipboardText(env_line(true, false).c_str()); note("Copied: " + env_line(true, false)); }
   ImGui::SameLine();
   if (ImGui::Button("Save env file")) {
-    const std::string path = std::string(dev_ctl_dir()) + "\\tuned_" + std::to_string(GetCurrentProcessId()) + ".env";
+    const std::string path = std::string(dev_ctl_dir()) + std::string(1, host::path_sep()) + "tuned_" + std::to_string(host::current_process_id()) + ".env";
     std::vector<DevParamView> v(1024); const int n = dev_param_list(v.data(), (int)v.size());
     std::string body;
     for (int i = 0; i < n; i++) if (changed(v[i])) body += std::string(v[i].name) + "=" + fmt_value(v[i]) + "\n";

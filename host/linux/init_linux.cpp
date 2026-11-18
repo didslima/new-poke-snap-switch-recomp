@@ -23,6 +23,7 @@ void snap_bind_nvn();
 int snap_nvn_bridge_count();
 extern "C" void nvnHostNotifyWindowResize(void *nativeWindow);
 extern "C" void snap_fs_drain_for_exit(int ms);
+extern "C" void snap_ui_shutdown();
 
 namespace snap_linux {
 namespace {
@@ -296,6 +297,7 @@ void shutdown_guest_runtime() {
     if (g_hooks_active.exchange(false, std::memory_order_acq_rel)) {
         nvnHostSetHooks(nullptr);
     }
+    snap_ui_shutdown();
     snap_audio_log_checks();
     snap_audio_shutdown();
     g_host_win.destroy();

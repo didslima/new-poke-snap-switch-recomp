@@ -15,6 +15,8 @@
 #include <SDL3/SDL_vulkan.h>
 #endif
 
+extern "C" __attribute__((weak)) void snap_ui_on_sdl_event(const void*) {}
+
 namespace snap_linux {
 
 HostWindow::~HostWindow() {
@@ -167,6 +169,7 @@ WindowEvents HostWindow::poll_events() {
   if (!window_) return ev_out;
   SDL_Event ev{};
   while (SDL_PollEvent(&ev)) {
+    snap_ui_on_sdl_event(&ev);
     switch (ev.type) {
       case SDL_EVENT_QUIT:
         quit_requested_ = true;
