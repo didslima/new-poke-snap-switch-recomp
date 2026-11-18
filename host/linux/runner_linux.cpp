@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Linux runner bootstrap (stage 5B). See runner_linux.h.
 #include "runner_linux.h"
+#include "cli_flags.h"
 #include "crash_linux.h"
 #include "preflight_linux.h"
 #ifdef SNAP_LINUX_HAS_AOT
 #include "audio/audio_out.h"
 #include "hle/hle.h"
+#include "hle/settings.h"
 #include "init_linux.h"
 #include "loader.h"
 #endif
@@ -14,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 #include "os/os_host.h"
 
@@ -29,6 +32,8 @@ bool is_supported_cmd(const std::string &c) {
 void print_usage(FILE *out) {
     std::fprintf(out,
         "usage: snap_boot_linux [--main elf] [--sdk elf] [--main-lib lib.a] [--sdk-lib lib.a] "
+        "[--play] [--fullscreen|--windowed|--borderless] [--width W] [--height H] [--monitor N] "
+        "[--profile name] [--data-dir dir] [--set key=val] [--version] "
         "validate|info|shared|init [--probe N] [--libc]|run [--probe N] [--trace file] [--stop-after-init] [--allow-guest-exec]|"
         "eh|lua|bench [--iters N]|all\n");
 }
@@ -159,18 +164,41 @@ ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err) {
     out = BootOpts{};
     err.clear();
 
-    for (int i = 1; i < argc; i++) {
-        const std::string a = argv[i] ? argv[i] : "";
-        if (a == "--help" || a == "-h") {
-            out.help = true;
-            return ParseStatus::Help;
-        }
+    std::vector<std::string> raw;
+    for (int i = 1; i < argc; i++) raw.emplace_back(argv[i] ? argv[i] : "");
+    const snap_cli::Parsed cli = snap_cli::parse(raw);
+    if (!cli.error.empty()) {
+        err = cli.error;
+        return ParseStatus::Error;
+    }
+    if (cli.help) {
+        out.help = true;
+        return ParseStatus::Help;
+    }
+    if (cli.version) {
+        out.version = true;
+        return ParseStatus::Version;
+    }
+    if (!cli.action.empty()) {
+        err = "unsupported Windows launcher option: --" + cli.action;
+        return ParseStatus::Error;
+    }
+    out.play = cli.play;
+    out.safe = cli.safe;
+    out.profile = cli.profile;
+    out.data_dir = cli.data_dir;
+    out.cli_env = cli.env;
+    out.cli_sets = cli.sets;
+
+    const auto &rest = cli.rest;
+    for (size_t i = 0; i < rest.size(); i++) {
+        const std::string &a = rest[i];
         auto need_val = [&](const char *flag) -> const char * {
-            if (i + 1 >= argc || !argv[i + 1]) {
+            if (i + 1 >= rest.size()) {
                 err = std::string("missing argument for ") + flag;
                 return nullptr;
             }
-            return argv[++i];
+            return rest[++i].c_str();
         };
 
         if (a == "--main") {
@@ -230,6 +258,9 @@ ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err) {
         }
     }
 
+    if (out.cmd.empty() && out.play) {
+        out.cmd = "run";
+    }
     if (out.cmd.empty()) {
         err = "no command specified";
         return ParseStatus::Error;
@@ -276,11 +307,44 @@ int bootstrap_main(int argc, char **argv) {
         print_usage(stdout);
         return 0;
     }
+    if (st == ParseStatus::Version) {
+        std::string v;
+        if (FILE *f = std::fopen("config.json", "rb")) {
+            std::string text; char buf[2048]; size_t n = 0;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+            std::fclose(f);
+            v = snap_cli::version_from_config(text);
+        }
+        std::printf("Snap Recomp %s (Linux)\n", v.empty() ? "(development build)" : v.c_str());
+        return 0;
+    }
     if (st == ParseStatus::Error) {
         std::fprintf(stderr, "boot_linux: %s\n", err.c_str());
         print_usage(stderr);
         return 2;
     }
+
+    if (!opts.data_dir.empty()) {
+        std::error_code ec;
+        const std::filesystem::path dd = std::filesystem::u8path(opts.data_dir);
+        std::filesystem::create_directories(dd / "config", ec);
+        if (ec) {
+            std::fprintf(stderr, "boot_linux: --data-dir '%s' failed: %s\n", opts.data_dir.c_str(), ec.message().c_str());
+            return 2;
+        }
+        std::filesystem::create_directories(dd / "save", ec);
+        setenv("SNAP_CONFIG_DIR", (dd / "config").string().c_str(), 1);
+        setenv("SNAP_SAVE_ROOT", (dd / "save").string().c_str(), 1);
+    }
+    if (!opts.profile.empty()) setenv("SNAP_PROFILE", opts.profile.c_str(), 1);
+    if (opts.safe) setenv("SNAP_SAFE_MODE", "1", 1);
+    for (const auto &kv : opts.cli_env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
+#ifdef SNAP_LINUX_HAS_AOT
+    for (const auto &kv : opts.cli_sets) {
+        if (const char *n = hle::settings::env_name(kv.first)) unsetenv(n);
+        hle::settings::override_for_run(kv.first, kv.second);
+    }
+#endif
 
     if (opts.cmd == "validate") {
         const PreflightReport rep = run_preflight(opts.main_elf, opts.sdk_elf, opts.main_lib, opts.sdk_lib);

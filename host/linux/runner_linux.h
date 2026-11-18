@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace snap_linux {
@@ -29,11 +30,19 @@ struct BootOpts {
     bool allow_guest_exec = false;
     bool no_window = false;
     bool help = false;
+    bool version = false;
+    bool play = false;
+    bool safe = false;
+    std::string profile;
+    std::string data_dir;
+    std::vector<std::pair<std::string, std::string>> cli_env;
+    std::vector<std::pair<std::string, std::string>> cli_sets;
 };
 
 enum class ParseStatus {
     Ok,
     Help,
+    Version,
     Error,
 };
 

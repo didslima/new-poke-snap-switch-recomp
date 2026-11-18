@@ -91,6 +91,20 @@ int main() {
         CHECK(!o.allow_guest_exec);
         CHECK(run_parse({"snap_boot_linux", "run", "--allow-guest-exec"}, o, err) == snap_linux::ParseStatus::Ok);
         CHECK(o.allow_guest_exec);
+
+        // v1.3.0 CLI parity flags: --play, window flags, --profile, --data-dir, --set, --version, Windows-only rejections.
+        CHECK(run_parse({"snap_boot_linux", "--version"}, o, err) == snap_linux::ParseStatus::Version);
+        CHECK(o.version);
+        CHECK(run_parse({"snap_boot_linux", "--update"}, o, err) == snap_linux::ParseStatus::Error);
+        CHECK(run_parse({"snap_boot_linux", "--play", "--fullscreen", "--width", "2560", "--height", "1440",
+                         "--monitor", "1", "--profile", "Ash", "--data-dir", "/tmp/d", "--set", "vsync=0"}, o, err) == snap_linux::ParseStatus::Ok);
+        CHECK(o.play);
+        CHECK(o.cmd == "run");
+        CHECK(!o.allow_guest_exec);
+        CHECK(o.profile == "Ash");
+        CHECK(o.data_dir == "/tmp/d");
+        CHECK(o.cli_sets.size() == 1 && o.cli_sets[0].first == "vsync" && o.cli_sets[0].second == "0");
+        CHECK(!o.cli_env.empty());
     }
 
     // 4. CPU capability check (x86-64-v3 host).
