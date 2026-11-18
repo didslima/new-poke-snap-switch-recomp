@@ -62,18 +62,17 @@ int bootstrap_runner_entry(void *ud) {
         return 128 + shutdown_signal();
     }
 #ifdef SNAP_LINUX_HAS_AOT
-    struct AudioShutdownGuard {
+    struct RuntimeShutdownGuard {
         bool active = false;
-        ~AudioShutdownGuard() {
+        ~RuntimeShutdownGuard() {
             if (active) {
-                snap_audio_log_checks();
-                snap_audio_shutdown();
+                shutdown_guest_runtime();
             }
         }
-    } audio_guard;
+    } runtime_guard;
 
     if (opts->cmd == "init") {
-        audio_guard.active = true;
+        runtime_guard.active = true;
         InitResult res;
         if (!init_guest_runtime(*opts, true, res)) {
             std::fprintf(stderr, "boot_linux: init failed at stage '%s': %s\n",
@@ -145,6 +144,8 @@ ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err) {
             out.libc = true;
         } else if (a == "--stop-after-init") {
             out.stop_after_init = true;
+        } else if (a == "--no-window") {
+            out.no_window = true;
         } else if (a == "--trace") {
             const char *v = need_val("--trace");
             if (!v) return ParseStatus::Error;

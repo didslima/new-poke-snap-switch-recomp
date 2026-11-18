@@ -242,6 +242,17 @@ int main() {
                 CHECK(loader::find_override(audio_tab[i].mangled) != nullptr);
             }
         }
+        CHECK(res.nvn_bound);
+        CHECK(res.nvn_procs_bound > 50);
+        CHECK(res.hooks_installed);
+        CHECK(loader::find_override("nvnBootstrapLoader") != nullptr);
+        CHECK(loader::find_override("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE") != nullptr);
+        if (res.window_created) {
+            CHECK(res.native_window != nullptr);
+            CHECK(snap_linux::host_window() != nullptr);
+            const auto ev = snap_linux::pump_host_window_events();
+            CHECK(!ev.quit_requested);
+        }
         CHECK(loader::find_override("_ZN2nn2oe16GetOperationModeEv") != nullptr);
         CHECK(loader::find_override("_ZN2nn2fs8MountRomEPKcPvm") != nullptr);
         CHECK(loader::find_override("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj") != nullptr);
@@ -253,6 +264,9 @@ int main() {
         CHECK(loader::g_init_log.empty());
         CHECK(os_current_cpu() == res.main_cpu);
         CHECK(os_current_thread_type() == res.main_thread_type);
+
+        snap_linux::shutdown_guest_runtime();
+        CHECK(snap_linux::host_window() == nullptr);
 
         std::error_code ec;
         std::filesystem::remove_all(base, ec);

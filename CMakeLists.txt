@@ -219,13 +219,13 @@ if(UNIX AND NOT APPLE)
 
   if(EXISTS "${SNAP_AOT_MAIN_LIB}" AND EXISTS "${SNAP_AOT_SDK_LIB}")
     snap_os_test(snap_boot_linux ${SNAP_LINUX_RUNNER_SOURCES}
-                 host/linux/init_linux.cpp host/linux/hooks_mods_stub.cpp
+                 host/linux/init_linux.cpp host/linux/hooks_mods_stub.cpp host/linux/window_sdl3.cpp
                  host/loader.cpp host/hooks.cpp host/guest_tls_hooks.cpp host/mods/drpfast.cpp
-                 runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES} ${SNAP_LINUX_HLE_CORE_SOURCES}
-                 ${SNAP_LINUX_AUDIO_SOURCES})
+                 host/abi_audio.cpp generated/unimplemented.cpp generated/boot/nvn_bridge.cpp)
     target_compile_definitions(snap_boot_linux PRIVATE SNAP_LINUX_HAS_AOT=1)
     target_compile_options(snap_boot_linux PRIVATE -w)
-    target_link_libraries(snap_boot_linux PRIVATE "${SNAP_AOT_MAIN_LIB}" "${SNAP_AOT_SDK_LIB}")
+    target_link_options(snap_boot_linux PRIVATE -Wl,-u,snap_runtime_abi_3)
+    target_link_libraries(snap_boot_linux PRIVATE snap_nvn_renderer_linux "${SNAP_AOT_MAIN_LIB}" "${SNAP_AOT_SDK_LIB}")
     add_test(NAME init_linux_real
       COMMAND ${CMAKE_COMMAND} -E env
               "HOME=${CMAKE_BINARY_DIR}/test_init_real/home"
@@ -253,11 +253,13 @@ if(UNIX AND NOT APPLE)
 
   snap_os_test(snap_init_linux_test tests/platform/init_linux_test.cpp
                host/linux/init_linux.cpp host/linux/crash_linux.cpp host/linux/preflight_linux.cpp
-               host/linux/hooks_mods_stub.cpp host/loader.cpp host/elf_check.cpp host/hooks.cpp
-               host/guest_tls_hooks.cpp host/mods/drpfast.cpp runtime/os/abi.cpp ${SNAP_OS_LAYER_SOURCES}
-               ${SNAP_LINUX_HLE_CORE_SOURCES} ${SNAP_LINUX_AUDIO_SOURCES})
+               host/linux/hooks_mods_stub.cpp host/linux/window_sdl3.cpp
+               host/loader.cpp host/elf_check.cpp host/hooks.cpp
+               host/guest_tls_hooks.cpp host/mods/drpfast.cpp
+               host/abi_audio.cpp generated/unimplemented.cpp generated/boot/nvn_bridge.cpp)
   target_include_directories(snap_init_linux_test PRIVATE host)
   target_compile_options(snap_init_linux_test PRIVATE -w)
+  target_link_libraries(snap_init_linux_test PRIVATE snap_nvn_renderer_linux)
   add_test(NAME init_linux COMMAND snap_init_linux_test)
 
   snap_os_test(snap_hle_core_linux_test tests/platform/hle_core_linux_test.cpp ${SNAP_LINUX_HLE_CORE_SOURCES} runtime/os/perf.cpp runtime/os/linux/os_host_posix.cpp)

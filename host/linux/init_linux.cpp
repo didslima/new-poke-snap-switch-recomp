@@ -2,9 +2,11 @@
 // Controlled Linux guest runtime initialization (stage 5D-B2). See init_linux.h.
 #include "init_linux.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "audio/audio_out.h"
 #include "crash_linux.h"
@@ -12,13 +14,64 @@
 #include "hle/hle.h"
 #include "hle/hle_config.h"
 #include "loader.h"
+#include "nvn/nvn_host.h"
 #include "os/os.h"
 #include "preflight_linux.h"
 
 int snap_bind_audio();
+void snap_bind_nvn();
+int snap_nvn_bridge_count();
+extern "C" void nvnHostNotifyWindowResize(void *nativeWindow);
+extern "C" void snap_fs_drain_for_exit(int ms);
 
 namespace snap_linux {
 namespace {
+
+HostWindow g_host_win;
+std::atomic<uint64_t> g_presents{0};
+std::atomic<uint64_t> g_submits{0};
+std::atomic<bool> g_hooks_active{false};
+
+bool ultrawide_disabled_by_env() {
+    const char *uw = std::getenv("SNAP_ULTRAWIDE");
+    return uw && (std::strcmp(uw, "off") == 0 || std::strcmp(uw, "OFF") == 0 || std::strcmp(uw, "0") == 0);
+}
+
+void apply_ultrawide_from_window(const HostWindow &win) {
+    if (ultrawide_disabled_by_env() || !win.is_open()) {
+        nvnHostSetUltrawide(1.0f);
+        return;
+    }
+    nvnHostSetUltrawide(HostWindow::compute_ultrawide_factor(win.pixel_width(), win.pixel_height()));
+}
+
+void vi_get_native_window_host(Cpu *c) {
+    if (c && c->x[0]) {
+        *reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(c->x[0])) =
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(g_host_win.native_handle()));
+    }
+    if (c) c->x[0] = 0;
+}
+
+void hook_present(void *, int slot, int w, int h) {
+    const WindowEvents ev = pump_host_window_events();
+    const uint64_t n = ++g_presents;
+    if (n <= 3 || n % 30 == 0) {
+        loader::trace("nvn: present #%llu slot %d %dx%d (submits %llu)",
+                      static_cast<unsigned long long>(n), slot, w, h,
+                      static_cast<unsigned long long>(g_submits.load(std::memory_order_relaxed)));
+    }
+    if (ev.quit_requested) {
+        snap_audio_log_checks();
+        snap_fs_drain_for_exit(5000);
+        g_host_win.destroy();
+        std::_Exit(0);
+    }
+}
+
+void hook_submit(void *, int, int) {
+    ++g_submits;
+}
 
 int svc_dispatch(Cpu *c, uint32_t imm) {
     return os_svc(c, imm) ? 1 : 0;
@@ -35,6 +88,7 @@ const char *init_stage_name(InitStage s) {
     switch (s) {
     case InitStage::None: return "none";
     case InitStage::Preflight: return "preflight";
+    case InitStage::Window: return "window";
     case InitStage::Overrides: return "overrides";
     case InitStage::LoaderLoad: return "loader::load";
     case InitStage::OsInit: return "os_init";
@@ -75,11 +129,26 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
     }
 
     if (shutdown_requested()) {
-        out.error = "shutdown requested before loader::load()";
+        out.error = "shutdown requested before host window creation";
         return false;
     }
 
-    // 2. Register host overrides before loader::load() so relocations and import tables bind to them.
+    // 2. Initialize SDL3 host window BEFORE loader::load / NVN so nn::vi::GetNativeWindow
+    // has a valid SDL_Window* ready before guest code ever touches NVN.
+    out.stage = InitStage::Window;
+    if (!opts.no_window && !std::getenv("SNAP_HEADLESS")) {
+        WindowConfig wcfg;
+        wcfg.hidden = (opts.cmd == "init" || opts.stop_after_init);
+        if (g_host_win.create(wcfg)) {
+            out.window_created = true;
+            out.native_window = g_host_win.native_handle();
+            apply_ultrawide_from_window(g_host_win);
+        } else {
+            std::fprintf(stderr, "init_linux: warning: SDL3 window creation failed; continuing headless\n");
+        }
+    }
+
+    // 3. Register host overrides before loader::load() so relocations and import tables bind to them.
     out.stage = InitStage::Overrides;
     loader::install_libc_overrides();
     hle::init_trace_from_env();
@@ -92,6 +161,16 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
     out.audio_overrides_bound = snap_bind_audio();
     snap_audio_set_os_hooks([](void *ev) { os_system_event_signal(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ev))); });
     snap_audio_set_event_init_hook([](void *ev) { os_system_event_create(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(ev)), 1); });
+    snap_bind_nvn();
+    out.nvn_bound = true;
+    out.nvn_procs_bound = snap_nvn_bridge_count();
+    loader::add_override("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", vi_get_native_window_host);
+    {
+        static const NvnHostHooks hk{nullptr, hook_present, hook_submit};
+        nvnHostSetHooks(&hk);
+        g_hooks_active.store(true, std::memory_order_release);
+        out.hooks_installed = true;
+    }
     size_t os_count = 0;
     const OsOverride *os_tab = os_override_table(&os_count);
     for (size_t i = 0; i < os_count; ++i) {
@@ -166,6 +245,33 @@ bool init_guest_runtime(const BootOpts &opts, bool validate_archives, InitResult
                  static_cast<unsigned long long>(out.tpidr),
                  static_cast<unsigned long long>(c->tpidrro));
     return true;
+}
+
+WindowEvents pump_host_window_events() {
+    if (!g_host_win.is_open()) return {};
+    const WindowEvents ev = g_host_win.poll_events();
+    if (ev.resized || ev.display_changed) {
+        apply_ultrawide_from_window(g_host_win);
+        nvnHostNotifyWindowResize(g_host_win.native_handle());
+    }
+    return ev;
+}
+
+bool host_window_quit_requested() {
+    return g_host_win.quit_requested();
+}
+
+HostWindow *host_window() {
+    return g_host_win.is_open() ? &g_host_win : nullptr;
+}
+
+void shutdown_guest_runtime() {
+    if (g_hooks_active.exchange(false, std::memory_order_acq_rel)) {
+        nvnHostSetHooks(nullptr);
+    }
+    snap_audio_log_checks();
+    snap_audio_shutdown();
+    g_host_win.destroy();
 }
 
 }  // namespace snap_linux
