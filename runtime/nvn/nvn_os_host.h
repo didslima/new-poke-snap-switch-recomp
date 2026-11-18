@@ -57,6 +57,10 @@ bool run_process_capture(const std::string& cmd, std::string* out_output, int* o
 const char* glslang_default_exe();
 std::string glslang_sdk_candidate(const std::string& root);
 
+// Optional developer diagnostic (NVN_WB_WATCH=1): arms a one-shot writeback page guard on Windows.
+// Returns false explicitly on Linux where PAGE_GUARD cannot be emulated safely without global signal handlers.
+bool watch_writeback_page(void* addr, size_t size, const int* present_count_ptr);
+
 inline bool ascii_ieq(const char* a, const char* b) {
   if (!a || !b) return a == b;
   while (*a && *b) {

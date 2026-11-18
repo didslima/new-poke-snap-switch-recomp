@@ -224,6 +224,17 @@ void test_filesystem_and_harness() {
   std::filesystem::remove_all(base, ec);
 }
 
+void test_writeback_watch() {
+  uint8_t buf[4096]{};
+  int present_count = 7;
+  CHECK(!nvn::os_host::watch_writeback_page(nullptr, 0, nullptr));
+  CHECK(!nvn::os_host::watch_writeback_page(buf, sizeof(buf), &present_count));
+  // Buffer must remain safely readable and writable without any SIGSEGV/PAGE_GUARD side effects.
+  buf[0] = 0x5A;
+  buf[sizeof(buf) - 1] = 0xA5;
+  CHECK(buf[0] == 0x5A && buf[sizeof(buf) - 1] == 0xA5);
+}
+
 }  // namespace
 
 int main() {
@@ -235,6 +246,7 @@ int main() {
   test_sha256_vectors();
   test_cache_dir_xdg();
   test_filesystem_and_harness();
+  test_writeback_watch();
   std::printf("nvn_os_host_linux_test: %d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }

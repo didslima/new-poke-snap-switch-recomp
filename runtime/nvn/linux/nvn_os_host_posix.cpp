@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <pthread.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -350,6 +351,16 @@ const char* glslang_default_exe() { return "glslangValidator"; }
 
 std::string glslang_sdk_candidate(const std::string& root) {
   return root + "/tools/vulkan_sdk/bin/glslangValidator";
+}
+
+bool watch_writeback_page(void* /*addr*/, size_t /*size*/, const int* /*present_count_ptr*/) {
+  // Windows PAGE_GUARD + VEH cannot be emulated safely on Linux without global SIGSEGV handlers
+  // that would conflict with runtime memory management; report unavailable explicitly.
+  static std::once_flag warned;
+  std::call_once(warned, [] {
+    std::fprintf(stderr, "[wbwatch] NVN_WB_WATCH is unavailable on Linux (no safe PAGE_GUARD equivalent)\n");
+  });
+  return false;
 }
 
 }  // namespace nvn::os_host

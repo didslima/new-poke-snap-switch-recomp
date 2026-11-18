@@ -6,9 +6,11 @@
 #include <bcrypt.h>
 #include <intrin.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -289,6 +291,46 @@ const char* glslang_default_exe() { return "glslangValidator.exe"; }
 
 std::string glslang_sdk_candidate(const std::string& root) {
   return root + "\\tools\\vulkan_sdk\\Bin\\glslangValidator.exe";
+}
+
+namespace {
+
+std::atomic<int> g_wb_watch_hits{0};
+const int* g_wb_present_count_ptr = nullptr;
+
+LONG CALLBACK WbWatchHandler(EXCEPTION_POINTERS* ep) {
+  if (ep->ExceptionRecord->ExceptionCode != STATUS_GUARD_PAGE_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+  if (g_wb_watch_hits.fetch_add(1) < 64) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    const int present = g_wb_present_count_ptr ? *g_wb_present_count_ptr : 0;
+    std::fprintf(stderr, "[wbwatch] p%d access %s 0x%llx by rip=0x%llx (exe+0x%llx) thread=%lu\n",
+                 present,
+                 ep->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
+                 static_cast<unsigned long long>(ep->ExceptionRecord->ExceptionInformation[1]),
+                 static_cast<unsigned long long>(ep->ContextRecord->Rip),
+                 static_cast<unsigned long long>(ep->ContextRecord->Rip - base),
+                 GetCurrentThreadId());
+    void* fr[24];
+    const USHORT nf = RtlCaptureStackBackTrace(0, 24, fr, nullptr);
+    std::fprintf(stderr, "[wbwatch]   stack:");
+    for (USHORT i = 0; i < nf; ++i) {
+      std::fprintf(stderr, " exe+0x%llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(fr[i]) - base));
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+  }
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+}  // namespace
+
+bool watch_writeback_page(void* addr, size_t size, const int* present_count_ptr) {
+  if (!addr || size == 0) return false;
+  if (present_count_ptr) g_wb_present_count_ptr = present_count_ptr;
+  static std::once_flag installed;
+  std::call_once(installed, [] { AddVectoredExceptionHandler(1, WbWatchHandler); });
+  DWORD old = 0;
+  return VirtualProtect(addr, size, PAGE_READWRITE | PAGE_GUARD, &old) != 0;
 }
 
 }  // namespace nvn::os_host
