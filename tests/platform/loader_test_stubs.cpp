@@ -25,9 +25,15 @@ const uint64_t main_import_count = 0;
 const uint64_t sdk_fn_addrs[1] = {0};
 const GuestFn sdk_fn_ptrs[1] = {nullptr};
 const uint64_t sdk_fn_count = 0;
-void snap_crashlog_fatal(const char *kind, const char *detail) { fprintf(stderr, "[stub] fatal %s: %s\n", kind, detail); }
-void snap_fn_observe(uint64_t, uint64_t, uint64_t) {}
-void snap_skips_observe(uint64_t, uint64_t, uint64_t) {}
-void snap_neo_observe(uint64_t, uint64_t, uint64_t) {}
-void snap_highfps_observe(uint64_t, uint64_t, uint64_t) {}
+#if defined(__GNUC__) || defined(__clang__)
+#define SNAP_TEST_WEAK __attribute__((weak))
+#else
+#define SNAP_TEST_WEAK
+#endif
+SNAP_TEST_WEAK void snap_crashlog_fatal(const char *kind, const char *detail) { fprintf(stderr, "[stub] fatal %s: %s\n", kind, detail); }
+SNAP_TEST_WEAK void snap_fn_observe(uint64_t, uint64_t, uint64_t) {}
+SNAP_TEST_WEAK void snap_skips_observe(uint64_t, uint64_t, uint64_t) {}
+SNAP_TEST_WEAK void snap_neo_observe(uint64_t, uint64_t, uint64_t) {}
+SNAP_TEST_WEAK void snap_highfps_observe(uint64_t, uint64_t, uint64_t) {}
+#undef SNAP_TEST_WEAK
 }
