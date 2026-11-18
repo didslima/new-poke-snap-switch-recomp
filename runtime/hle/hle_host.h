@@ -12,11 +12,13 @@
 namespace hle::host {
 
 char path_sep();
+std::string exe_dir();
 std::string default_data_root();
 std::string default_config_dir();
 std::string legacy_data_root();
 bool valid_utf8_path(const std::string& s);
 bool readable_addr(uint64_t addr, size_t size);
+bool mem_range_ok(uint64_t addr, size_t size, bool write);
 bool atomic_replace_file(const std::string& tmp_path, const std::string& dst_path);
 void set_env_var(const char* name, const char* value);
 void unset_env_var(const char* name);

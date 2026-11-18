@@ -37,6 +37,7 @@ extern "C" void snap_pace_vsync_note_none();
 #pragma comment(linker, "/alternatename:snap_aim_shot=snap_aim_shot_none")
 #pragma comment(linker, "/alternatename:snap_aim_pose=snap_aim_pose_none")
 #pragma comment(linker, "/alternatename:snap_import_counts_dump=snap_import_counts_dump_none")
+#pragma comment(linker, "/alternatename:snap_os_heap_base=snap_os_heap_base_none")
 #endif
 
 namespace hle {
@@ -59,6 +60,12 @@ std::string appdata_utf8() {
 namespace hle::host {
 
 char path_sep() { return '\\'; }
+
+std::string exe_dir() {
+  wchar_t mp[MAX_PATH] = {};
+  GetModuleFileNameW(nullptr, mp, MAX_PATH);
+  return std::filesystem::path(mp).parent_path().u8string();
+}
 
 std::string default_data_root() { return hle::appdata_utf8() + "\\SnapRecomp"; }
 
@@ -85,6 +92,24 @@ bool readable_addr(uint64_t addr, size_t size) {
   if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
   const size_t avail = (size_t)((uintptr_t)mbi.BaseAddress + mbi.RegionSize - (uintptr_t)addr);
   return size <= avail;
+}
+
+bool mem_range_ok(uint64_t addr, size_t size, bool write) {
+  if (size == 0) return true;
+  if (addr + size < addr) return false;
+  uint64_t cur = addr;
+  const uint64_t end = addr + size;
+  while (cur < end) {
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(cur)), &mi, sizeof mi)) return false;
+    const bool r_ok = !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && mi.Protect != 0;
+    const bool w_ok = (mi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) && !(mi.Protect & PAGE_GUARD);
+    if (mi.State != MEM_COMMIT || !r_ok || (write && !w_ok)) return false;
+    const uint64_t next = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mi.BaseAddress)) + mi.RegionSize;
+    if (next <= cur) return false;
+    cur = next;
+  }
+  return true;
 }
 
 bool atomic_replace_file(const std::string& tmp_path, const std::string& dst_path) {

@@ -44,6 +44,7 @@ extern "C" __attribute__((weak)) void snap_aim_shot(void) {}
 extern "C" __attribute__((weak)) int snap_aim_pose(const char*, char* why, int n) { if (why && n > 0) std::snprintf(why, (size_t)n, "aim tool off"); return 1; }
 extern "C" __attribute__((weak)) int snap_aim_act(const char*, char* why, int n) { if (why && n > 0) std::snprintf(why, (size_t)n, "aim tool off"); return 0; }
 extern "C" __attribute__((weak)) void snap_import_counts_dump(const char*) {}
+extern "C" __attribute__((weak)) uint64_t snap_os_heap_base(void) { return 0; }
 
 // Weak Stage 6C-B1 seams for unported NVN frame counters and cheats (overridden when ported).
 namespace nvn {
@@ -75,6 +76,14 @@ namespace hle::host {
 
 char path_sep() { return '/'; }
 
+std::string exe_dir() {
+  char buf[4096] = {};
+  const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0) return ".";
+  buf[n] = '\0';
+  return std::filesystem::path(buf).parent_path().string();
+}
+
 std::string default_data_root() {
   const char* xdg = std::getenv("XDG_DATA_HOME");
   if (xdg && *xdg) return std::string(xdg) + "/SnapRecomp";
@@ -105,6 +114,30 @@ bool readable_addr(uint64_t addr, size_t size) {
     size -= n;
   }
   return true;
+}
+
+bool mem_range_ok(uint64_t addr, size_t size, bool write) {
+  if (size == 0) return true;
+  if (addr == 0 || addr + size < addr) return false;
+  FILE* f = std::fopen("/proc/self/maps", "r");
+  if (!f) return false;
+  uint64_t cur = addr;
+  const uint64_t end = addr + size;
+  char line[512];
+  while (cur < end && std::fgets(line, sizeof(line), f)) {
+    unsigned long long lo = 0, hi = 0;
+    char perms[8] = {};
+    if (std::sscanf(line, "%llx-%llx %7s", &lo, &hi, perms) != 3) continue;
+    if (hi <= cur) continue;
+    if (lo > cur) break;
+    if (perms[0] != 'r' || (write && perms[1] != 'w')) {
+      std::fclose(f);
+      return false;
+    }
+    cur = hi;
+  }
+  std::fclose(f);
+  return cur >= end;
 }
 
 bool atomic_replace_file(const std::string& tmp_path, const std::string& dst_path) {

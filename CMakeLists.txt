@@ -394,6 +394,14 @@ if(UNIX AND NOT APPLE)
   target_link_libraries(snap_window_opts_linux_test PRIVATE snap_nvn_renderer_linux)
   add_test(NAME window_opts_linux COMMAND snap_window_opts_linux_test)
 
+  add_executable(snap_cheats_linux_test
+    tests/platform/cheats_linux_test.cpp)
+  target_include_directories(snap_cheats_linux_test PRIVATE ${CMAKE_SOURCE_DIR} runtime)
+  target_compile_features(snap_cheats_linux_test PRIVATE cxx_std_20)
+  target_compile_options(snap_cheats_linux_test PRIVATE -Wall -Wextra)
+  target_link_libraries(snap_cheats_linux_test PRIVATE snap_nvn_renderer_linux)
+  add_test(NAME cheats_linux COMMAND snap_cheats_linux_test)
+
   add_executable(snap_ui_overlay_linux_test
     tests/nvn/ui_overlay_linux_test.cpp
     host/linux/window_sdl3.cpp)

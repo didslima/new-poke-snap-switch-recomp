@@ -9,7 +9,6 @@
 #endif
 
 #include "../ui_internal.h"
-#include "hle/cheats.h"
 #include "window_opts_public.h"
 #include "imgui.h"
 
@@ -45,23 +44,3 @@ int snap_problem_report(const char* /*who*/, char* path_out, int path_cap, char*
 }
 
 }  // extern "C"
-
-namespace hle::cheats {
-
-bool master_on() { return false; }
-void set_master(bool /*on*/) {}
-std::vector<Entry> entries() { return {}; }
-void set_on(size_t /*index*/, bool /*on*/) {}
-void reload() {}
-std::string file_path() { return {}; }
-std::string status() { return "Cheats are not supported on Linux yet."; }
-bool active() { return false; }
-void tick() {}
-bool test_load(const std::string& /*text*/, std::string* error) {
-  if (error) *error = "not supported on Linux";
-  return false;
-}
-void test_hooks(uint64_t /*heap_base*/, uint64_t /*keys*/) {}
-bool test_run_once() { return false; }
-
-}  // namespace hle::cheats

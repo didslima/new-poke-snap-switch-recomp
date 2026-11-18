@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Player cheats (runtime/hle/cheats.h, docs/cheats.md). The VM in runtime/hle/cheat/ only calls back into the Memory adapter below; this file owns
 // the file, the per-cheat switches and the once-per-frame run.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
 #include "cheats.h"
 
 #include <algorithm>
@@ -21,13 +17,13 @@
 #include "cheat/cheat_vm.h"
 #include "cheat/cheat_vm.cpp"   // compiled with this file: the build globs runtime/hle/*.cpp only, and the VM has no other user
 #include "hle.h"
+#include "hle_host.h"
 #include "input_core.h"
 #include "settings.h"
 
 namespace nvn { extern int g_presentCount; }
-extern "C" uint64_t snap_os_heap_base(void);   // runtime/os/cheat_heap.cpp (the HLE tests do not link runtime/os: the weak default below)
+extern "C" uint64_t snap_os_heap_base(void);   // runtime/os/cheat_heap.cpp (the HLE tests do not link runtime/os: bound in hle_host_win32.cpp / weak in hle_host_posix.cpp)
 extern "C" uint64_t snap_os_heap_base_none(void) { return 0; }
-#pragma comment(linker, "/alternatename:snap_os_heap_base=snap_os_heap_base_none")
 
 namespace hle::cheats {
 
@@ -51,26 +47,7 @@ std::atomic<bool> g_master{false};
 std::string env(const char* n) { const char* e = std::getenv(n); return e && *e ? e : ""; }
 std::string build_id() { const std::string e = env("SNAP_GAME_BUILD_ID"); return e.empty() ? kBuildId : e; }
 
-bool readable(DWORD p) { return !(p & (PAGE_NOACCESS | PAGE_GUARD)) && p != 0; }
-bool writable(DWORD p) { return (p & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) && !(p & PAGE_GUARD); }
-
-// Every byte of [a, a+n) must be committed with the right protection: the guest's addresses are host pointers, so a cheat that aims outside what the game
-// mapped fails the cheat run instead of crashing the process.
-bool range_ok(uint64_t a, size_t n, bool write) {
-  if (n == 0) return true;
-  if (a + n < a) return false;
-  uint64_t cur = a;
-  const uint64_t end = a + n;
-  while (cur < end) {
-    MEMORY_BASIC_INFORMATION mi;
-    if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(cur)), &mi, sizeof mi)) return false;
-    if (mi.State != MEM_COMMIT || !readable(mi.Protect) || (write && !writable(mi.Protect))) return false;
-    const uint64_t next = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mi.BaseAddress)) + mi.RegionSize;
-    if (next <= cur) return false;
-    cur = next;
-  }
-  return true;
-}
+bool range_ok(uint64_t a, size_t n, bool write) { return hle::host::mem_range_ok(a, n, write); }
 
 uint64_t game_heap_base() {
   if (g_test) return g_test_heap;
@@ -129,9 +106,7 @@ void save_on() {
 std::string dir_for_files() {
   const std::string o = env("SNAP_CHEATS_DIR");
   if (!o.empty()) return o;
-  wchar_t mp[MAX_PATH] = {};
-  GetModuleFileNameW(nullptr, mp, MAX_PATH);
-  return (std::filesystem::path(mp).parent_path() / "cheats").string();
+  return (std::filesystem::u8path(hle::host::exe_dir()) / "cheats").string();
 }
 
 bool build_vm(const std::string& text, const std::string& where) {
