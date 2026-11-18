@@ -293,6 +293,7 @@ HostWindow *host_window() {
 }
 
 void shutdown_guest_runtime() {
+    std::fprintf(stderr, "init_linux: shutting down guest runtime (vsync -> hooks -> ui -> audio -> window)\n");
     hle::vi_stop_vsync();
     if (g_hooks_active.exchange(false, std::memory_order_acq_rel)) {
         nvnHostSetHooks(nullptr);
@@ -331,8 +332,11 @@ bool execute_run_pipeline(const RunPlan &plan, const GuestExecutionOps &ops, Run
         err = "GuestExecutionOps missing required entry points";
         return false;
     }
+    std::fprintf(stderr, "run_linux: entering run_initializers()\n");
     out.initializers_run = ops.run_initializers(plan.main_cpu, true);
+    std::fprintf(stderr, "run_linux: run_initializers() completed (%d initializers)\n", out.initializers_run);
     if (plan.stop_after_init) {
+        std::fprintf(stderr, "run_linux: --stop-after-init set, stopping before nninitStartup/nnMain\n");
         out.stopped_after_init = true;
         if (ops.stop_vi_vsync) {
             ops.stop_vi_vsync();
@@ -342,11 +346,17 @@ bool execute_run_pipeline(const RunPlan &plan, const GuestExecutionOps &ops, Run
         return true;
     }
     if (plan.startup_addr) {
+        std::fprintf(stderr, "run_linux: entering nninitStartup (%#llx)\n",
+                     static_cast<unsigned long long>(plan.startup_addr));
         ops.call_guest(plan.main_cpu, plan.startup_addr);
+        std::fprintf(stderr, "run_linux: nninitStartup returned\n");
         out.called_startup = true;
     }
     if (plan.nnmain_addr) {
+        std::fprintf(stderr, "run_linux: entering nnMain (%#llx)\n",
+                     static_cast<unsigned long long>(plan.nnmain_addr));
         ops.call_guest(plan.main_cpu, plan.nnmain_addr);
+        std::fprintf(stderr, "run_linux: nnMain returned\n");
         out.called_nnmain = true;
     }
     if (ops.stop_vi_vsync) {

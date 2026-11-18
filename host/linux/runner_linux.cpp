@@ -5,7 +5,9 @@
 #include "preflight_linux.h"
 #ifdef SNAP_LINUX_HAS_AOT
 #include "audio/audio_out.h"
+#include "hle/hle.h"
 #include "init_linux.h"
+#include "loader.h"
 #endif
 
 #include <cerrno>
@@ -27,7 +29,7 @@ bool is_supported_cmd(const std::string &c) {
 void print_usage(FILE *out) {
     std::fprintf(out,
         "usage: snap_boot_linux [--main elf] [--sdk elf] [--main-lib lib.a] [--sdk-lib lib.a] "
-        "validate|info|shared|init [--probe N] [--libc]|run [--probe N] [--trace file] [--stop-after-init]|"
+        "validate|info|shared|init [--probe N] [--libc]|run [--probe N] [--trace file] [--stop-after-init] [--allow-guest-exec]|"
         "eh|lua|bench [--iters N]|all\n");
 }
 
@@ -88,13 +90,53 @@ int bootstrap_runner_entry(void *ud) {
             std::fprintf(stderr, "boot_linux: run pipeline preparation failed: %s\n", plan_err.c_str());
             return 1;
         }
+        if (!opts->allow_guest_exec) {
+            std::fprintf(stderr,
+                         "boot_linux: run pipeline prepared (nninitStartup=%#llx, nnMain=%#llx, stop_after_init=%d); "
+                         "guest execution disabled by default (pass --allow-guest-exec to opt in)\n",
+                         static_cast<unsigned long long>(plan.startup_addr),
+                         static_cast<unsigned long long>(plan.nnmain_addr),
+                         plan.stop_after_init ? 1 : 0);
+            return plan.stop_after_init ? 0 : 2;
+        }
+        if (shutdown_requested()) {
+            std::fprintf(stderr, "boot_linux: shutdown requested by signal %d before guest execution\n", shutdown_signal());
+            return 128 + shutdown_signal();
+        }
         std::fprintf(stderr,
-                     "boot_linux: run pipeline prepared (nninitStartup=%#llx, nnMain=%#llx, stop_after_init=%d); "
-                     "guest execution is disabled in stage 6E-D (build/test only)\n",
+                     "boot_linux: WARNING: entering controlled guest execution "
+                     "(stop_after_init=%d, nninitStartup=%#llx, nnMain=%#llx)\n",
+                     plan.stop_after_init ? 1 : 0,
                      static_cast<unsigned long long>(plan.startup_addr),
-                     static_cast<unsigned long long>(plan.nnmain_addr),
-                     plan.stop_after_init ? 1 : 0);
-        return plan.stop_after_init ? 0 : 2;
+                     static_cast<unsigned long long>(plan.nnmain_addr));
+        struct TraceFileGuard {
+            FILE *fp = nullptr;
+            ~TraceFileGuard() {
+                if (fp) {
+                    loader::g_trace_file = nullptr;
+                    std::fclose(fp);
+                }
+            }
+        } trace_guard;
+        if (!opts->trace_file.empty()) {
+            trace_guard.fp = std::fopen(opts->trace_file.c_str(), "w");
+            if (!trace_guard.fp) {
+                std::fprintf(stderr, "boot_linux: warning: could not open trace file '%s'\n", opts->trace_file.c_str());
+            } else {
+                loader::g_trace_file = trace_guard.fp;
+            }
+        }
+        GuestExecutionOps ops{};
+        ops.run_initializers = loader::run_initializers;
+        ops.call_guest = [](Cpu *c, uint64_t addr) { loader::call_guest(c, addr); };
+        ops.stop_vi_vsync = []() { hle::vi_stop_vsync(); };
+        RunResult run_res;
+        std::string run_err;
+        if (!execute_run_pipeline(plan, ops, run_res, run_err)) {
+            std::fprintf(stderr, "boot_linux: execute_run_pipeline failed: %s\n", run_err.c_str());
+            return 1;
+        }
+        return 0;
     }
 #else
     if (opts->cmd == "init") {
@@ -159,6 +201,8 @@ ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err) {
             out.libc = true;
         } else if (a == "--stop-after-init") {
             out.stop_after_init = true;
+        } else if (a == "--allow-guest-exec") {
+            out.allow_guest_exec = true;
         } else if (a == "--no-window") {
             out.no_window = true;
         } else if (a == "--trace") {

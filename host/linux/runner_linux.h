@@ -26,6 +26,7 @@ struct BootOpts {
     int iters = 5;
     bool libc = false;
     bool stop_after_init = false;
+    bool allow_guest_exec = false;
     bool no_window = false;
     bool help = false;
 };

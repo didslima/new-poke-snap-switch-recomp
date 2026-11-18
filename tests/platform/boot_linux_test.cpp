@@ -85,6 +85,12 @@ int main() {
         CHECK(run_parse({"snap_boot_linux", "--import-save", "x"}, o, err) == snap_linux::ParseStatus::Error);
         CHECK(run_parse({"snap_boot_linux", "--main"}, o, err) == snap_linux::ParseStatus::Error);
         CHECK(run_parse({"snap_boot_linux", "pads"}, o, err) == snap_linux::ParseStatus::Error);
+
+        // --allow-guest-exec must default to false and only enable when explicitly passed.
+        CHECK(run_parse({"snap_boot_linux", "run"}, o, err) == snap_linux::ParseStatus::Ok);
+        CHECK(!o.allow_guest_exec);
+        CHECK(run_parse({"snap_boot_linux", "run", "--allow-guest-exec"}, o, err) == snap_linux::ParseStatus::Ok);
+        CHECK(o.allow_guest_exec);
     }
 
     // 4. CPU capability check (x86-64-v3 host).
