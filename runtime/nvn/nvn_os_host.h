@@ -16,6 +16,7 @@ int primary_screen_height();
 uint64_t monotonic_ns();
 uint64_t monotonic_ms();
 void sleep_ms(uint32_t ms);
+[[noreturn]] void fatal_exit(int code);
 
 uint64_t current_thread_id();
 uint64_t current_process_id();
@@ -77,6 +78,10 @@ bool pace_vblank_supported();
 void* pace_vblank_open(const char* display_name);
 bool pace_vblank_wait(void* handle, int* out_status);
 void pace_vblank_close(void* handle);
+
+// Hardware/OS dirty-page write watch (Win32 GetWriteWatch); returns false on Linux so callers fall back to full copies.
+bool write_watch_supported();
+bool query_write_watch(void* base, size_t size, bool reset, std::vector<void*>* out_addrs, uint32_t* out_error);
 
 inline bool ascii_ieq(const char* a, const char* b) {
   if (!a || !b) return a == b;

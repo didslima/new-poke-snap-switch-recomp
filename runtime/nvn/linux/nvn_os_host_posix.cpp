@@ -5,6 +5,20 @@
 #endif
 
 #include "../nvn_os_host.h"
+#include "../nvn_os_host_vk.h"
+#include "../../ui/ui_present.h"
+
+extern "C" {
+__attribute__((weak)) void os_host_block_begin(void) {}
+__attribute__((weak)) void os_host_block_end(void) {}
+__attribute__((weak)) void snap_ui_present(const SnapUiFrame*) {}
+__attribute__((weak)) bool snap_ui_start_pending() { return false; }
+__attribute__((weak)) void snap_ui_first_picture() {}
+__attribute__((weak)) void snap_look_present(const SnapUiFrame*) {}
+__attribute__((weak)) int snap_window_frame_cap() { return 0; }
+__attribute__((weak)) void snap_fs_drain_for_exit(int) {}
+__attribute__((weak)) void snap_crashlog_fatal(const char*, const char*) {}
+}
 
 #include <algorithm>
 #include <array>
@@ -32,6 +46,7 @@
 
 #ifdef HLE_WITH_SDL3
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -445,5 +460,61 @@ bool pace_vblank_wait(void* /*handle*/, int* out_status) {
 }
 
 void pace_vblank_close(void* /*handle*/) {}
+
+[[noreturn]] void fatal_exit(int code) {
+  std::_Exit(code);
+}
+
+void append_vulkan_surface_instance_extensions(std::vector<const char*>& out) {
+#ifdef HLE_WITH_SDL3
+  if (SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+    Uint32 count = 0;
+    if (const char* const* exts = SDL_Vulkan_GetInstanceExtensions(&count); exts && count > 0) {
+      for (Uint32 i = 0; i < count; ++i) {
+        out.push_back(exts[i]);
+      }
+      return;
+    }
+  }
+#endif
+  out.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+}
+
+bool physical_device_presentation_support(VkInstance instance, VkPhysicalDevice phys, uint32_t queue_family) {
+  if (phys == VK_NULL_HANDLE) return false;
+#ifdef HLE_WITH_SDL3
+  if (instance != VK_NULL_HANDLE && SDL_WasInit(SDL_INIT_VIDEO) != 0) {
+    return SDL_Vulkan_GetPresentationSupport(instance, phys, queue_family);
+  }
+#else
+  (void)instance;
+  (void)queue_family;
+#endif
+  return true;
+}
+
+bool write_watch_supported() { return false; }
+
+bool query_write_watch(void* /*base*/, size_t /*size*/, bool /*reset*/, std::vector<void*>* out_addrs, uint32_t* out_error) {
+  if (out_addrs) out_addrs->clear();
+  if (out_error) *out_error = 0;
+  return false;
+}
+
+bool create_vulkan_surface(VkInstance instance,
+                           void* native_window,
+                           const VkAllocationCallbacks* allocator,
+                           VkSurfaceKHR* out_surface) {
+  if (!out_surface) return false;
+  *out_surface = VK_NULL_HANDLE;
+  if (instance == VK_NULL_HANDLE || !native_window) return false;
+#ifdef HLE_WITH_SDL3
+  if (SDL_WasInit(SDL_INIT_VIDEO) == 0) return false;
+  return SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(native_window), instance, allocator, out_surface);
+#else
+  (void)allocator;
+  return false;
+#endif
+}
 
 }  // namespace nvn::os_host

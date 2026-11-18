@@ -3,10 +3,8 @@
 // Signatures: inferred from the game's call sites (see [CALL] tags in nvn_types.h and the per-function notes)
 // and cross-checked against tools/ref/totk/runtime/nvn.h (MIT, community reconstruction) [TOTK-NVN].
 // The guest only ever sees these functions through nvnBootstrapLoader / nvnDeviceGetProcAddress.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <windows.h>
+#include "nvn_os_host.h"
+#include "nvn_os_host_vk.h"
 
 #include <algorithm>
 #include <cmath>
@@ -240,10 +238,8 @@ static constexpr uint64_t kGuestMain = 0x7100000000ull;
 static constexpr uint64_t kEvalDepthRet = 0x5c3d3c;      // return address of the "Evaluation DepthStencil" bl 0x5b8b10 at main+0x5c3d38
 static constexpr uint32_t kTagEvalDepth = 0x45564450;    // 'EVDP', exempt by default (ScalePolicy::ScalePolicy)
 static bool GuestReadable(uint64_t p) {
-  MEMORY_BASIC_INFORMATION mbi;
-  if (p < 0x10000 || (p & 7) || !VirtualQuery((void*)p, &mbi, sizeof mbi)) return false;
-  if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-  return p + 16 <= (uint64_t)mbi.BaseAddress + mbi.RegionSize;
+  if (p < 0x10000 || (p & 7)) return false;
+  return nvn::os_host::readable_addr(reinterpret_cast<const void*>(p), 16);
 }
 static int GuestCallChain(uint64_t* out, int max) {
   int n = 0; uint64_t fp = t_guestFp;
@@ -401,10 +397,7 @@ Boolean WindowInitialize(void* window, const void* b) {
   }
   w->slotValue.assign(w->tex.size(), 0);
   w->slotSem.assign(w->tex.size(), VK_NULL_HANDLE);
-  VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
-  sci.hinstance = GetModuleHandleW(nullptr);
-  sci.hwnd = static_cast<HWND>(wb->native);
-  if (vkCreateWin32SurfaceKHR(h->instance, &sci, nullptr, &w->surface) != VK_SUCCESS) { LogError("surface creation failed"); delete w; return 0; }
+  if (!nvn::os_host::create_vulkan_surface(h->instance, wb->native, nullptr, &w->surface)) { LogError("surface creation failed"); delete w; return 0; }
   VkBool32 ok = VK_FALSE;
   vkGetPhysicalDeviceSurfaceSupportKHR(h->phys, h->family, w->surface, &ok);
   if (!ok) { LogError("queue family cannot present to this surface"); vkDestroySurfaceKHR(h->instance, w->surface, nullptr); delete w; return 0; }
@@ -687,7 +680,7 @@ void ApplyHostEnvPolicy() {
   if (const char* e = getenv("SNAP_SHADOW_RES")) { int v = atoi(e); g_scale.shadowRes = ((v > 1024 && v <= 8192) || v == 512) ? v : 0; }
   if (const char* e = snapdef::get("SNAP_ANISO")) { float v = (float)atof(e); g_anisoOverride = v > 1.f ? std::min(v, 16.f) : 0.f; }
   if (const char* e = getenv("SNAP_LOD_BIAS")) {
-    if (!_stricmp(e, "auto")) g_lodBiasAuto = true; else { g_lodBiasExtra = (float)atof(e); g_lodBiasAuto = false; }
+    if (nvn::os_host::ascii_ieq(e, "auto")) g_lodBiasAuto = true; else { g_lodBiasExtra = (float)atof(e); g_lodBiasAuto = false; }
   } else g_lodBiasAuto = g_scale.scale != 1.0f || (g_scale.displayScale > 0.f && g_scale.displayScale != 1.0f);   // [upscale] scene 1.0, output 2.0: bias -1
   Log("host policy: scale=%.2f shadowRes=%d aniso=%.0f lodBias=%s%.2f", g_scale.scale, g_scale.shadowRes, g_anisoOverride, g_lodBiasAuto ? "auto " : "", g_lodBiasExtra);
 }

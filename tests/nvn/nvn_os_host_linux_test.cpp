@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Stage 6E-A Groups 2A & 2B: Linux unit tests for nvn::os_host.
+// Stage 6E-A Groups 2A, 2B & 2C: Linux unit tests for nvn::os_host.
 #include "nvn_os_host.h"
+#include "nvn_os_host_vk.h"
+#include "ui/ui_present.h"
+#include "upscale/upscale_nvn.h"
+
+#ifdef HLE_WITH_SDL3
+#include <SDL3/SDL.h>
+#endif
 
 #include <cstdint>
 #include <cstdio>
@@ -263,6 +270,94 @@ void test_pacing_helpers() {
   CHECK(!nvn::os_host::pace_query_display(nullptr, 0, nullptr));
 }
 
+extern "C" {
+void os_host_block_begin(void);
+void os_host_block_end(void);
+bool snap_ui_start_pending();
+void snap_ui_first_picture();
+void snap_look_present(const SnapUiFrame*);
+int snap_window_frame_cap();
+void snap_fs_drain_for_exit(int ms);
+void snap_crashlog_fatal(const char*, const char*);
+}
+
+void test_vulkan_surface_and_upscale_stubs() {
+  // 1. Write-watch is explicitly unsupported on Linux (falls back to full copy).
+  CHECK(!nvn::os_host::write_watch_supported());
+  std::vector<void*> dirty;
+  uint32_t ww_err = 123;
+  uint8_t dummy_page[4096]{};
+  CHECK(!nvn::os_host::query_write_watch(dummy_page, sizeof(dummy_page), true, &dirty, &ww_err));
+  CHECK(dirty.empty());
+  CHECK(ww_err == 0);
+
+  // 2. Weak optional host/UI/OS symbols link and execute safely.
+  os_host_block_begin();
+  os_host_block_end();
+  snap_ui_present(nullptr);
+  CHECK(!snap_ui_start_pending());
+  snap_ui_first_picture();
+  snap_look_present(nullptr);
+  CHECK(snap_window_frame_cap() == 0);
+  snap_fs_drain_for_exit(0);
+  snap_crashlog_fatal("test", "noop");
+
+  // 3. Upscaler stubs report unsupported explicitly.
+  float sc = 1.0f, oc = 1.0f;
+  CHECK(!nvn::UpscaleApplyPolicy(&sc, &oc));
+  float jx = 1.0f, jy = 1.0f;
+  nvn::UpscaleSceneJitter(&jx, &jy);
+  CHECK(jx == 0.0f && jy == 0.0f);
+
+  // 4. Neutral Vulkan surface guards.
+  std::vector<const char*> exts;
+  nvn::os_host::append_vulkan_surface_instance_extensions(exts);
+  bool has_khr_surface = false;
+  for (const char* e : exts) {
+    if (e && std::strcmp(e, VK_KHR_SURFACE_EXTENSION_NAME) == 0) has_khr_surface = true;
+  }
+  CHECK(has_khr_surface);
+
+  VkSurfaceKHR surf = reinterpret_cast<VkSurfaceKHR>(0x1);
+  CHECK(!nvn::os_host::create_vulkan_surface(VK_NULL_HANDLE, nullptr, nullptr, &surf));
+  CHECK(surf == VK_NULL_HANDLE);
+  CHECK(!nvn::os_host::create_vulkan_surface(VK_NULL_HANDLE, reinterpret_cast<void*>(0x1234), nullptr, nullptr));
+  CHECK(!nvn::os_host::physical_device_presentation_support(VK_NULL_HANDLE, VK_NULL_HANDLE, 0));
+
+#if defined(SNAP_HAVE_VULKAN) && defined(HLE_WITH_SDL3)
+  if (SDL_Init(SDL_INIT_VIDEO)) {
+    std::vector<const char*> sdl_exts;
+    nvn::os_host::append_vulkan_surface_instance_extensions(sdl_exts);
+    CHECK(!sdl_exts.empty());
+
+    VkApplicationInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    ai.pApplicationName = "nvn_os_host_linux_test";
+    ai.apiVersion = VK_API_VERSION_1_3;
+    VkInstanceCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &ai;
+    ici.enabledExtensionCount = static_cast<uint32_t>(sdl_exts.size());
+    ici.ppEnabledExtensionNames = sdl_exts.data();
+    VkInstance inst = VK_NULL_HANDLE;
+    if (vkCreateInstance(&ici, nullptr, &inst) == VK_SUCCESS && inst != VK_NULL_HANDLE) {
+      SDL_Window* win = SDL_CreateWindow("nvn_vk_surface_test", 64, 64, SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
+      if (win) {
+        VkSurfaceKHR win_surf = VK_NULL_HANDLE;
+        CHECK(nvn::os_host::create_vulkan_surface(inst, win, nullptr, &win_surf));
+        CHECK(win_surf != VK_NULL_HANDLE);
+        if (win_surf != VK_NULL_HANDLE) {
+          vkDestroySurfaceKHR(inst, win_surf, nullptr);
+        }
+        SDL_DestroyWindow(win);
+      }
+      vkDestroyInstance(inst, nullptr);
+    }
+    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+  }
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -276,6 +371,7 @@ int main() {
   test_filesystem_and_harness();
   test_writeback_watch();
   test_pacing_helpers();
+  test_vulkan_surface_and_upscale_stubs();
   std::printf("nvn_os_host_linux_test: %d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }

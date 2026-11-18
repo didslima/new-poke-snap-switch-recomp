@@ -115,7 +115,7 @@ shared   runtime/nvn/nvn_contact.cpp
 shared   runtime/nvn/nvn_dev.cpp
 shared   runtime/nvn/nvn_downsample.cpp
 windows  runtime/nvn/nvn_draw.cpp   # #include <windows.h>, NOMINMAX, VK_USE_PLATFORM_WIN32_KHR via nvn_internal.h ...
-windows  runtime/nvn/nvn_entry.cpp   # #include <windows.h>, GetModuleHandleW, HWND ...
+shared   runtime/nvn/nvn_entry.cpp
 shared   runtime/nvn/nvn_foliage.cpp
 windows  runtime/nvn/nvn_framegen.cpp   # #include <windows.h>, DWORD, GetCurrentThread ...
 windows  runtime/nvn/nvn_freecam.cpp   # #include <wincodec.h>, #include <windows.h>, CoCreateInstance ...
@@ -132,6 +132,7 @@ shared   runtime/nvn/nvn_model.cpp
 shared   runtime/nvn/nvn_ocean.cpp
 windows  runtime/nvn/nvn_os_host_win32.cpp
 linux    runtime/nvn/linux/nvn_os_host_posix.cpp
+linux    runtime/nvn/linux/nvn_upscale_stub.cpp
 shared   runtime/nvn/nvn_pace.cpp
 shared   runtime/nvn/nvn_perf.cpp
 shared   runtime/nvn/nvn_pipeline.cpp
@@ -147,7 +148,7 @@ shared   runtime/nvn/nvn_ssr.cpp
 shared   runtime/nvn/nvn_state.cpp
 shared   runtime/nvn/nvn_submem.cpp
 shared   runtime/nvn/nvn_tex_vk.cpp
-windows  runtime/nvn/nvn_vk.cpp   # #include <windows.h>, DWORD, ExitProcess ...
+shared   runtime/nvn/nvn_vk.cpp
 shared   runtime/nvn/nvn_wide.cpp
 shared   runtime/nvn/nvn_xfer.cpp
 windows  runtime/nvn/upscale/framegen.cpp   # #include <windows.h>, DWORD, GetLastError ...

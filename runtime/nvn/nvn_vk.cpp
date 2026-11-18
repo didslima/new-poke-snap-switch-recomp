@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Vulkan 1.3 backend of the NVN layer: instance/device, images, queues, replay of recorded commands,
 // swapchain presentation. NVN calls only record host data; all Vulkan work happens here at submit.
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#define VK_USE_PLATFORM_WIN32_KHR
-#include <windows.h>
+#include "nvn_os_host.h"
+#include "nvn_os_host_vk.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <set>
@@ -27,27 +26,16 @@
 #include "nvn_framegen.h"          // [framegen] FSR frame generation (SNAP_FRAMEGEN)
 #include "nvn_shot.h"              // screenshot key (F12)
 #include "os/perf.h"   // SNAP_PERF instrumentation (off unless the env var is set)
-// runtime/os: give the virtual core back while pacing. Standalone nvn builds (tests/nvn) have no os layer: the alternatename
-// pragmas bind the no-op fallbacks below when os_kernel.cpp is not linked.
-extern "C" { void os_host_block_begin(void); void os_host_block_end(void); void nvn_os_block_noop(void) {} }
-#pragma comment(linker, "/alternatename:os_host_block_begin=nvn_os_block_noop")
-#pragma comment(linker, "/alternatename:os_host_block_end=nvn_os_block_noop")
-#include "ui/ui_present.h"   // controls overlay hook (runtime/ui); the stub below keeps nvn-only builds linking
-extern "C" void snap_ui_present_none(const SnapUiFrame*) {}
-#pragma comment(linker, "/alternatename:snap_ui_present=snap_ui_present_none")
-extern "C" bool snap_ui_start_pending_none() { return false; }   // "Starting the game" note (runtime/ui/ui_fps.cpp)
-extern "C" void snap_ui_first_picture_none() {}
-#pragma comment(linker, "/alternatename:snap_ui_start_pending=snap_ui_start_pending_none")
-#pragma comment(linker, "/alternatename:snap_ui_first_picture=snap_ui_first_picture_none")
-extern "C" void snap_look_present(const SnapUiFrame*);   // host/mods/look.cpp (hook request 1)
-extern "C" void snap_look_present_none(const SnapUiFrame*) {}
-#pragma comment(linker, "/alternatename:snap_look_present=snap_look_present_none")
-extern "C" int snap_window_frame_cap();   // host/window_opts.cpp (hook request 3)
-extern "C" int snap_window_frame_cap_none() { return 0; }
-#pragma comment(linker, "/alternatename:snap_window_frame_cap=snap_window_frame_cap_none")
-extern "C" void snap_fs_drain_for_exit(int ms);   // runtime/hle/fs.cpp (host/boot.cpp's window-close path uses it too)
-extern "C" void snap_fs_drain_none(int) {}
-#pragma comment(linker, "/alternatename:snap_fs_drain_for_exit=snap_fs_drain_none")
+// runtime/os: give the virtual core back while pacing. Optional host/UI/OS hooks below have no-op fallbacks
+// bound in nvn_os_host_win32.cpp (MSVC alternatename) and nvn_os_host_posix.cpp (ELF weak symbols).
+#include "ui/ui_present.h"   // controls overlay hook (runtime/ui)
+extern "C" {
+void os_host_block_begin(void);
+void os_host_block_end(void);
+void snap_look_present(const SnapUiFrame*);
+int snap_window_frame_cap();
+void snap_fs_drain_for_exit(int ms);
+}
 
 namespace nvn {
 
@@ -93,7 +81,7 @@ static void FatalGpuLoss(const char* where, VkResult r) {
   fflush(stderr);
   { char d[160]; snprintf(d, sizeof d, "%s: %s", where, r == VK_ERROR_DEVICE_LOST ? "VK_ERROR_DEVICE_LOST" : "VK_ERROR_SURFACE_LOST_KHR"); snap_crashlog_fatal("fatal GPU error", d); }
   snap_fs_drain_for_exit(5000);
-  ExitProcess(1);
+  nvn::os_host::fatal_exit(1);
 }
 
 // ---- format table -------------------------------------------------------------------------------------------
@@ -241,7 +229,8 @@ bool Host::Init(bool wantValidation) {
   }
   validation = haveLayer;
 
-  std::vector<const char*> iext = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+  std::vector<const char*> iext;
+  nvn::os_host::append_vulkan_surface_instance_extensions(iext);
   if (validation) {
     iext.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     if (haveValFeat) iext.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
@@ -289,7 +278,7 @@ bool Host::Init(bool wantValidation) {
     std::vector<VkQueueFamilyProperties> qf(qn); vkGetPhysicalDeviceQueueFamilyProperties(pd, &qn, qf.data());
     for (uint32_t i = 0; i < qn; i++) {
       const VkQueueFlags need = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
-      if ((qf[i].queueFlags & need) == need && vkGetPhysicalDeviceWin32PresentationSupportKHR(pd, i)) {
+      if ((qf[i].queueFlags & need) == need && nvn::os_host::physical_device_presentation_support(instance, pd, i)) {
         int score = pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
         if (score > bestScore) { bestScore = score; phys = pd; family = i; props = pr; }
         break;
@@ -398,22 +387,18 @@ bool Host::Init(bool wantValidation) {
     const char* e = getenv("NVN_CACHE_DIR");
     if (e && *e) cacheDir = e;
     else {
-      char path[MAX_PATH] = {};
-      GetModuleFileNameA(nullptr, path, MAX_PATH);
-      std::string d = path;
-      size_t k = d.find_last_of("\\/");
-      cacheDir = (k == std::string::npos ? std::string(".") : d.substr(0, k)) + "\\nvn_cache";
-#ifdef SNAP_RELEASE_BUILD   // release objects (builder/): %LOCALAPPDATA%/SnapRecomp/nvn_cache, so a protected install folder works
-      char la[MAX_PATH] = {};
-      if (GetEnvironmentVariableA("LOCALAPPDATA", la, MAX_PATH) && la[0]) {
-        std::string base = std::string(la) + "\\SnapRecomp";
-        CreateDirectoryA(base.c_str(), nullptr);
-        cacheDir = base + "\\nvn_cache";
-      }
+      const std::string sep(1, nvn::os_host::path_sep());
+#ifdef SNAP_RELEASE_BUILD   // release objects (builder/): %APPDATA%/SnapRecomp/nvn_cache or $XDG_CACHE_HOME/SnapRecomp/nvn_cache
+      const std::string base = nvn::os_host::cache_dir();
+      nvn::os_host::ensure_dir(base);
+      cacheDir = base + sep + "nvn_cache";
+#else
+      const std::string ed = nvn::os_host::exe_dir();
+      cacheDir = (ed.empty() ? std::string(".") : ed) + sep + "nvn_cache";
 #endif
     }
     if (const char* r = getenv("SNAP_XLATE_REV"); r && *r && strcmp(r, "0")) cacheDir += std::string("_r") + r;   // translator revision: separate shader cache (nvn_shader.cpp)
-    CreateDirectoryA(cacheDir.c_str(), nullptr);
+    nvn::os_host::ensure_dir(cacheDir);
     LoadPipelineCache(this);
   }
   PatchFormatFallbacks(phys);
@@ -894,18 +879,17 @@ static bool SyncDirtyPages(PoolImpl* p, uint64_t off, uint64_t end) {
   if (!p->mapped) return true;
   snap_perf::Scope perfScope(snap_perf::C_POOLSYNC);
   snap_perf::count(snap_perf::V_POOLSYNC_CALLS);
-  static thread_local std::vector<PVOID> addrs;
+  static thread_local std::vector<void*> addrs;
   const uintptr_t base = (uintptr_t)p->storage;
   std::lock_guard<std::mutex> lk(p->gpuMutex);
   if (p->ww < 0) return false;
   if (p->ww == 0) {
-    if ((base & 0xFFF) || (p->size & 0xFFF)) { p->ww = -1; return false; }
-    ULONG_PTR n = (ULONG_PTR)(p->size >> 12); DWORD gran = 0;
-    addrs.resize((size_t)std::max<ULONG_PTR>(n, 1));
-    if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, p->storage, (SIZE_T)p->size, addrs.data(), &n, &gran) != 0) {
+    if (!nvn::os_host::write_watch_supported() || (base & 0xFFF) || (p->size & 0xFFF)) { p->ww = -1; return false; }
+    uint32_t wwErr = 0;
+    if (!nvn::os_host::query_write_watch(p->storage, (size_t)p->size, true, &addrs, &wwErr)) {
       p->ww = -1;
       static int warned = 0;
-      if (warned++ < 8) Log("pool %p (0x%llx bytes): no write watch on its storage (error %lu), full copies", (void*)p, (unsigned long long)p->size, GetLastError());
+      if (warned++ < 8) Log("pool %p (0x%llx bytes): no write watch on its storage (error %u), full copies", (void*)p, (unsigned long long)p->size, wwErr);
       return false;
     }
     p->ww = 1;
@@ -925,8 +909,7 @@ static bool SyncDirtyPages(PoolImpl* p, uint64_t off, uint64_t end) {
     return true;
   }
   const uint64_t pb = off & ~0xFFFull, pe = std::min<uint64_t>((end + 0xFFF) & ~0xFFFull, p->size);
-  ULONG_PTR n = (ULONG_PTR)((pe - pb) >> 12); DWORD gran = 0;
-  if (!n) return true;
+  if (pe <= pb) return true;
   // [cpuprof 2026-11-13] ~640 ranges per course frame each paid a GetWriteWatch syscall (~1.2 ms of the 4.3 ms replay). Take one
   // whole-pool snapshot without reset per replay epoch; a range none of whose pages were dirty at the snapshot needs no syscall (the
   // guest wrote it before the submit or not at all; a write after the snapshot stays dirty for the next epoch, like a write after the
@@ -937,11 +920,9 @@ static bool SyncDirtyPages(PoolImpl* p, uint64_t off, uint64_t end) {
   if (kSnap) {
     if (p->wwSnapEpoch != g_replayEpoch) {
       p->wwSnapEpoch = g_replayEpoch;
-      ULONG_PTR m = (ULONG_PTR)(p->size >> 12); DWORD g = 0;
-      addrs.resize((size_t)std::max<ULONG_PTR>(m, 1));
       p->wwBits.assign((size_t)((p->size >> 12) + 63) / 64, 0);
-      if (GetWriteWatch(0, p->storage, (SIZE_T)p->size, addrs.data(), &m, &g) != 0) p->wwSnapEpoch = 0;   // per-range syscalls this epoch
-      else for (ULONG_PTR i = 0; i < m; i++) { const uint64_t pg = ((uintptr_t)addrs[i] - base) >> 12; p->wwBits[pg >> 6] |= 1ull << (pg & 63); }
+      if (!nvn::os_host::query_write_watch(p->storage, (size_t)p->size, false, &addrs, nullptr)) p->wwSnapEpoch = 0;   // per-range syscalls this epoch
+      else for (void* addr : addrs) { const uint64_t pg = ((uintptr_t)addr - base) >> 12; p->wwBits[pg >> 6] |= 1ull << (pg & 63); }
     }
     if (p->wwSnapEpoch == g_replayEpoch) {
       bool any = false;
@@ -949,16 +930,16 @@ static bool SyncDirtyPages(PoolImpl* p, uint64_t off, uint64_t end) {
       if (!any) return true;
     }
   }
-  addrs.resize((size_t)n);
-  if (GetWriteWatch(WRITE_WATCH_FLAG_RESET, (uint8_t*)p->storage + pb, (SIZE_T)(pe - pb), addrs.data(), &n, &gran) != 0) { p->ww = -1; return false; }
+  if (!nvn::os_host::query_write_watch((uint8_t*)p->storage + pb, (size_t)(pe - pb), true, &addrs, nullptr)) { p->ww = -1; return false; }
+  const size_t n = addrs.size();
   if (kHist) { g_psHist[n ? 2 : 1][PsBucket(end - off)]++; static std::atomic<uint64_t> tot{0}; if ((++tot & 0x1FFFF) == 0) PoolSyncHistDump(); }
   if (kSnap && p->wwSnapEpoch == g_replayEpoch)   // [cpuprof] these pages are reset and copied now
     for (uint64_t pg = pb >> 12; pg < (pe >> 12); pg++) p->wwBits[pg >> 6] &= ~(1ull << (pg & 63));
   uint64_t copied = 0;
-  for (ULONG_PTR i = 0; i < n;) {   // addresses come back in ascending order: coalesce runs of adjacent pages
+  for (size_t i = 0; i < n;) {   // addresses come back in ascending order: coalesce runs of adjacent pages
     const uint64_t rb = (uint64_t)((uintptr_t)addrs[i] - base);
     uint64_t re = rb + 0x1000;
-    ULONG_PTR j = i + 1;
+    size_t j = i + 1;
     while (j < n && (uint64_t)((uintptr_t)addrs[j] - base) == re) { re += 0x1000; j++; }
     copied += CopySkippingGpu(p, rb, std::min<uint64_t>(re, p->size));
     i = j;
@@ -1486,7 +1467,7 @@ void SubmitLists(QueueImpl* q, int n, CmdList* const* lists) {
   Host* h = q->host;
   std::lock_guard<std::mutex> lk(h->queueMutex);
   g_replayEpoch++;
-  struct TidScope { TidScope() { g_replayTid.store(GetCurrentThreadId(), std::memory_order_relaxed); } ~TidScope() { g_replayTid.store(0, std::memory_order_relaxed); } } tidScope;
+  struct TidScope { TidScope() { g_replayTid.store(static_cast<uint32_t>(nvn::os_host::current_thread_id()), std::memory_order_relaxed); } ~TidScope() { g_replayTid.store(0, std::memory_order_relaxed); } } tidScope;
   q->Reap(false);
   FxBeforeSubmit(n, lists);   // [fx] photo frames
   UpscaleBeforeSubmit(n, lists);   // [upscale] photo frames
@@ -1560,7 +1541,7 @@ void QueueFence(QueueImpl* q, SyncImpl* s) {
   si.signalSemaphoreInfoCount = 1; si.pSignalSemaphoreInfos = &sig;
   VKCHK(vkQueueSubmit2(h->queue, 1, &si, VK_NULL_HANDLE));
   s->sem = q->timeline; s->value = v; s->armed = true;
-  s->fenceNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); s->fencePresent = g_presentCount; s->fenceTid = (unsigned)GetCurrentThreadId();
+  s->fenceNs = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); s->fencePresent = g_presentCount; s->fenceTid = (unsigned)nvn::os_host::current_thread_id();
 }
 
 void QueueFinishImpl(QueueImpl* q) {
@@ -1584,7 +1565,7 @@ SyncWaitResult WaitSync(const SyncImpl* s, uint64_t timeoutNs) {
     const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     if (ms >= traceMs) {
       const int64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(t1.time_since_epoch()).count();
-      fprintf(stderr, "[synctrace] tid %u sync %p fenced by tid %u: wait %.2f ms present %d: sync value %llu timeline was %llu (%lld behind) fence age %.2f ms at wait end, %d presents since the fence, timeout %lld\n", (unsigned)GetCurrentThreadId(), (const void*)s, s->fenceTid, ms, g_presentCount,
+      fprintf(stderr, "[synctrace] tid %u sync %p fenced by tid %u: wait %.2f ms present %d: sync value %llu timeline was %llu (%lld behind) fence age %.2f ms at wait end, %d presents since the fence, timeout %lld\n", (unsigned)nvn::os_host::current_thread_id(), (const void*)s, s->fenceTid, ms, g_presentCount,
               (unsigned long long)s->value, (unsigned long long)cur0, (long long)(s->value - cur0), (double)(nowNs - s->fenceNs) / 1e6, g_presentCount - s->fencePresent, (long long)timeoutNs);
     }
   }
@@ -1616,9 +1597,9 @@ static std::atomic<int> g_vsyncMode{-1};   // 0 on, 1 adaptive, 2 fast, 3 off; -
 static std::atomic<int> g_vsyncGen{0};
 static int ParseVsync(const char* e) {
   if (!e || !*e) return 0;
-  if (!_stricmp(e, "adaptive") || !_stricmp(e, "relaxed")) return 1;
-  if (!_stricmp(e, "fast") || !_stricmp(e, "mailbox")) return 2;
-  if (!_stricmp(e, "off") || !_stricmp(e, "0") || !_stricmp(e, "immediate")) return 3;
+  if (nvn::os_host::ascii_ieq(e, "adaptive") || nvn::os_host::ascii_ieq(e, "relaxed")) return 1;
+  if (nvn::os_host::ascii_ieq(e, "fast") || nvn::os_host::ascii_ieq(e, "mailbox")) return 2;
+  if (nvn::os_host::ascii_ieq(e, "off") || nvn::os_host::ascii_ieq(e, "0") || nvn::os_host::ascii_ieq(e, "immediate")) return 3;
   return 0;   // "on", "1", anything else
 }
 static int VsyncMode() {
@@ -1754,19 +1735,12 @@ static void PaceLegacy(WindowImpl* w) {
   using namespace std::chrono;
   int64_t period = (int64_t)(1e9 * w->presentInterval / g_paceHz);
   if (const int cap = snap_window_frame_cap(); cap > 0) period = std::max(period, (int64_t)(1e9 / cap));   // hook request 3
-  const int64_t now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+  const int64_t now = static_cast<int64_t>(nvn::os_host::monotonic_ns());
   // Absolute schedule. A frame that already ran more than one period late is released at once and the schedule restarts from now
   // (the old code restarted from now and then still waited a full period, so every slow frame cost work + one period).
   if (w->nextPresentNs == 0 || now - w->nextPresentNs > period) w->nextPresentNs = now;
   else w->nextPresentNs += period;
-  static HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-  int64_t left = w->nextPresentNs - now;
-  if (left > 2000000 && timer) {   // sleep all but ~1.5 ms
-    LARGE_INTEGER due; due.QuadPart = -(left - 1500000) / 100;
-    SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE);
-    WaitForSingleObject(timer, INFINITE);
-  }
-  while (duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count() < w->nextPresentNs) YieldProcessor();
+  nvn::os_host::sleep_until_steady_ns(w->nextPresentNs, 1500000);
 }
 
 // [pace] Frame limiter. Default: one frame clock locked to the display's vblanks when the refresh is a whole multiple of the
@@ -1808,7 +1782,7 @@ static bool PresentWindowOnce(QueueImpl* q, WindowImpl* w, int slot) {
   {
     static int ms = 0, from = 0, to = 0x7fffffff;
     static const bool on = [] { const char* e = getenv("SNAP_STRESS_PRESENT_MS"); if (e) sscanf(e, "%d:%d:%d", &ms, &from, &to); return ms > 0; }();
-    if (on && g_presentCount >= from && g_presentCount <= to) Sleep((DWORD)ms);
+    if (on && g_presentCount >= from && g_presentCount <= to) nvn::os_host::sleep_ms((uint32_t)ms);
   }
   std::unique_lock<std::mutex> lk(h->queueMutex);   // [pace] unique_lock: dropped around the acquire waits below
   if (!src->EnsureImage()) return false;
@@ -2160,7 +2134,7 @@ bool PresentWindow(QueueImpl* q, WindowImpl* w, int slot) {
   bool r = PresentWindowOnce(q, w, slot);
   // "Compile shaders now": the game thread stays on its present loop (same frame, UI overlay drawn by the present hook, paced by Pace)
   // until the precompile run finishes or is cancelled.
-  while (PipelineHoldGame()) { Sleep(8); r = PresentWindowOnce(q, w, slot); }
+  while (PipelineHoldGame()) { nvn::os_host::sleep_ms(8); r = PresentWindowOnce(q, w, slot); }
   return r;
 }
 

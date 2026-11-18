@@ -321,14 +321,20 @@ if(UNIX AND NOT APPLE)
 
   add_executable(snap_nvn_os_host_linux_test
     tests/nvn/nvn_os_host_linux_test.cpp
-    runtime/nvn/linux/nvn_os_host_posix.cpp)
-  target_include_directories(snap_nvn_os_host_linux_test PRIVATE runtime/nvn)
+    runtime/nvn/linux/nvn_os_host_posix.cpp
+    runtime/nvn/linux/nvn_upscale_stub.cpp)
+  target_include_directories(snap_nvn_os_host_linux_test PRIVATE runtime/nvn runtime)
   target_compile_features(snap_nvn_os_host_linux_test PRIVATE cxx_std_20)
   target_compile_options(snap_nvn_os_host_linux_test PRIVATE -Wall -Wextra)
   target_link_libraries(snap_nvn_os_host_linux_test PRIVATE Threads::Threads)
   if(SNAP_HAVE_SDL3)
     target_compile_definitions(snap_nvn_os_host_linux_test PRIVATE HLE_WITH_SDL3)
     target_link_libraries(snap_nvn_os_host_linux_test PRIVATE SDL3::SDL3)
+  endif()
+  find_package(Vulkan QUIET)
+  if(Vulkan_FOUND)
+    target_compile_definitions(snap_nvn_os_host_linux_test PRIVATE SNAP_HAVE_VULKAN)
+    target_link_libraries(snap_nvn_os_host_linux_test PRIVATE Vulkan::Vulkan)
   endif()
   add_test(NAME nvn_os_host_linux COMMAND snap_nvn_os_host_linux_test)
 

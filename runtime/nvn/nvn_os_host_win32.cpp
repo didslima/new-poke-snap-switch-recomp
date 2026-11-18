@@ -2,6 +2,7 @@
 // Win32 host helpers for the shared NVN->Vulkan layer (stage 6E-A).
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#define VK_USE_PLATFORM_WIN32_KHR
 #include <windows.h>
 #include <bcrypt.h>
 #include <intrin.h>
@@ -17,6 +18,31 @@
 #include <vector>
 
 #include "nvn_os_host.h"
+#include "nvn_os_host_vk.h"
+#include "ui/ui_present.h"
+
+extern "C" {
+void os_host_block_begin(void);
+void os_host_block_end(void);
+void nvn_os_block_noop(void) {}
+void snap_ui_present_none(const SnapUiFrame*) {}
+bool snap_ui_start_pending_none() { return false; }
+void snap_ui_first_picture_none() {}
+void snap_look_present(const SnapUiFrame*);
+void snap_look_present_none(const SnapUiFrame*) {}
+int snap_window_frame_cap();
+int snap_window_frame_cap_none() { return 0; }
+void snap_fs_drain_for_exit(int ms);
+void snap_fs_drain_none(int) {}
+}
+#pragma comment(linker, "/alternatename:os_host_block_begin=nvn_os_block_noop")
+#pragma comment(linker, "/alternatename:os_host_block_end=nvn_os_block_noop")
+#pragma comment(linker, "/alternatename:snap_ui_present=snap_ui_present_none")
+#pragma comment(linker, "/alternatename:snap_ui_start_pending=snap_ui_start_pending_none")
+#pragma comment(linker, "/alternatename:snap_ui_first_picture=snap_ui_first_picture_none")
+#pragma comment(linker, "/alternatename:snap_look_present=snap_look_present_none")
+#pragma comment(linker, "/alternatename:snap_window_frame_cap=snap_window_frame_cap_none")
+#pragma comment(linker, "/alternatename:snap_fs_drain_for_exit=snap_fs_drain_none")
 
 namespace {
 
@@ -504,6 +530,54 @@ void pace_vblank_close(void* handle) {
     api.close(&c);
   }
   delete h;
+}
+
+[[noreturn]] void fatal_exit(int code) {
+  ExitProcess(static_cast<UINT>(code));
+}
+
+void append_vulkan_surface_instance_extensions(std::vector<const char*>& out) {
+  out.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+  out.push_back(VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+}
+
+bool physical_device_presentation_support(VkInstance /*instance*/, VkPhysicalDevice phys, uint32_t queue_family) {
+  if (phys == VK_NULL_HANDLE) return false;
+  return vkGetPhysicalDeviceWin32PresentationSupportKHR(phys, queue_family) != VK_FALSE;
+}
+
+bool write_watch_supported() { return true; }
+
+bool query_write_watch(void* base, size_t size, bool reset, std::vector<void*>* out_addrs, uint32_t* out_error) {
+  if (!base || size == 0 || !out_addrs) {
+    if (out_error) *out_error = ERROR_INVALID_PARAMETER;
+    return false;
+  }
+  ULONG_PTR n = static_cast<ULONG_PTR>(size >> 12);
+  if (n == 0) n = 1;
+  out_addrs->resize(static_cast<size_t>(n));
+  DWORD gran = 0;
+  if (GetWriteWatch(reset ? WRITE_WATCH_FLAG_RESET : 0, base, static_cast<SIZE_T>(size), out_addrs->data(), &n, &gran) != 0) {
+    if (out_error) *out_error = static_cast<uint32_t>(GetLastError());
+    out_addrs->clear();
+    return false;
+  }
+  out_addrs->resize(static_cast<size_t>(n));
+  if (out_error) *out_error = 0;
+  return true;
+}
+
+bool create_vulkan_surface(VkInstance instance,
+                           void* native_window,
+                           const VkAllocationCallbacks* allocator,
+                           VkSurfaceKHR* out_surface) {
+  if (!out_surface) return false;
+  *out_surface = VK_NULL_HANDLE;
+  if (instance == VK_NULL_HANDLE || !native_window) return false;
+  VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
+  sci.hinstance = GetModuleHandleW(nullptr);
+  sci.hwnd = static_cast<HWND>(native_window);
+  return vkCreateWin32SurfaceKHR(instance, &sci, allocator, out_surface) == VK_SUCCESS;
 }
 
 }  // namespace nvn::os_host
