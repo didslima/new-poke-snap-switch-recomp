@@ -63,6 +63,7 @@ linux    host/linux/hooks_mods_stub.cpp   # explicit no-op stubs for unported ho
 linux    host/linux/init_linux.cpp   # controlled Linux guest runtime initialization before initializers (stage 5D-B2)
 linux    host/linux/preflight_linux.cpp   # Linux preflight validator for guest ELFs and AOT archives (stage 5D-B1)
 linux    host/linux/runner_linux.cpp   # Linux runner bootstrap, CLI, CPU check, 256 MiB runner thread (stage 5B)
+linux    host/linux/window_sdl3.cpp   # Linux SDL3 host window and non-blocking event loop (stage 6E-B)
 windows  host/launcher.cpp   # #include <bcrypt.h>, #include <commctrl.h>, #include <shellapi.h> ...
 windows  host/launcher_ui.cpp   # #include <d3d11.h>, #include <dxgi.h>, #include <shellapi.h> ...
 windows  host/launcher_ui_test.cpp   # #include <windows.h>

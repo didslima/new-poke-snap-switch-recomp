@@ -711,3 +711,9 @@ NVN_HOST_EXPORT const char* nvnHostProcName(int i) {
   return (i >= 0 && i < nvnHostProcCount()) ? nvn::Names()[i] : nullptr;
 }
 NVN_HOST_EXPORT void nvnHostSetHooks(const NvnHostHooks* h) { nvn::g_hooks = h ? *h : NvnHostHooks{}; }
+NVN_HOST_EXPORT void nvnHostNotifyWindowResize(void* nativeWindow) {
+  if (!nvn::g_host || !nativeWindow) return;
+  for (nvn::WindowImpl* w : nvn::g_host->windows) {
+    if (w && w->hwnd == nativeWindow) w->needRecreate = true;
+  }
+}
