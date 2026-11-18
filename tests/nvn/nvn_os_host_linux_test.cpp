@@ -15,6 +15,7 @@
 #include <SDL3/SDL.h>
 #endif
 
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <string>
 #include <sys/resource.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -387,7 +389,7 @@ void test_shader_harness_posix() {
   {
     const std::string body =
         "#!/usr/bin/env python3\n"
-        "import sys, time\n"
+        "import os, signal, sys, time\n"
         "mode = sys.argv[1]\n"
         "out = sys.argv[2]\n"
         "if mode == 'ok':\n"
@@ -403,7 +405,10 @@ void test_shader_harness_posix() {
         "    sys.exit(3)\n"
         "elif mode == 'sleep':\n"
         "    time.sleep(2.0)\n"
-        "    sys.exit(0)\n";
+        "    sys.exit(0)\n"
+        "elif mode == 'sig':\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+        "    os.kill(os.getpid(), signal.SIGTERM)\n";
     CHECK(nvn::os_host::write_file_bytes(ok_script.string(), body.data(), body.size()));
     fs::permissions(ok_script,
                     fs::perms::owner_read | fs::perms::owner_write | fs::perms::owner_exec,
@@ -439,6 +444,44 @@ void test_shader_harness_posix() {
   CHECK(!nvn::os_host::run_shader_harness("\"" + ok_script.string() + "\" sleep \"" + out_json.string() + "\"",
                                          out_json.string()));
   ::unsetenv("SNAP_HARNESS_TIMEOUT_MS");
+
+  // 7. Abnormal termination by POSIX signal (SIGTERM) logs signal number, description, and runtime/target.
+  {
+    std::fflush(stderr);
+    int cap_fds[2] = {-1, -1};
+    CHECK(::pipe(cap_fds) == 0);
+    const int saved_stderr = ::dup(STDERR_FILENO);
+    CHECK(saved_stderr >= 0);
+    CHECK(::dup2(cap_fds[1], STDERR_FILENO) >= 0);
+    ::close(cap_fds[1]);
+
+    CHECK(!nvn::os_host::run_shader_harness("\"" + ok_script.string() + "\" sig \"" + out_json.string() + "\"",
+                                           out_json.string()));
+    std::fflush(stderr);
+    ::dup2(saved_stderr, STDERR_FILENO);
+    ::close(saved_stderr);
+
+    std::string diag;
+    char buf[512];
+    for (;;) {
+      const ssize_t n = ::read(cap_fds[0], buf, sizeof(buf));
+      if (n > 0) diag.append(buf, static_cast<size_t>(n));
+      else break;
+    }
+    ::close(cap_fds[0]);
+    std::fwrite(diag.data(), 1, diag.size(), stderr);
+
+    const std::string expected_sig = "sig=" + std::to_string(SIGTERM) + " (";
+    CHECK(diag.find("[nvn][harness] child terminated by signal:") != std::string::npos);
+    const size_t sig_pos = diag.find(expected_sig);
+    CHECK(sig_pos != std::string::npos);
+    if (sig_pos != std::string::npos) {
+      const size_t close_paren = diag.find(')', sig_pos + expected_sig.size());
+      CHECK(close_paren != std::string::npos && close_paren > sig_pos + expected_sig.size());
+    }
+    CHECK(diag.find("runtime=") != std::string::npos);
+    CHECK(diag.find("target=sig") != std::string::npos);
+  }
 
   fs::remove_all(base, ec);
 }
