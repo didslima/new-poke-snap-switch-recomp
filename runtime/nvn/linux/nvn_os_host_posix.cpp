@@ -502,6 +502,17 @@ bool run_shader_harness(const std::string& cmd, const std::string& json_path) {
     return false;
   }
 
+  if (WIFSIGNALED(status)) {
+    const int sig = WTERMSIG(status);
+    const char* desc = ::strsignal(sig);
+    const std::string snippet = output.size() > 512 ? output.substr(0, 512) + "..." : output;
+    std::fprintf(stderr,
+                 "[nvn][harness] child terminated by signal: sig=%d (%s) (runtime=%s, target=%s)%s%s\n",
+                 sig, (desc && *desc) ? desc : "unknown signal", runtime_exe, harness_target,
+                 snippet.empty() ? "" : ": ", snippet.c_str());
+    return false;
+  }
+
   const int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   if (!WIFEXITED(status) || exit_code != 0) {
     const std::string snippet = output.size() > 512 ? output.substr(0, 512) + "..." : output;
