@@ -234,7 +234,7 @@ This fork distributes **Linux x86_64 AppImage** releases only (`New-Pokemon-Snap
 2. Convert/lift `main` and `sdk` to Linux AOT ELF/archive artifacts (`main.elf`, `sdk.elf`, `libsnap_main.a`, `libsnap_sdk.a`) following the build pipeline in `docs/linux-port.md` / `recomp/`.
 
 ### Running the AppImage
-1. Download `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage` and `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage.sha256` from the [Releases](https://github.com/didslima/new-poke-snap-switch-recomp/releases) page.
+1. Download `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage` and `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage.sha256` from the [Releases](https://github.com/didslima/new-poke-snap-switch-recomp-linux/releases) page.
 2. Verify the checksum and make the AppImage executable:
    ```bash
    sha256sum -c New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage.sha256
