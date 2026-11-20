@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${SNAP_LINUX_PORT_VERSION:-${SNAP_VERSION:-1.4.0-rc1}}"
+VERSION="${SNAP_LINUX_PORT_VERSION:-${SNAP_VERSION:-1.3.0-linux.1-rc1}}"
 BUILD_DIR="${SNAP_BUILD_DIR:-${ROOT_DIR}/build/cmake-partb}"
 OUT_DIR="${SNAP_DIST_DIR:-${ROOT_DIR}/dist}"
 OUT_NAME="New-Pokemon-Snap-Linux-v${VERSION}-x86_64.AppImage"
