@@ -4,6 +4,9 @@
 #include "cli_flags.h"
 #include "crash_linux.h"
 #include "preflight_linux.h"
+#ifdef SNAP_HAS_LAUNCHER_GUI
+#include "launcher_gui_linux.h"
+#endif
 #ifdef SNAP_LINUX_HAS_AOT
 #include "audio/audio_out.h"
 #include "hle/hle.h"
@@ -334,6 +337,12 @@ int bootstrap_main(int argc, char **argv) {
         std::fprintf(stderr, "boot_linux: this build needs an x86-64-v3 CPU (AVX2, BMI2, FMA); this CPU lacks it\n");
         return 2;
     }
+
+#ifdef SNAP_HAS_LAUNCHER_GUI
+    if (argc <= 1) {
+        return run_launcher_gui((argc > 0 && argv && argv[0]) ? argv[0] : "snap_boot_linux");
+    }
+#endif
 
     BootOpts opts;
     std::string err;

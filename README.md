@@ -233,42 +233,53 @@ This fork distributes **Linux x86_64 AppImage** releases only (`New-Pokemon-Snap
 1. Dump your own copy of **New Pokémon Snap** with the **2.0.1** update from your Nintendo Switch using your own tools (e.g., `nxDumpTool` + `hactool` / `nstool`) to obtain the patched `romfs/` directory and the `main` / `sdk` NSOs.
 2. Convert/lift `main` and `sdk` to Linux AOT ELF/archive artifacts (`main.elf`, `sdk.elf`, `libsnap_main.a`, `libsnap_sdk.a`) following the build pipeline in `docs/linux-port.md` / `recomp/`.
 
-### Running the AppImage
-1. Download `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage` and `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage.sha256` from the [Releases](https://github.com/didslima/new-poke-snap-switch-recomp-linux/releases) page.
+### Running the AppImage (Graphical Launcher)
+1. Download the `.AppImage` and `.sha256` from the [Releases](https://github.com/didslima/new-poke-snap-switch-recomp-linux/releases) page.
 2. Verify the checksum and make the AppImage executable:
    ```bash
-   sha256sum -c New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage.sha256
-   chmod +x New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage
+   sha256sum -c New-Pokemon-Snap-Linux-v*.AppImage.sha256
+   chmod +x New-Pokemon-Snap-Linux-v*.AppImage
    ```
-3. Launch with your game files:
-   ```bash
-   export SNAP_ROMFS="/path/to/Pokemon Snap/romfs"
-   ./New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage \
-     --main /path/to/main.elf \
-     --sdk /path/to/sdk.elf \
-     --main-lib /path/to/libsnap_main.a \
-     --sdk-lib /path/to/libsnap_sdk.a \
-     --play --fullscreen --allow-guest-exec
-   ```
-   Useful flags: `--version`, `--help`, `--windowed --width 1280 --height 720`, `--data-dir <dir>`, `--profile <name>`.
+3. **Double-click the AppImage** in your file manager (or run it with no arguments) to open the **Graphical Launcher**:
+   - **Auto-Detection:** On first launch, the launcher scans environment variables (`SNAP_MAIN_ELF`, `SNAP_SDK_ELF`, `SNAP_MAIN_LIB`, `SNAP_SDK_LIB`, `SNAP_ROMFS`), the AppImage directory, and common folders under `$HOME` (`~/Games/Pokemon Snap/romfs`, `~/Projects/snap-recomp/build/...`, etc.) to locate `main.elf`, `sdk.elf`, `libsnap_main.a`, `libsnap_sdk.a`, and your extracted `romfs` folder.
+   - **Manual Selection & ROMFS:** Any missing component is marked `[Missing]`. Click **Browse...** to select the file or ROMFS folder via the native KDE/XDG file picker, or click **Auto-Detect** to re-scan.
+   - **Video Preferences & Persistence:** Choose Window Mode (`Fullscreen`, `Windowed`, `Borderless`) and Resolution. Selections are saved to `$XDG_CONFIG_HOME/new-pokemon-snap-recomp/config` (fallback `~/.config/new-pokemon-snap-recomp/config`) and restored automatically on future launches.
+   - **KDE Integration:** Click **Add to KDE Menu** to register `~/.local/share/applications/new-pokemon-snap-recomp.desktop` and the app icon so you can launch it from the KDE Application Menu.
+   - Click **Play** once all required components show `[OK]`.
+
+### Advanced CLI Usage
+Passing any command-line arguments bypasses the GUI and runs the CLI directly:
+```bash
+./New-Pokemon-Snap-Linux-v*.AppImage \
+  --main /path/to/main.elf \
+  --sdk /path/to/sdk.elf \
+  --main-lib /path/to/libsnap_main.a \
+  --sdk-lib /path/to/libsnap_sdk.a \
+  --romfs "/path/to/Pokemon Snap/romfs" \
+  --play --fullscreen --allow-guest-exec
+```
+- ROMFS resolution order in CLI mode: `--romfs <folder>` > `SNAP_ROMFS` > `extracted/romfs-v262144` (validated before entering `nnMain()`).
+- Useful flags: `--version`, `--help`, `--windowed --width 1280 --height 720`, `--data-dir <dir>`, `--profile <name>`.
+- You can also use [dist/Run-New-Pokemon-Snap.sh](dist/Run-New-Pokemon-Snap.sh), which respects `SNAP_APPIMAGE`, `SNAP_ROMFS`, and `SNAP_REPO_BUILD`.
 
 ### Updating to future versions
-Replace the `.AppImage` file with the newer release and run `chmod +x`. Your saves, settings, and shader caches are stored outside the AppImage and are preserved across updates.
+Replace the `.AppImage` file with the newer release and run `chmod +x`. Your launcher config, saves, settings, and shader caches are stored outside the AppImage and are preserved across updates.
 
 ### Where saves, settings, and caches are stored
+- **Launcher config:** `$XDG_CONFIG_HOME/new-pokemon-snap-recomp/config` (default `~/.config/new-pokemon-snap-recomp/config`)
 - **Saves, profiles, screenshots, `input.json`, `window.json`:** `$XDG_DATA_HOME/SnapRecomp` (default `~/.local/share/SnapRecomp`)
 - **Configuration:** `$XDG_CONFIG_HOME/SnapRecomp` (default `~/.config/SnapRecomp`)
 - **NVN Vulkan shader cache:** `$XDG_CACHE_HOME/SnapRecomp/nvn_cache` (default `~/.cache/SnapRecomp/nvn_cache`, overridable via `NVN_CACHE_DIR`)
 
 ### Common troubleshooting
-- **AppImage fails to mount (`libfuse.so.2` missing):** Install `fuse` / `libfuse2` on your distribution, or run with `APPIMAGE_EXTRACT_AND_RUN=1 ./New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage ...`.
+- **AppImage fails to mount (`libfuse.so.2` missing):** Install `fuse` / `libfuse2` on your distribution, or run with `APPIMAGE_EXTRACT_AND_RUN=1 ./New-Pokemon-Snap-Linux-v*.AppImage`.
 - **Window/fullscreen issues on Wayland:** Test XWayland/X11 fallback with `SDL_VIDEODRIVER=x11`, or start in `--windowed --width 1280 --height 720`.
-- **Black screen on startup:** Verify that `NVN_CACHE_DIR` points to a writable directory (`~/.cache/SnapRecomp/nvn_cache`) and, if translating shaders on first run, that `ShaderHarness` or a pre-populated `nvn_cache` is available.
+- **Black screen on startup:** Ensure your ROMFS folder is passed via the GUI, `--romfs`, or `SNAP_ROMFS`, and that `NVN_CACHE_DIR` points to a writable directory (`~/.cache/SnapRecomp/nvn_cache`).
 - **Vulkan device not found:** Ensure your host's 64-bit Vulkan loader (`libvulkan.so.1`) and GPU ICD (`nvidia_icd.json` / `radeon_icd.x86_64.json`) are installed.
 
 ### Known Linux limitations
 - Vendor upscalers (DLSS, FSR, XeSS) and frame generation are currently stubbed out on Linux (`nvn_upscale_stub.cpp`).
-- The Windows GUI setup/launcher (`SnapRecomp.exe`) is not included; Linux launches via CLI / `.desktop` wrapper.
+- The Windows NSP/XCI extraction wizard (`SnapRecomp.exe`) is Windows-only; on Linux, provide your pre-extracted AOT ELF/archive artifacts and `romfs` folder via the built-in graphical launcher or CLI.
 - Binaries are built against an Ubuntu 22.04 baseline (`glibc >= 2.35`, `libstdc++` `GLIBCXX_3.4.30` / GCC 11+). Distributions older than Ubuntu 22.04 LTS are not supported.
 
 ## Build it yourself

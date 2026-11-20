@@ -23,7 +23,8 @@ if(UNIX AND NOT APPLE)
   find_package(Vulkan REQUIRED)   # headers only: runtime/nvn includes <vulkan/vulkan.h>
   option(SNAP_ENABLE_SDL3 "Enable SDL3 input backend on Linux when SDL3 is available" ON)
   option(SNAP_RELEASE_BUILD "Build portable Linux release binary (XDG cache dir, no baked repo harness path)" OFF)
-  set(SNAP_VERSION "" CACHE STRING "Release version string baked into Linux runner (--version)")
+  set(SNAP_VERSION "" CACHE STRING "Upstream version string baked into Linux runner (--version)")
+  set(SNAP_LINUX_PORT_VERSION "1.4.0-rc1" CACHE STRING "Linux port/AppImage package version shown in GUI launcher")
   set(SNAP_HAVE_SDL3 FALSE)
   if(SNAP_ENABLE_SDL3)
     find_package(SDL3 CONFIG QUIET)
@@ -238,6 +239,9 @@ if(UNIX AND NOT APPLE)
     if(NOT "${SNAP_VERSION}" STREQUAL "")
       target_compile_definitions(snap_boot_linux PRIVATE SNAP_VERSION="${SNAP_VERSION}")
     endif()
+    if(NOT "${SNAP_LINUX_PORT_VERSION}" STREQUAL "")
+      target_compile_definitions(snap_boot_linux PRIVATE SNAP_LINUX_PORT_VERSION="${SNAP_LINUX_PORT_VERSION}")
+    endif()
     target_compile_options(snap_boot_linux PRIVATE -w)
     target_link_options(snap_boot_linux PRIVATE -Wl,-u,snap_runtime_abi_3)
     target_link_libraries(snap_boot_linux PRIVATE snap_nvn_renderer_linux "${SNAP_AOT_MAIN_LIB}" "${SNAP_AOT_SDK_LIB}")
@@ -429,10 +433,20 @@ if(UNIX AND NOT APPLE)
       target_link_libraries(${_t} PRIVATE SDL3::SDL3)
     endforeach()
     if(EXISTS "${SNAP_AOT_MAIN_LIB}" AND EXISTS "${SNAP_AOT_SDK_LIB}")
-      target_compile_definitions(snap_boot_linux PRIVATE HLE_WITH_SDL3)
+      target_sources(snap_boot_linux PRIVATE
+        host/linux/launcher_config_linux.cpp
+        host/linux/launcher_gui_linux.cpp)
+      target_include_directories(snap_boot_linux PRIVATE runtime/ui/third_party/imgui)
+      target_compile_definitions(snap_boot_linux PRIVATE HLE_WITH_SDL3 SNAP_HAS_LAUNCHER_GUI=1)
       target_link_libraries(snap_boot_linux PRIVATE SDL3::SDL3)
     endif()
   endif()
+
+  snap_os_test(snap_launcher_config_linux_test
+               tests/platform/launcher_config_linux_test.cpp
+               host/linux/launcher_config_linux.cpp)
+  target_include_directories(snap_launcher_config_linux_test PRIVATE host)
+  add_test(NAME launcher_config_linux COMMAND snap_launcher_config_linux_test)
 
   set_source_files_properties(
     runtime/hle/profiles.cpp

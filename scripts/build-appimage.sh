@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${SNAP_VERSION:-1.2.0}"
+VERSION="${SNAP_LINUX_PORT_VERSION:-${SNAP_VERSION:-1.4.0-rc1}}"
 BUILD_DIR="${SNAP_BUILD_DIR:-${ROOT_DIR}/build/cmake-partb}"
 OUT_DIR="${SNAP_DIST_DIR:-${ROOT_DIR}/dist}"
 OUT_NAME="New-Pokemon-Snap-Linux-v${VERSION}-x86_64.AppImage"
@@ -116,15 +116,16 @@ fi
 cp -a "${ICON_PNG}" "${APP_DIR}/usr/share/icons/hicolor/256x256/apps/new-pokemon-snap-recomp.png"
 cp -a "${ICON_PNG}" "${APP_DIR}/.DirIcon"
 
-cat > "${APP_DIR}/new-pokemon-snap-recomp.desktop" <<'EOF'
+cat > "${APP_DIR}/new-pokemon-snap-recomp.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=New Pokemon Snap Recomp
 Comment=Unofficial Linux port of New Pokemon Snap Recomp
-Exec=snap_boot_linux --play --allow-guest-exec
+Exec=snap_boot_linux
 Icon=new-pokemon-snap-recomp
 Categories=Game;
 Terminal=false
+X-AppImage-Version=${VERSION}
 EOF
 cp -a "${APP_DIR}/new-pokemon-snap-recomp.desktop" "${APP_DIR}/usr/share/applications/new-pokemon-snap-recomp.desktop"
 

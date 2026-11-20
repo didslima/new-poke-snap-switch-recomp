@@ -61,6 +61,8 @@ linux    host/linux/boot_linux.cpp   # Linux runner executable entry point (stag
 linux    host/linux/crash_linux.cpp   # Linux POSIX signal handlers and async-signal-safe diagnostics (stage 5C)
 linux    host/linux/hooks_mods_stub.cpp   # explicit no-op stubs for unported host/mods/* called by host/hooks.cpp
 linux    host/linux/init_linux.cpp   # controlled Linux guest runtime initialization before initializers (stage 5D-B2)
+linux    host/linux/launcher_config_linux.cpp   # XDG config persistence, auto-detection, and desktop integration for Linux GUI launcher
+linux    host/linux/launcher_gui_linux.cpp   # SDL3 + Dear ImGui graphical launcher for double-click AppImage startup
 linux    host/linux/preflight_linux.cpp   # Linux preflight validator for guest ELFs and AOT archives (stage 5D-B1)
 linux    host/linux/runner_linux.cpp   # Linux runner bootstrap, CLI, CPU check, 256 MiB runner thread (stage 5B)
 linux    host/linux/window_opts_linux.cpp   # Linux window/display options backing window_opts_public.h
