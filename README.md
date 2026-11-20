@@ -2,21 +2,26 @@
   <img src="docs/logo/snap-recomp-logo.svg" alt="Snap Recomp: native PC recompilation" width="600">
 </p>
 
-<h1 align="center">New Poke Snap Switch Recomp</h1>
+<h1 align="center">New Poke Snap Switch Recomp — Unofficial Linux Port</h1>
 
 <p align="center">
-  <b>Snap Recomp: a native Windows PC static recompilation (recomp) of a 2021 Switch photography game. Works with your own copy of New Pokémon Snap 2.0.1.</b><br>
+  <b>Unofficial, independently maintained Linux port of <a href="https://github.com/finalpantasy/new-pokemon-snap-recomp">New Pokémon Snap Recomp</a> by <code>finalpantasy</code>.</b><br>
+  A native static recompilation (recomp) of a 2021 Switch photography game, working with your own copy of New Pokémon Snap 2.0.1.<br>
   The game's AArch64 code is lifted to C, built with clang, and run on a hand-written Horizon OS and NVN-to-Vulkan runtime.
 </p>
 
 <p align="center">
-  <img alt="Platform: Windows x64" src="https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078D6">
+  <img alt="Platform: Linux x86_64 & Windows x64" src="https://img.shields.io/badge/platform-Linux%20x86__64%20%7C%20Windows%20x64-0078D6">
   <img alt="Graphics: Vulkan" src="https://img.shields.io/badge/graphics-Vulkan-AC162C">
   <img alt="Game version: 2.0.1" src="https://img.shields.io/badge/game%20version-2.0.1-informational">
   <img alt="Status: early playable" src="https://img.shields.io/badge/status-early%20playable-yellow">
-  <a href="https://github.com/finalpantasy/new-pokemon-snap-recomp/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/finalpantasy/new-pokemon-snap-recomp"></a>
+  <a href="https://github.com/finalpantasy/new-pokemon-snap-recomp"><img alt="Upstream repository" src="https://img.shields.io/badge/upstream-finalpantasy%2Fnew--pokemon--snap--recomp-2ea44f"></a>
   <img alt="License: GPL-3.0 with additional permission" src="https://img.shields.io/badge/license-GPL--3.0-blue">
 </p>
+
+> [!NOTE]
+> **Unofficial Linux Port:** This fork is an unofficial Linux port of **New Pokémon Snap Recomp**, maintained independently here.
+> The original project is created and maintained by **[`finalpantasy`](https://github.com/finalpantasy)** at **[https://github.com/finalpantasy/new-pokemon-snap-recomp](https://github.com/finalpantasy/new-pokemon-snap-recomp)**, and the original codebase is licensed under **GPL-3.0** (with the section 7 additional permission; see [LICENSE](LICENSE)).
 
 <p align="center">
   <a href="#status">Status</a> ·
@@ -408,6 +413,8 @@ No. The Enhanced look changes only how the picture is drawn and what extra files
 The native settings tabs are patched into a copy of the game's own settings UI file, built on your PC. That file is never committed.
 
 ## License and credits
+
+This unofficial Linux port is based on **[finalpantasy/new-pokemon-snap-recomp](https://github.com/finalpantasy/new-pokemon-snap-recomp)**, created and maintained by **`finalpantasy`**.
 
 GPL-3.0 with the section 7 DLSS/Streamline/XeSS additional permission, see [LICENSE](LICENSE). Releases up to and including v1.1.0 were MIT-licensed. Their MIT text is preserved in [LICENSE-MIT](LICENSE-MIT); existing MIT-covered components retain their notices. The lifter and CPU runtime adapt TotK Recomp and LAS Recomp (both MIT); the shader harness builds on the Ryujinx shader translator; the SSBH layout follows ssbh_lib. The project logo is original artwork; its lettering is drawn from the Rubik typeface (SIL Open Font License 1.1). Full notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
