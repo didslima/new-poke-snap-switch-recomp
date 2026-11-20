@@ -134,7 +134,7 @@ struct JP {
         p++;
         J v;
         if (!parse(v)) return false;
-        out.obj.emplace_back(k, std::move(v));
+        out.obj.push_back({std::move(k), std::move(v)});
       }
     }
     if (*p == '[') {

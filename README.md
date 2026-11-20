@@ -221,7 +221,7 @@ This fork distributes **Linux x86_64 AppImage** releases only (`New-Pokemon-Snap
 
 ### System requirements
 - **Minimum:**
-  - 64-bit Linux (`x86_64`) with `glibc >= 2.38` (Bazzite, Fedora 41+, Ubuntu 24.04 LTS, or newer)
+  - 64-bit Linux (`x86_64`) with `glibc >= 2.35` (Ubuntu 22.04 LTS+, Fedora 36+, Bazzite, or newer)
   - Vulkan 1.3 capable GPU and up-to-date host driver (NVIDIA proprietary or Mesa RADV/ANV)
   - Wayland or X11 desktop session, 8 GB RAM, ~15 GB free disk space for extracted game files and caches
 - **Recommended:**
@@ -269,7 +269,7 @@ Replace the `.AppImage` file with the newer release and run `chmod +x`. Your sav
 ### Known Linux limitations
 - Vendor upscalers (DLSS, FSR, XeSS) and frame generation are currently stubbed out on Linux (`nvn_upscale_stub.cpp`).
 - The Windows GUI setup/launcher (`SnapRecomp.exe`) is not included; Linux launches via CLI / `.desktop` wrapper.
-- Binaries built on Fedora 43 require `glibc >= 2.38` (distributions older than Ubuntu 24.04 LTS / Fedora 41 are not supported by this build).
+- Binaries are built against an Ubuntu 22.04 baseline (`glibc >= 2.35`, `libstdc++` `GLIBCXX_3.4.30` / GCC 11+). Distributions older than Ubuntu 22.04 LTS are not supported.
 
 ## Build it yourself
 

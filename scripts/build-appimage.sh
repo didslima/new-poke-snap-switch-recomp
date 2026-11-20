@@ -45,13 +45,21 @@ cp -a "${BIN_SRC}" "${APP_DIR}/usr/bin/snap_boot_linux"
 chmod 755 "${APP_DIR}/usr/bin/snap_boot_linux"
 
 # Bundle libSDL3.so.0 (all other runtime deps: libvulkan.so.1, glibc, libstdc++, NVIDIA/Mesa drivers come from the host).
-SDL3_PATH=""
-for cand in /usr/lib64/libSDL3.so.0 /lib64/libSDL3.so.0 /usr/lib/x86_64-linux-gnu/libSDL3.so.0; do
-  if [[ -e "${cand}" ]]; then
-    SDL3_PATH="$(readlink -f "${cand}")"
-    break
+SDL3_PATH="${SNAP_SDL3_PATH:-}"
+if [[ -z "${SDL3_PATH}" ]]; then
+  for cand in /usr/local/lib/libSDL3.so.0 /usr/lib64/libSDL3.so.0 /lib64/libSDL3.so.0 /usr/lib/x86_64-linux-gnu/libSDL3.so.0; do
+    if [[ -e "${cand}" ]]; then
+      SDL3_PATH="$(readlink -f "${cand}")"
+      break
+    fi
+  done
+fi
+if [[ -z "${SDL3_PATH}" ]] && command -v podman >/dev/null 2>&1 && podman container exists snap-recomp-u22 2>/dev/null; then
+  SDL3_TMP="${WORK_DIR}/libSDL3.so.0"
+  if podman cp snap-recomp-u22:/usr/local/lib/libSDL3.so.0.4.20 "${SDL3_TMP}" 2>/dev/null; then
+    SDL3_PATH="${SDL3_TMP}"
   fi
-done
+fi
 if [[ -z "${SDL3_PATH}" ]] && command -v distrobox >/dev/null 2>&1; then
   SDL3_TMP="${WORK_DIR}/libSDL3.so.0"
   if distrobox enter snap-recomp-linux -- bash -c 'cp -L /usr/lib64/libSDL3.so.0 "$1"' _ "${SDL3_TMP}" 2>/dev/null; then
