@@ -4,10 +4,17 @@
 // without running any guest/game code.
 #include "nvn_os_host.h"
 #include "nvn_os_host_vk.h"
+#include "nvn_host.h"
+#include "hle/live.h"
+#include "hle/settings.h"
 
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 
 #ifdef HLE_WITH_SDL3
 #include <SDL3/SDL.h>
@@ -105,6 +112,54 @@ bool snap_mods_ab_live(unsigned present);
 const uint8_t* snap_mods_ab_original(const uint8_t* src, uint32_t w, uint32_t h, uint32_t mips,
                                      uint32_t* ow, uint32_t* oh, uint32_t* om);
 void snap_shiny_fx_trigger(const char* species);
+int snap_live_size_blocked(void);
+}
+
+void test_live_graphics_and_ultrawide() {
+  // Isolate settings writes into a temporary SNAP_CONFIG_DIR so user settings are untouched.
+  const std::filesystem::path tmp_cfg = std::filesystem::temp_directory_path() / "snap_nvn_live_test_cfg";
+  std::error_code ec;
+  std::filesystem::remove_all(tmp_cfg, ec);
+  std::filesystem::create_directories(tmp_cfg, ec);
+  const char* prev_cfg = std::getenv("SNAP_CONFIG_DIR");
+  const std::string saved_cfg = prev_cfg ? prev_cfg : "";
+  setenv("SNAP_CONFIG_DIR", tmp_cfg.c_str(), 1);
+  hle::settings::load();
+
+  std::atomic<unsigned> seen{0};
+  (void)hle::live::changed(seen);
+
+  // Verify each v1.3.0 live-apply graphics setting bumps the live generation via hle::settings::set.
+  const struct { const char* k; const char* v; } live_cases[] = {
+      {"gfx_render_scale", "1.5"},
+      {"gfx_aa", "smaa"},
+      {"gfx_shadow_res", "2048"},
+      {"gfx_ultrawide", "off"},
+      {"gfx_ultrawide", "auto"},
+      {"ssao_quality", "high"},
+  };
+  for (const auto& tc : live_cases) {
+    hle::settings::set(tc.k, tc.v);
+    CHECK(hle::live::changed(seen));
+    CHECK(!hle::live::changed(seen));
+  }
+
+  if (saved_cfg.empty()) unsetenv("SNAP_CONFIG_DIR");
+  else setenv("SNAP_CONFIG_DIR", saved_cfg.c_str(), 1);
+  std::filesystem::remove_all(tmp_cfg, ec);
+
+  // Verify snap_live_size_blocked() reports 0 when no upscaler/framegen is active.
+  CHECK(snap_live_size_blocked() == 0);
+
+  // Verify live ultrawide factor updates (21:9, 32:9, and Off = 1.0) without caching.
+  const float orig_uw = nvnHostGetUltrawide();
+  nvnHostSetUltrawide(1.34f);
+  CHECK(std::fabs(nvnHostGetUltrawide() - 1.34f) < 0.001f);
+  nvnHostSetUltrawide(2.0f);
+  CHECK(std::fabs(nvnHostGetUltrawide() - 2.0f) < 0.001f);
+  nvnHostSetUltrawide(1.0f);
+  CHECK(std::fabs(nvnHostGetUltrawide() - 1.0f) < 0.001f);
+  nvnHostSetUltrawide(orig_uw);
 }
 
 void test_optional_stub_functions() {
@@ -123,6 +178,7 @@ int main() {
   test_nvn_bootstrap_table();
   test_vulkan_device_and_sdl_surface();
   test_optional_stub_functions();
+  test_live_graphics_and_ultrawide();
   std::printf("nvn_renderer_linux_test: %d checks, %d failed\n", g_checks, g_fails);
   return g_fails == 0 ? 0 : 1;
 }

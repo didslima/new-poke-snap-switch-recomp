@@ -9,6 +9,7 @@
 
 #include "linux/runner_linux.h"
 #include "os/os_host.h"
+#include "steamdeck.h"
 
 static std::atomic<int> g_fail{0}, g_checks{0};
 #define CHECK(cond) do { g_checks++; if (!(cond)) { std::fprintf(stderr, "CHECK FAILED %s:%d: %s\n", __FILE__, __LINE__, #cond); g_fail++; } } while (0)
@@ -105,6 +106,56 @@ int main() {
         CHECK(o.data_dir == "/tmp/d");
         CHECK(o.cli_sets.size() == 1 && o.cli_sets[0].first == "vsync" && o.cli_sets[0].second == "0");
         CHECK(!o.cli_env.empty());
+
+        // Windows-only launcher actions must fail cleanly on Linux.
+        for (const char *wact : {"--restore-backup", "--upscalers", "--hdtex", "--check-install", "--report"}) {
+            err.clear();
+            CHECK(run_parse({"snap_boot_linux", wact}, o, err) == snap_linux::ParseStatus::Error);
+            CHECK(err.find("unsupported Windows launcher option") != std::string::npos);
+        }
+
+        // Steam Deck preset: applies 1280x800 borderless + handheld cfg keys, and later explicit overrides win.
+        {
+            snap_linux::BootOpts sd;
+            std::string sd_err;
+            CHECK(run_parse({"snap_boot_linux", "--play", "--steam-deck"}, sd, sd_err) == snap_linux::ParseStatus::Ok);
+            CHECK(sd_err.empty());
+            CHECK(sd.play);
+            CHECK(sd.cli_env.size() >= snapdeck::env().size());
+            CHECK(sd.cli_sets.size() == snapdeck::cfg().size());
+            bool has_mode = false, has_w = false, has_h = false, has_scale = false, has_uw = false;
+            for (const auto &kv : sd.cli_env) {
+                if (kv.first == "SNAP_WINDOW_MODE" && kv.second == "borderless") has_mode = true;
+                if (kv.first == "SNAP_WINDOW_W" && kv.second == "1280") has_w = true;
+                if (kv.first == "SNAP_WINDOW_H" && kv.second == "800") has_h = true;
+            }
+            for (const auto &kv : sd.cli_sets) {
+                if (kv.first == "gfx_render_scale" && kv.second == "0.75") has_scale = true;
+                if (kv.first == "gfx_ultrawide" && kv.second == "off") has_uw = true;
+            }
+            CHECK(has_mode && has_w && has_h && has_scale && has_uw);
+
+            // Explicit CLI overrides after --steam-deck must appear after preset entries so they take precedence.
+            snap_linux::BootOpts ov;
+            std::string ov_err;
+            CHECK(run_parse({"snap_boot_linux", "--play", "--steam-deck", "--windowed", "--width", "1920", "--height", "1080",
+                             "--set", "gfx_render_scale=1.5", "--set", "gfx_ultrawide=auto"}, ov, ov_err) == snap_linux::ParseStatus::Ok);
+            std::string final_mode, final_w, final_h, final_scale, final_uw;
+            for (const auto &kv : ov.cli_env) {
+                if (kv.first == "SNAP_WINDOW_MODE") final_mode = kv.second;
+                if (kv.first == "SNAP_WINDOW_W") final_w = kv.second;
+                if (kv.first == "SNAP_WINDOW_H") final_h = kv.second;
+            }
+            for (const auto &kv : ov.cli_sets) {
+                if (kv.first == "gfx_render_scale") final_scale = kv.second;
+                if (kv.first == "gfx_ultrawide") final_uw = kv.second;
+            }
+            CHECK(final_mode == "windowed");
+            CHECK(final_w == "1920");
+            CHECK(final_h == "1080");
+            CHECK(final_scale == "1.5");
+            CHECK(final_uw == "auto");
+        }
     }
 
     // 4. CPU capability check (x86-64-v3 host).
