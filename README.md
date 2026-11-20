@@ -24,6 +24,7 @@
 > The original project is created and maintained by **[`finalpantasy`](https://github.com/finalpantasy)** at **[https://github.com/finalpantasy/new-pokemon-snap-recomp](https://github.com/finalpantasy/new-pokemon-snap-recomp)**, and the original codebase is licensed under **GPL-3.0** (with the section 7 additional permission; see [LICENSE](LICENSE)).
 
 <p align="center">
+  <a href="#linux-appimage-v120">Linux AppImage</a> ·
   <a href="#status">Status</a> ·
   <a href="#features">Features</a> ·
   <a href="#screenshots">Screenshots</a> ·
@@ -210,6 +211,65 @@ Each pair is captured at the same point on the ride, so the camera matches; the 
 
 <img src="docs/screenshots/compare/upscalers.webp" alt="Florio at 4K output with DLSS, FSR and XeSS Quality" width="100%">
 <img src="docs/screenshots/compare/upscalers-zoom.webp" alt="Grass at 2x with DLSS, FSR and XeSS Quality" width="100%">
+
+## Linux AppImage (v1.2.0)
+
+This fork distributes **Linux x86_64 AppImage** releases only (`New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage`). Windows builds remain maintained by `finalpantasy` in the [original repository](https://github.com/finalpantasy/new-pokemon-snap-recomp).
+
+> [!IMPORTANT]
+> **You must supply your own legally dumped copy of New Pokémon Snap (version 2.0.1 / 262144).** The AppImage contains no ROMs, keys, extracted assets, or proprietary game code.
+
+### System requirements
+- **Minimum:**
+  - 64-bit Linux (`x86_64`) with `glibc >= 2.38` (Bazzite, Fedora 41+, Ubuntu 24.04 LTS, or newer)
+  - Vulkan 1.3 capable GPU and up-to-date host driver (NVIDIA proprietary or Mesa RADV/ANV)
+  - Wayland or X11 desktop session, 8 GB RAM, ~15 GB free disk space for extracted game files and caches
+- **Recommended:**
+  - KDE Plasma / GNOME (Wayland) or X11
+  - Dedicated GPU with 8 GB+ VRAM (e.g. NVIDIA RTX 3060 / AMD RX 6700 XT or newer)
+  - 16 GB RAM and NVMe SSD
+
+### Obtaining and configuring game files
+1. Dump your own copy of **New Pokémon Snap** with the **2.0.1** update from your Nintendo Switch using your own tools (e.g., `nxDumpTool` + `hactool` / `nstool`) to obtain the patched `romfs/` directory and the `main` / `sdk` NSOs.
+2. Convert/lift `main` and `sdk` to Linux AOT ELF/archive artifacts (`main.elf`, `sdk.elf`, `libsnap_main.a`, `libsnap_sdk.a`) following the build pipeline in `docs/linux-port.md` / `recomp/`.
+
+### Running the AppImage
+1. Download `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage` and `New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage.sha256` from the [Releases](https://github.com/didslima/new-poke-snap-switch-recomp/releases) page.
+2. Verify the checksum and make the AppImage executable:
+   ```bash
+   sha256sum -c New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage.sha256
+   chmod +x New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage
+   ```
+3. Launch with your game files:
+   ```bash
+   export SNAP_ROMFS="/path/to/Pokemon Snap/romfs"
+   ./New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage \
+     --main /path/to/main.elf \
+     --sdk /path/to/sdk.elf \
+     --main-lib /path/to/libsnap_main.a \
+     --sdk-lib /path/to/libsnap_sdk.a \
+     --play --fullscreen --allow-guest-exec
+   ```
+   Useful flags: `--version`, `--help`, `--windowed --width 1280 --height 720`, `--data-dir <dir>`, `--profile <name>`.
+
+### Updating to future versions
+Replace the `.AppImage` file with the newer release and run `chmod +x`. Your saves, settings, and shader caches are stored outside the AppImage and are preserved across updates.
+
+### Where saves, settings, and caches are stored
+- **Saves, profiles, screenshots, `input.json`, `window.json`:** `$XDG_DATA_HOME/SnapRecomp` (default `~/.local/share/SnapRecomp`)
+- **Configuration:** `$XDG_CONFIG_HOME/SnapRecomp` (default `~/.config/SnapRecomp`)
+- **NVN Vulkan shader cache:** `$XDG_CACHE_HOME/SnapRecomp/nvn_cache` (default `~/.cache/SnapRecomp/nvn_cache`, overridable via `NVN_CACHE_DIR`)
+
+### Common troubleshooting
+- **AppImage fails to mount (`libfuse.so.2` missing):** Install `fuse` / `libfuse2` on your distribution, or run with `APPIMAGE_EXTRACT_AND_RUN=1 ./New-Pokemon-Snap-Linux-v1.2.0-x86_64.AppImage ...`.
+- **Window/fullscreen issues on Wayland:** Test XWayland/X11 fallback with `SDL_VIDEODRIVER=x11`, or start in `--windowed --width 1280 --height 720`.
+- **Black screen on startup:** Verify that `NVN_CACHE_DIR` points to a writable directory (`~/.cache/SnapRecomp/nvn_cache`) and, if translating shaders on first run, that `ShaderHarness` or a pre-populated `nvn_cache` is available.
+- **Vulkan device not found:** Ensure your host's 64-bit Vulkan loader (`libvulkan.so.1`) and GPU ICD (`nvidia_icd.json` / `radeon_icd.x86_64.json`) are installed.
+
+### Known Linux limitations
+- Vendor upscalers (DLSS, FSR, XeSS) and frame generation are currently stubbed out on Linux (`nvn_upscale_stub.cpp`).
+- The Windows GUI setup/launcher (`SnapRecomp.exe`) is not included; Linux launches via CLI / `.desktop` wrapper.
+- Binaries built on Fedora 43 require `glibc >= 2.38` (distributions older than Ubuntu 24.04 LTS / Fedora 41 are not supported by this build).
 
 ## Build it yourself
 

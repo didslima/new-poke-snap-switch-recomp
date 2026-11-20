@@ -315,6 +315,9 @@ int bootstrap_main(int argc, char **argv) {
             std::fclose(f);
             v = snap_cli::version_from_config(text);
         }
+#ifdef SNAP_VERSION
+        if (v.empty()) v = SNAP_VERSION;
+#endif
         std::printf("Snap Recomp %s (Linux)\n", v.empty() ? "(development build)" : v.c_str());
         return 0;
     }
