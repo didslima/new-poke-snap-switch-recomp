@@ -25,11 +25,14 @@
 
 namespace nvn {
 float g_wideK = 1.0f;
+std::atomic<float> g_uiPresentAspect{0.0f};
 
 namespace {
 std::atomic<int> g_wideDraws{0};       // widened-camera draws into wide targets since the last present
+std::atomic<int> g_evalCropSeen{0};    // Evaluation crop (1080x720 / 240x200) seen since the last present
 int g_lastFrameWide = -1;              // last present's decision (-1 before the first)
 int g_wideHold = 0;                    // presents left to stay wide after the last widened draw
+int g_evalHold = 0;                    // presents left to stay 16:9 during Evaluation photo scoring
 // Photo select and the album draw their 3D backdrop on every other present: a present stays wide while a widened draw happened in
 // the last kHold presents, so the bars do not flicker.
 constexpr int kHold = 4;
@@ -99,10 +102,17 @@ bool WideOnDraw(ReplayCtx& cx, TextureImpl* const* sampled, int nSampled, const 
       const float x0 = ndc ? -1.0f : 0.0f, y0 = x0, x1 = ndc ? 1.0f : (float)t->b.width, y1 = ndc ? 1.0f : (float)t->b.height;
       const float ex = (x1 - x0) * 0.001f, ey = (y1 - y0) * 0.001f, cx0 = (x0 + x1) * 0.5f, cy0 = (y0 + y1) * 0.5f;
       fullScreen = box[0] <= x0 + ex && box[2] >= x1 - ex && box[1] <= y0 + ey && box[3] >= y1 - ey;
-      // a quarter or half of the screen reaching from a side edge to the center lines: a piece of a mirrored full-screen mask
+      // a quarter or half of the screen reaching from a side edge to the center lines: a piece of a mirrored full-screen mask,
+      // plus sweeping horizontal scan bands (half-width mirrored strips) and full-height side-edge scan overlays.
       const bool spanX = (box[0] <= x0 + ex && box[2] >= cx0 - ex) || (box[0] <= cx0 + ex && box[2] >= x1 - ex);
       const bool spanY = (box[1] <= y0 + ey && box[3] >= cy0 - ey) || (box[1] <= cy0 + ey && box[3] >= y1 - ey);
-      screenPart = !fullScreen && spanX && spanY;
+      const bool fullY = box[1] <= y0 + ey && box[3] >= y1 - ey;
+      const bool halfStripX = !ndc && (t->b.flags & TF_DISPLAY) && spanX &&
+                              nSampled == 1 && sampled[0] && sampled[0]->b.width * 2 == t->b.width;
+      const bool sideEdgeFullY = !ndc && (t->b.flags & TF_DISPLAY) && fullY &&
+                                 (box[0] <= x0 + 4.0f || box[2] >= x1 - 4.0f) &&
+                                 (box[2] - box[0]) >= (x1 - x0) * 0.25f;
+      screenPart = !fullScreen && ((spanX && spanY) || halfStripX || sideEdgeFullY);
       // Photo-mode viewfinder mask: 4 mirrored quarters meeting at (cx0, cy0) sampling a half-res (960x540) texture into the display target.
       // Keep it narrow (16:9) so the viewfinder opening frames the 16:9/3:2 photo capture area rather than stretching to ~21:9.
       const bool quarterAligned = (std::fabs(box[0] - cx0) <= ex || std::fabs(box[2] - cx0) <= ex) &&
@@ -282,6 +292,9 @@ TextureImpl* WideCropSubstitute(ReplayCtx& cx, TextureImpl* src) {
     g_stats[3]++;
     if (LogLevel() >= 2) fprintf(stderr, "[wide] p%d crop copy %dx%d f%x for a draw into %dx%d f%x\n", g_presentCount, src->b.width, src->b.height, src->b.format, t->b.width, t->b.height, t->b.format);
   }
+  if (t && ((t->b.width == 1080 && t->b.height == 720) || (t->b.width == 240 && t->b.height == 200))) {
+    g_evalCropSeen.store(1, std::memory_order_relaxed);
+  }
   return tw;
 }
 
@@ -289,9 +302,33 @@ void WideMarkDrawn(TextureImpl* t) { if (t && t->wide > 1.0f) t->wideDirty = tru
 
 bool WidePresentCrop(const TextureImpl* src, int* sx, int* sw) {
   if (g_wideK <= 1.0f || !src || src->wide <= 1.0f) return false;
-  if (g_wideDraws.exchange(0, std::memory_order_relaxed) > 0) g_wideHold = kHold;
+  if (g_evalCropSeen.exchange(0, std::memory_order_relaxed) > 0) {
+    g_evalHold = 8;
+    g_wideHold = 0;
+  } else if (g_evalHold > 0) {
+    g_evalHold--;
+  }
+  if (g_wideDraws.exchange(0, std::memory_order_relaxed) > 0 && g_evalHold == 0) g_wideHold = kHold;
   else if (g_wideHold > 0) g_wideHold--;
-  const bool wide = g_wideHold > 0;
+  const float forcedAspect = g_uiPresentAspect.load(std::memory_order_relaxed);
+  if (forcedAspect > 1.0f) {
+    const int cw = (int)std::lround((double)src->HH() * (double)forcedAspect);
+    if (cw > 0 && cw < (int)src->HW()) {
+      *sx = ((int)src->HW() - cw) / 2;
+      *sw = cw;
+      if (LogLevel() && g_lastFrameWide != 2) {
+        fprintf(stderr, "[wide] p%d present: forced %.1f:9 (aspect %.4f, crop %d/%u)\n",
+                g_presentCount, forcedAspect * 9.0f, forcedAspect, cw, src->HW());
+      }
+      g_lastFrameWide = 2;
+      return true;
+    }
+  }
+  if (g_lastFrameWide == 2 && LogLevel()) {
+    fprintf(stderr, "[wide] p%d present: exited forced crop (%s)\n",
+            g_presentCount, (g_wideHold > 0 && g_evalHold == 0) ? "restored 32:9 wide" : "16:9 narrow");
+  }
+  const bool wide = g_wideHold > 0 && g_evalHold == 0;
   g_stats[wide ? 4 : 5]++;
   if (LogLevel() && wide != (g_lastFrameWide == 1)) fprintf(stderr, "[wide] p%d present: %s\n", g_presentCount, wide ? "wide (3D view widened)" : "16:9 in the middle (no widened camera)");
   g_lastFrameWide = wide ? 1 : 0;
@@ -311,3 +348,4 @@ NVN_HOST_EXPORT void nvnHostSetUltrawide(float k) {
   fprintf(stderr, "[wide] ultrawide factor %.4f (%s)\n", nvn::g_wideK, nvn::g_wideK > 1.0f ? "3D view widened, interface and photos 16:9" : "off");
 }
 NVN_HOST_EXPORT float nvnHostGetUltrawide(void) { return nvn::g_wideK; }
+NVN_HOST_EXPORT void nvnHostSetUiPresentAspect(float aspect) { nvn::g_uiPresentAspect.store(aspect, std::memory_order_relaxed); }
