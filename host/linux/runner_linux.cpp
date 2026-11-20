@@ -33,7 +33,7 @@ void print_usage(FILE *out) {
     std::fprintf(out,
         "usage: snap_boot_linux [--main elf] [--sdk elf] [--main-lib lib.a] [--sdk-lib lib.a] "
         "[--play] [--fullscreen|--windowed|--borderless] [--width W] [--height H] [--monitor N] "
-        "[--profile name] [--data-dir dir] [--set key=val] [--version] "
+        "[--steam-deck] [--safe-mode] [--profile name] [--data-dir dir] [--set key=val] [--version] "
         "validate|info|shared|init [--probe N] [--libc]|run [--probe N] [--trace file] [--stop-after-init] [--allow-guest-exec]|"
         "eh|lua|bench [--iters N]|all\n");
 }
@@ -347,6 +347,7 @@ int bootstrap_main(int argc, char **argv) {
         if (const char *n = hle::settings::env_name(kv.first)) unsetenv(n);
         hle::settings::override_for_run(kv.first, kv.second);
     }
+    hle::settings::load();
 #endif
 
     if (opts.cmd == "validate") {
