@@ -37,6 +37,7 @@
 #include "hle/presets.h"
 #include "hle/discord_app.h"
 #include "hle/visual_defaults.h"
+#include "steamdeck.h"
 #include "mods/mods_core.h"
 #include "shaderprep.h"
 
@@ -126,7 +127,7 @@ struct JsonFile {
 
 // ---------------------------------------------------------------------------------------------------------------- settings model
 enum Store { S_CFG, S_WIN, S_AUD };
-enum Kind { K_CHOICE, K_PRESET, K_ACTION, K_LOOK, K_PACING, K_AA, K_PERF, K_PROFILE, K_INFO };   // K_INFO: a read-only row (label and a line of text in cur), e.g. the key bindings summary   // K_PRESET / K_LOOK / K_PACING / K_AA / K_PERF / K_PROFILE are worked out from or write several stored values
+enum Kind { K_CHOICE, K_PRESET, K_ACTION, K_LOOK, K_PACING, K_AA, K_PERF, K_PROFILE, K_DEVICE, K_INFO };   // K_INFO: a read-only row (label and a line of text in cur), e.g. the key bindings summary   // K_PRESET / K_LOOK / K_PACING / K_AA / K_PERF / K_PROFILE are worked out from or write several stored values
 enum Enc { E_STR, E_INT, E_VOL, E_BOOL };   // how a window.json / audio.json value is stored
 
 struct Ch {
@@ -143,6 +144,7 @@ struct Item {
   UiResult act = UiResult::Quit;   // K_ACTION
   std::string cur;
   std::string note;   // one line under the label: which value is in effect when another row overrides this one (hle/picture_rows.h)
+  std::string brief;  // one short line under the label saying what the row does (the full help shows in the bar at the bottom for the selected row)
 };
 
 struct Page {
@@ -236,6 +238,7 @@ struct G {
   bool pulldown = false;
   int pd_sel = 0, pd_top = 0;
   bool confirm_reset = false;
+  bool bindings_custom = false;   // input.json holds the player's own bindings (Controls page caption)
   double t0 = 0;
   std::string toast;
   double toast_until = 0;
@@ -284,6 +287,25 @@ void text_wrap2(float x, float y, float sz, ImU32 col, const std::string& t, flo
   }
   text(x, y - sz * 0.62f, sz, col, a.c_str());
   text_clip(x, y + sz * 0.62f, sz, col, b.c_str(), maxw);
+}
+// Word-wraps t into lines of at most maxw, up to maxlines, the first line's vertical centre at y, lines lineh apart. Returns the number of lines drawn.
+int text_para(float x, float y, float sz, ImU32 col, const std::string& t, float maxw, float lineh, int maxlines) {
+  size_t pos = 0;
+  int n = 0;
+  while (pos < t.size() && n < maxlines) {
+    std::string a;
+    while (pos < t.size()) {
+      const size_t sp = t.find(' ', pos);
+      const std::string word = t.substr(pos, sp == std::string::npos ? std::string::npos : sp - pos);
+      const std::string trial = a.empty() ? word : a + " " + word;
+      if (!a.empty() && text_w(sz, trial.c_str()) > maxw) break;
+      a = trial;
+      pos = sp == std::string::npos ? t.size() : sp + 1;
+    }
+    text(x, y + (float)n * lineh, sz, col, a.c_str());
+    ++n;
+  }
+  return n;
 }
 
 // A bar with pointed ends (the game's rows and value boxes).
@@ -390,6 +412,32 @@ void set_preset(const std::string& v) {
   }
 }
 
+// The Device row (host/steamdeck.h, docs/steam-deck.md): "steamdeck" writes the whole Steam Deck table, "desktop" erases it again. The row shows
+// Steam Deck only while every value of the table is stored, so changing any one of them afterwards shows Desktop.
+std::string get_device() {
+  for (const snapdeck::Kv& kv : snapdeck::cfg()) if (g.cfg.get(kv.key, "") != kv.val) return "desktop";
+  const hle::Json* m = g.win.j.get("mode");
+  const hle::Json* w = g.win.j.get("width");
+  const hle::Json* h = g.win.j.get("height");
+  if (!m || m->type != hle::Json::Str || m->s != snapdeck::window_mode()) return "desktop";
+  if (!w || w->type != hle::Json::Num || (int)w->n != snapdeck::kWidth || !h || h->type != hle::Json::Num || (int)h->n != snapdeck::kHeight) return "desktop";
+  return "steamdeck";
+}
+void set_device(const std::string& v) {
+  if (v == "steamdeck") {
+    for (const snapdeck::Kv& kv : snapdeck::cfg()) g.cfg.set(kv.key, kv.val);
+    g.win.j.set("mode", hle::Json::string(snapdeck::window_mode()));
+    g.win.j.set("width", hle::Json::number(snapdeck::kWidth));
+    g.win.j.set("height", hle::Json::number(snapdeck::kHeight));
+    g.win.j.set("maximized", hle::Json::boolean_(false));
+  } else if (v == "desktop") {
+    for (const snapdeck::Kv& kv : snapdeck::cfg()) g.cfg.erase(kv.key);
+    g.win.j.set("mode", hle::Json::string("windowed"));
+  } else return;
+  g.cfg.save();
+  g.win.save();
+}
+
 // ---- the display (for VRR and "fit to display") ----------------------------------------------------------------------
 BOOL CALLBACK mon_handle_cb(HMONITOR m, HDC, LPRECT, LPARAM lp) { ((std::vector<HMONITOR>*)lp)->push_back(m); return TRUE; }
 void read_display() {
@@ -512,6 +560,7 @@ void set_profile(const std::string& v) {
 
 std::string read_value(const Item& it) {
   if (it.kind == K_PROFILE) return get_profile();
+  if (it.kind == K_DEVICE) return get_device();
   if (it.kind == K_AA) return snappic::aa_row(pic_cfg());
   if (it.kind == K_PERF) return snappic::perf_row(pic_cfg());
   if (it.kind == K_PRESET) return get_preset();
@@ -534,6 +583,7 @@ std::string read_value(const Item& it) {
 
 void write_value(Item& it, const std::string& val) {
   if (it.kind == K_PROFILE) { set_profile(val); return; }
+  if (it.kind == K_DEVICE) { set_device(val); return; }
   if (it.kind == K_AA) { pic_store(snappic::with_aa(pic_cfg(), val)); return; }
   if (it.kind == K_PERF) { pic_store(snappic::with_perf(pic_cfg(), val, pic_ctx())); return; }
   if (it.kind == K_PRESET) { set_preset(val); return; }
@@ -642,29 +692,31 @@ void add_binding_summary(Page& p) {
       else m = hle::input::Mapping::defaults();
     }
   }
-  auto line = [&](const std::vector<hle::input::Source>& v) {
+  // One K_INFO row per button: cur = "keys and mouse<TAB>controller", drawn as a two-column table under the setting rows (draw_settings)
+  auto devs = [&](const std::vector<hle::input::Source>& v, int d0, int d1) {
     std::string out;
-    for (int d = 0; d < hle::input::kDevCount; ++d) {
-      std::string part;
+    for (int d = d0; d <= d1; ++d) {
       for (int sl = 0; sl < hle::input::kMaxSlotsPerDevice; ++sl) {
         const hle::input::Source s = hle::input::slot_get(v, (hle::input::Device)d, sl);
-        if (s.kind != hle::input::Source::None) part += (part.empty() ? "" : ", ") + hle::input::source_label(s);
+        if (s.kind != hle::input::Source::None) out += (out.empty() ? "" : ", ") + hle::input::source_label(s);
       }
-      out += std::string(out.empty() ? "" : "     ") + hle::input::device_name((hle::input::Device)d) + ": " + (part.empty() ? "-" : part);
     }
-    return out;
+    return out.empty() ? std::string("-") : out;
   };
-  auto info = [&](const std::string& label, const std::string& text) { Item it; it.label = label; it.kind = K_INFO; it.cur = text; p.items.push_back(it); };
+  auto info = [&](const std::string& label, const std::string& kb, const std::string& pad) { Item it; it.label = label; it.kind = K_INFO; it.cur = kb + "\t" + pad; p.items.push_back(it); };
   using namespace hle::input;
-  for (int b : {kA, kB, kX, kY, kL, kR, kZL, kZR, kPlus, kMinus}) info(action_label(b), line(action_sources(m, b)));
+  for (int b : {kA, kB, kX, kY, kL, kR, kZL, kZR, kPlus, kMinus}) {
+    const auto src = action_sources(m, b);
+    info(action_label(b), devs(src, kDevKeyboard, kDevMouse), devs(src, kDevController, kDevController));
+  }
   auto keys4 = [&](int first) {   // the four directions of a stick on the keyboard, in the order up, down, left, right
     std::string out;
     for (int a = first; a < first + 4; ++a) { const Source s = slot_get(action_sources(m, a), kDevKeyboard, 0); out += (out.empty() ? "" : " ") + (s.kind == Source::None ? std::string("-") : source_label(s)); }
-    return out;
+    return out == "Up Down Left Right" ? std::string("Arrow keys") : out + " (up, down, left, right)";
   };
-  info("Left stick", "Keyboard: " + keys4(16) + " (up down left right)     Controller: left stick");
-  info("Right stick", "Keyboard: " + keys4(20) + " (up down left right)     Controller: right stick");
-  info(custom ? "Your bindings" : "Default bindings", "Change them in the game: F1 > Bindings.");
+  info("Left stick", keys4(16), "Left stick");
+  info("Right stick", keys4(20), "Right stick");
+  g.bindings_custom = custom;
 }
 
 void access_changed();   // below
@@ -688,7 +740,7 @@ void choose(Item& it, int idx) {
     if (was_vrr) set_pacing("vrr");
     refresh_defaults();
   }
-  if (it.kind == K_LOOK || it.kind == K_AA || it.kind == K_PERF || it.kind == K_PROFILE) refresh_defaults();
+  if (it.kind == K_LOOK || it.kind == K_AA || it.kind == K_PERF || it.kind == K_PROFILE || it.kind == K_DEVICE) refresh_defaults();
   if (it.key.rfind("access_", 0) == 0) access_changed();
   // a preset, the Look, the pacing, the monitor and the render scale each change what other rows show
   refresh_values();
@@ -707,7 +759,7 @@ void cycle(Item& it, int dir) {
 
 void reset_page(Page& p) {
   for (Item& it : p.items) {
-    if (it.kind == K_ACTION || it.kind == K_PROFILE || it.kind == K_INFO) continue;   // the Graphics preset is worked out from the rows reset below
+    if (it.kind == K_ACTION || it.kind == K_PROFILE || it.kind == K_DEVICE || it.kind == K_INFO) continue;   // the Graphics preset is worked out from the rows reset below
     if (it.kind == K_PRESET) { set_preset("normal"); continue; }
     if (it.kind == K_AA) { g.cfg.erase("gfx_aa"); g.cfg.erase("gfx_upscaler"); g.cfg.erase("gfx_upscale_quality"); continue; }
     if (it.kind == K_PERF) { g.cfg.erase("gfx_upscale_quality"); if (g.cfg.get("gfx_upscaler", "") == "dlss") g.cfg.set("gfx_upscaler", "dlaa"); continue; }
@@ -771,6 +823,11 @@ void build_pages() {
   // Display
   {
     Page p; p.name = "Display";
+    Item dv = choice("Device", "", S_CFG, "desktop", {{"desktop", "Desktop"}, {"steamdeck", "Steam Deck (1280 x 800, controller only)"}},
+                     "Steam Deck sets a borderless 1280 x 800 window, a lighter 3D picture (1440 x 810, SMAA, 4x filtering), a 150% HUD with sharper menu text and Xbox button icons, all at once. "
+                     "Desktop puts those rows back to their defaults. Changing any one of them afterwards shows Desktop again. Command line: --steam-deck.");
+    dv.kind = K_DEVICE;
+    p.items.push_back(dv);
     p.items.push_back(choice("Window mode", "mode", S_WIN, "windowed", {{"windowed", "Windowed"}, {"borderless", "Borderless fullscreen"}},
                              "Windowed, or borderless fullscreen. F11 and Alt+Enter switch it in the game too."));
     std::vector<Mon> mons;
@@ -850,7 +907,7 @@ void build_pages() {
                              "Keeps ground and walls sharp at shallow angles. 16x costs almost nothing on a PC graphics card."));
     p.items.push_back(choice("Lighting", "gfx_lighting", S_CFG, "default",
                              {{"default", "Original"}, {"enhanced", "Enhanced"}, {"maximum", "Maximum"}},
-                             "One switch for the whole lighting look. Enhanced: soft shadows that sharpen where they touch the ground, a shadow map that follows your render resolution at twice the reach, ambient occlusion in corners and under objects, and clean contact shadows. Maximum adds a larger shadow map, four times the reach and a finer occlusion pass. The extra passes are skipped while a photo is taken, so scoring is untouched."));
+                             "One switch for the whole lighting look. Enhanced adds soft shadows that sharpen where they touch the ground, shading in corners and clean contact shadows. Maximum adds a larger shadow map, four times the reach and finer shading. Photos and scoring are untouched."));
     p.items.push_back(choice("Bounce light", "gfx_bounce", S_CFG, "default",
                              {{"default", "Off"}, {"1", "On"}},
                              "Colored light that bounces off nearby surfaces, such as green from grass onto a Pokemon. Display only; photos and scoring are untouched."));
@@ -866,10 +923,12 @@ void build_pages() {
   {
     Page p; p.name = "Upscaling";   // the upscaler itself is the Anti-aliasing row and its share the Performance scaling row (Picture page); this page holds what goes with it
     {
-      Item fg = choice("Frame generation", "frame_generation", S_CFG, "default", {{"default", "Off"}, {"fsr", "AMD FSR"}},
-                       "AMD FSR frame generation adds a computed frame between two real ones, so 60 fps looks like about 120 on a fast screen. Menus and the HUD stay out of it, photos and scoring never see it, and it turns itself off under about 50 fps. It adds about one frame of delay. If it ever fails it turns itself off for that session and says so in the in-game F1 menu. To undo it, set Off here (or remove SNAP_FRAMEGEN). Needs the frame generation files: use Install upscalers below.");
+      Item fg = choice("Frame generation", "frame_generation", S_CFG, "default", {{"default", "Off"}, {"fsr", "AMD FSR"}, {"dlss", "NVIDIA DLSS"}},
+                       "Adds a computed frame between two real ones, so 60 fps looks like about 120. AMD FSR needs the files from Install upscalers. NVIDIA DLSS needs an RTX 40 or 50 card and the Streamline files in the upscalers\\streamline folder. It adds about one frame of delay and turns itself off under 50 fps. Photos and scoring never see it.");
       fg.ch[1].avail = file_exists("upscalers\\amd_fidelityfx_framegeneration_vk.dll");
       if (!fg.ch[1].avail) fg.ch[1].label += " (not installed)";
+      fg.ch[2].avail = file_exists("upscalers\\streamline\\sl.interposer.dll");
+      if (!fg.ch[2].avail) fg.ch[2].label += " (not installed)";
       p.items.push_back(fg);
     }
     p.items.push_back(choice("HDR output", "gfx_hdr", S_CFG, "0", {{"0", "Off"}, {"1", "HDR10"}, {"scrgb", "scRGB"}},
@@ -971,6 +1030,37 @@ void build_pages() {
                              "A press holds the button down until the next press, for buttons the game wants held. Applies the next time the game starts."));
     p.items.push_back(choice("Mono audio", "access_mono", S_CFG, "0", {{"0", "Off"}, {"1", "On"}}, "Plays the same sound in both ears."));
     g.pages.push_back(p);
+  }
+  // The line under each row's label: a short version of its help. Rows not listed here use the first sentence of the help.
+  static const struct { const char* label; const char* brief; } kBriefs[] = {
+      {"Device", "Sets the window, picture and HUD for a handheld in one go."},
+      {"When the game closes", "Come back to this launcher, or close everything."},
+      {"Look", "Enhanced is the new-install look. Original is the game as shipped."},
+      {"SMAA quality", "How carefully edges are searched. Only SMAA uses it."},
+      {"Performance scaling", "Draws fewer pixels and upscales them, so a slower card keeps up."},
+      {"Bounce light", "Colored light bouncing between nearby surfaces."},
+      {"Frame generation", "Adds computed frames in between, so 60 fps looks like about 120."},
+      {"Frame pacing", "VSync, VRR (G-SYNC or FreeSync), or your own limit."},
+      {"Vsync", "How the picture waits for the screen, to avoid tearing."},
+      {"Swap A and B", "Confirm on the south button, back on the east button."},
+      {"Discord Rich Presence", "Shows the course you are riding on your Discord profile."},
+      {"Create problem report...", "Saves a zip on your Desktop for a bug report. Nothing is uploaded."},
+      {"Check install...", "Checks your game files and says in plain words what is wrong."},
+      {"Install upscalers...", "Download FSR, DLSS or XeSS from their makers. Nothing installs without you."},
+      {"Skip course intro", "Plays the course fly-over about 8 times faster."},
+      {"Color vision", "Shifts colors that are hard to tell apart into ones you can see."},
+      {"Reduce flashing", "Fades bright bursts and camera flashes in over a few frames."},
+      {"High-contrast menus", "Black panels, white text and a bright selection."},
+      {"Hold to toggle", "A press holds the button until you press it again."},
+  };
+  for (Page& p : g.pages) for (Item& it : p.items) {
+    if (it.kind == K_INFO) continue;
+    for (const auto& b : kBriefs) if (it.label == b.label) it.brief = b.brief;
+    if (it.brief.empty()) {
+      const size_t dot = it.help.find(". ");
+      it.brief = it.help.substr(0, dot == std::string::npos ? it.help.size() : dot);
+      if (!it.brief.empty() && it.brief.back() == '.') it.brief.pop_back();
+    }
   }
   refresh_values();
 }
@@ -1649,10 +1739,13 @@ void draw_settings(bool* click_back) {
   diamond(104, 112, 6, C(0xffffff, 60)); diamond(118, 124, 6, C(0xffffff, 60));
   diamond(1176, 112, 6, C(0xffffff, 60)); diamond(1162, 124, 6, C(0xffffff, 60));
   // rows
-  // rows are 60 apart, closer together on a page with more than seven so all of them fit above the restore button
-  const float ry0 = 134, pitch = std::min(60.0f, 446.0f / (float)std::max<size_t>(1, pg.items.size())), rh = pitch - 8, rx = 138, rw = 1004, vw = 340;
+  // one pitch on every page (eight rows fill the panel above the restore button); each row is a label with a short description under it
+  const float ry0 = 134, pitch = 55, rh = 49, rx = 138, rw = 1004, vw = 340;
+  int nrows = 0;
   for (size_t i = 0; i < pg.items.size(); ++i) {
     Item& it = pg.items[i];
+    if (it.kind == K_INFO) continue;   // read-only rows are drawn as a table below the settings
+    ++nrows;
     const float y = ry0 + (float)i * pitch;
     const bool sel = (int)i == g.row;
     if (hot(rx, y, rw, rh) && !g.pulldown) {
@@ -1660,18 +1753,12 @@ void draw_settings(bool* click_back) {
       if (ImGui::IsMouseClicked(0)) { g.row = (int)i; g.confirm_reset = false; if (it.kind == K_ACTION) { g.result = it.act; g.done = true; } else if (it.kind != K_INFO) { g.pulldown = true; g.pd_sel = std::max(0, index_of(it, it.cur)); g.pd_top = 0; } }
     }
     pointed(rx, y, rw, rh, 22, C(sel ? kGreen : kRow));
-    if (!it.note.empty() && it.kind != K_ACTION) {
-      text(rx + 44, y + rh * 0.36f, 21, C(0xf7f7f7), it.label.c_str());
-      text_clip(rx + 44, y + rh * 0.76f, 14, C(sel && !g_hc ? 0x4a5a38 : 0xffffff), it.note.c_str(), 590.0f);
-    } else {
-      text(rx + 44, y + rh / 2, it.kind == K_INFO ? 17.0f : 21.0f, C(0xf7f7f7), it.label.c_str());
-    }
+    // label, and under it what the row does (or, when another row overrides it, which value is in effect)
+    text(rx + 44, y + rh * 0.35f, 21, C(0xf7f7f7), it.label.c_str());
+    const std::string& sub = (!it.note.empty() && it.kind != K_ACTION) ? it.note : it.brief;
+    if (!sub.empty()) text_clip(rx + 44, y + rh * 0.76f, 14, C(sel && !g_hc ? 0x3f4d30 : 0xf0f0f2), sub.c_str(), 600.0f);
     if (it.kind == K_ACTION) {
       prompt(rx + rw - 120, y + rh / 2, 36, "A");
-      continue;
-    }
-    if (it.kind == K_INFO) {   // read-only: the value is a line of text, no pill
-      text_clip(rx + 250, y + rh / 2, 17, C(0xf7f7f7), it.cur.c_str(), rw - 270);
       continue;
     }
     const float vx = rx + rw - 20 - vw, vy = y + 3;
@@ -1690,6 +1777,32 @@ void draw_settings(bool* click_back) {
       dl->AddCircleFilled(c, 13 * g.s, C(kWhite), 24);
       dl->AddCircle(c, 13 * g.s, C(kOrange), 24, 4 * g.s);
       dl->AddCircleFilled(c, 5 * g.s, C(kOrDark), 16);
+    }
+  }
+  // the key, mouse and controller bindings (Controls page): two tables side by side, button / keys and mouse / controller
+  {
+    std::vector<const Item*> info;
+    for (const Item& q : pg.items) if (q.kind == K_INFO) info.push_back(&q);
+    if (!info.empty()) {
+      const float ty = ry0 + (float)nrows * pitch + 4, colw = 492, rowh = 25;
+      const size_t half = (info.size() + 1) / 2;
+      for (int blk = 0; blk < 2; ++blk) {
+        const float x0 = rx + blk * (rw - colw);
+        text(x0 + 12, ty + 11, 14, C(0xd6d7de), "Button");
+        text(x0 + 100, ty + 11, 14, C(0xd6d7de), "Keys and mouse");
+        text(x0 + 345, ty + 11, 14, C(0xd6d7de), "Controller");
+        const size_t b0 = blk == 0 ? 0 : half, b1 = blk == 0 ? half : info.size();
+        for (size_t k = b0; k < b1; ++k) {
+          const float yy = ty + 24 + (float)(k - b0) * (rowh + 2);
+          rrect(x0, yy, colw, rowh, 12, C(0xffffff, 26));
+          const Item& q = *info[k];
+          const size_t tab = q.cur.find('\t');
+          text(x0 + 12, yy + rowh / 2, 15, C(0xf7f7f7), q.label.c_str());
+          text_clip(x0 + 100, yy + rowh / 2, 15, C(0xf7f7f7), q.cur.substr(0, tab).c_str(), 235.0f);
+          text_clip(x0 + 345, yy + rowh / 2, 15, C(0xf7f7f7), tab == std::string::npos ? "" : q.cur.substr(tab + 1).c_str(), 140.0f);
+        }
+      }
+      text(rx + 12, 584, 14, C(0xd6d7de), g.bindings_custom ? "These are your own bindings. Change them in the game: F1, then Bindings." : "Default bindings. Change them in the game: F1, then Bindings.");
     }
   }
   // restore defaults pill
@@ -1874,7 +1987,7 @@ void draw_home() {
       const float fr = verify_fraction();
       pl = std::string(why ? verify_why_text(why) : "Looking at your game files") + (n ? " - " + std::to_string(n) + (in.verify && in.verify->total.load() ? " of " + std::to_string(in.verify->total.load()) : std::string()) + " files" : std::string());
       const double t = ImGui::GetTime();
-      const float bx = x + 134, bw = w - 168, by = y + 72;
+      const float bx = x + 134, bw = w - 168 - 62, by = y + 72;
       rrect(bx, by, bw, 6, 3, C(0xe9c96a));
       if (fr >= 0.f) {   // the real amount
         rrect(bx, by, std::max(6.f, bw * fr), 6, 3, C(kOrange));
@@ -1888,7 +2001,7 @@ void draw_home() {
       pl = g.profile_idx < in.profiles.size() ? in.profiles[g.profile_idx].name : "+ New profile";
       if (sel) pl = "<  " + pl + "  >";
     }
-    if (!pl.empty()) text_clip(x + 134, y + (vs == 0 ? 90 : 86), 19, C(0x7a6440), pl.c_str(), w - 150);
+    if (!pl.empty()) text_clip(x + 134, y + (vs == 0 ? 90 : 86), 19, C(0x7a6440), pl.c_str(), w - 150 - 62);   // leaves room for the A prompt at the right
   }
 
   // status chips
@@ -1980,6 +2093,7 @@ void draw_home() {
     else if (i == H_SAVES) sub = in.profiles.empty() ? "" : std::to_string(in.profiles.size()) + (in.profiles.size() == 1 ? " profile" : " profiles");
     else if (i == H_ALBUM) sub = album_home_sub();
     else if (i == H_MODS) sub = g.mods.empty() ? "No packs yet" : std::to_string(mods_on()) + " of " + std::to_string(g.mods.size()) + " on";
+    else if (i == H_HD) sub = "Optional";
     else if (i == H_STEAM) sub = g.steam_status == 0 ? "Steam not found" : g.steam_status == 2 ? "Added" : "Not added";
     else if (i == H_UPDATES) sub = in.update_available ? in.update_version + " ready" : in.version;
     else if (i == H_BENCH) sub = "About 2 min";
@@ -2008,7 +2122,7 @@ void draw_home() {
       {"Frame pacing", [](const Item& it) { return it.kind == K_PACING; }},
       {"Resolution", [](const Item& it) { return it.key == "gfx_render_scale"; }},
       {"Anti-aliasing", [](const Item& it) { return it.kind == K_AA; }},
-      {"Preset", [](const Item& it) { return it.kind == K_PROFILE; }},
+      {"Graphics preset", [](const Item& it) { return it.kind == K_PROFILE; }},
       {"Sound", [](const Item& it) { return it.key == "master"; }},
   };
   for (int i = 0; i < 7; ++i) {
@@ -2046,7 +2160,7 @@ void draw_home() {
     text(1172, 592, 15, C(kGrey), "Change these in Settings", 2);
   }
   help_bar(chip_hover ? "Checks your game files again: the folder, and that it is the 2.0.1 game this build was made from." : kHome[g.home_sel].help);
-  if (g.home_sel == H_PLAY) prompt(556, 180, 50, "A");
+  if (g.home_sel == H_PLAY) prompt(476, 198, 38, "A");   // inside the Play tile, bottom right (outside it the arrow ran into the loadout card)
   if (ImGui::GetTime() < g.toast_until) {
     const float w = text_w(18, g.toast.c_str()) + 40;
     rrect(640 - w / 2, 108, w, 36, 18, C(kYellow));
@@ -2130,8 +2244,8 @@ void draw_steam() {
 void draw_mods() {
   draw_home_bg();
   ImDrawList* dl = ImGui::GetForegroundDrawList();
-  diamond(122, 82, 56, C(0x8f8e90));
-  aperture(122, 82, 26, C(kCream));
+  diamond(122, 82, 46, C(0x8f8e90));
+  aperture(122, 82, 22, C(kCream));
   text(180, 70, 42, C(0x6a6561), "Mods");
   std::string head = g.mods.empty() ? "Loose-file mod packs" : "Packs higher in the list win when two change the same file";
   if (!g_mod_clash.empty())
@@ -2280,9 +2394,11 @@ void draw_mods() {
       text(x + 24, y0 + h - 76, 16, C(p.enabled ? 0x5f8a62 : kGrey), p.enabled ? "On: loads at the next start" : "Off");
       text_clip(x + 24, y0 + h - 44, 14, C(0x9a9795), (g.mods_root + "\\" + p.id + (p.zip ? ".zip" : "")).c_str(), w - 48);
     } else {
-      text_wrap2(x + 24, y0 + 110, 17, C(0x6a6561), "Each pack replaces game files, such as textures, text and menus, without touching the game itself.", w - 48);
-      text_wrap2(x + 24, y0 + 190, 17, C(0x6a6561), "The order is the priority: pack 1 wins over pack 2.", w - 48);
-      text_wrap2(x + 24, y0 + 270, 17, C(0x6a6561), "Changes apply the next time you press Play.", w - 48);
+      float ty = y0 + 92;
+      for (const char* para : {"Each pack replaces game files, such as textures, text and menus, without touching the game itself.",
+                               "The order is the priority: pack 1 wins over pack 2. Use the arrows beside a pack, or Q and E, to move it.",
+                               "Changes apply the next time you press Play."})
+        ty += (float)text_para(x + 24, ty, 17, C(0x6a6561), para, w - 48, 26, 5) * 26 + 22;
     }
   }
   help_bar(g.row == 0 ? "Opens the mods folder in Explorer. Put each pack in its own folder with a pack.json, or drop in its .zip."
@@ -2296,8 +2412,8 @@ void draw_saves() {
   draw_home_bg();
   ImDrawList* dl = ImGui::GetForegroundDrawList();
   (void)dl;
-  diamond(122, 82, 56, C(0x8f8e90));
-  aperture(122, 82, 26, C(kCream));
+  diamond(122, 82, 46, C(0x8f8e90));
+  aperture(122, 82, 22, C(kCream));
   text(180, 70, 42, C(0x6a6561), "Saves");
   text(182, 106, 17, C(kGrey), "Back up or move your save");
   const char* names[4] = {"Open save folder", "Import a save...", "Export the save...", "Restore a backup..."};
@@ -2305,10 +2421,14 @@ void draw_saves() {
                           "From a console backup (JKSV, Checkpoint) or an emulator. Your current save is kept as a backup.",
                           "Copy your save out for a save manager or an emulator.",
                           "Put back one of the automatic backups (made at every start and before every import), listed with date and time."};
-  float y = 160;
+  const char* briefs[4] = {"Opens the save folder of the selected profile in Explorer.",
+                           "Bring in a save from a console backup or an emulator.",
+                           "Copy your save out for a save manager or an emulator.",
+                           "Go back to one of the automatic backups."};
+  float y = 142;
   for (int i = 0; i < 4; ++i) {
     const bool sel = i == g.row;
-    const float h = sel ? 68 : 58, x = 84, w = 520;
+    const float h = 72, x = 84, w = 740;   // the same height selected or not, so the rows below never jump
     if (hot(x, y, w, h)) {
       if (ImGui::GetIO().MouseDelta.x != 0 || ImGui::GetIO().MouseDelta.y != 0) g.row = i;
       if (ImGui::IsMouseClicked(0)) { g.row = i; ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, true); ImGui::GetIO().AddKeyEvent(ImGuiKey_Enter, false); }
@@ -2316,9 +2436,10 @@ void draw_saves() {
     shadow(x, y, w, h, 20);
     rrect(x, y, w, h, 20, C(sel ? kYellow : 0xffffff));
     if (sel) { pattern(x + 20, y, w - 40, h); ImGui::GetForegroundDrawList()->AddRect(V(x, y), V(x + w, y + h), C(kOrange), 20 * g.s, 0, 4 * g.s); }
-    text(x + 24, y + h / 2, sel ? 27 : 22, C(sel ? kBrown : 0x6a6561), names[i]);
+    text(x + 24, y + 26, sel ? 25 : 22, C(sel ? kBrown : 0x6a6561), names[i]);
+    text_clip(x + 24, y + 53, 15, C(sel ? 0x7a6440 : 0x9a9795), briefs[i], w - 110);
     if (sel) prompt(x + w - 20, y + h / 2, 44, "A");
-    y += h + 9;
+    y += h + 10;
   }
   help_bar(helps[std::min(std::max(g.row, 0), 3)]);
 }
@@ -2427,8 +2548,12 @@ void handle_input() {
   if (next) { g.tab = (g.tab + 1) % nt; g.row = 0; g.confirm_reset = false; }
   Page& p2 = g.pages[(size_t)g.tab];
   const int nr = (int)p2.items.size();
-  if (up) { g.row = (g.row + nr - 1) % nr; g.confirm_reset = false; }
-  if (dn) { g.row = (g.row + 1) % nr; g.confirm_reset = false; }
+  int na = nr;   // the read-only rows (K_INFO) come last and are never selected
+  while (na > 0 && p2.items[(size_t)na - 1].kind == K_INFO) --na;
+  if (na < 1) na = 1;
+  if (g.row >= na) g.row = na - 1;
+  if (up) { g.row = (g.row + na - 1) % na; g.confirm_reset = false; }
+  if (dn) { g.row = (g.row + 1) % na; g.confirm_reset = false; }
   Item& it = p2.items[(size_t)g.row];
   if (x) {
     if (g.confirm_reset) { reset_page(p2); g.confirm_reset = false; g.toast = "Defaults restored"; g.toast_until = ImGui::GetTime() + 2; }
@@ -2685,6 +2810,11 @@ UiResult show(UiInfo& info) {
   if (!g.hwnd) { UnregisterClassW(wc.lpszClassName, wc.hInstance); restore(); return UiResult::Failed; }
   apply_access_palette();
   fit_window();
+  if (shot) {   // test hook (pictures only): SNAP_LAUNCHER_UI_SIZE=3840x2160 draws the picture at that client size, whatever the monitor is
+    int sw = 0, sh = 0;
+    if (const char* sz = std::getenv("SNAP_LAUNCHER_UI_SIZE")) if (std::sscanf(sz, "%dx%d", &sw, &sh) == 2 && sw >= 640 && sh >= 360)
+      SetWindowPos(g.hwnd, nullptr, 0, 0, sw, sh, SWP_NOZORDER | SWP_NOACTIVATE);
+  }
   RECT cr{};
   GetClientRect(g.hwnd, &cr);
   g.rw = (UINT)(cr.right - cr.left); g.rh = (UINT)(cr.bottom - cr.top);

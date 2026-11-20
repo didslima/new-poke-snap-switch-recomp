@@ -693,7 +693,7 @@ ResolvedTex ResolveHandle(ReplayCtx& cx, DrawState& d, uint64_t handle, bool ima
   if (!r.feedback) r.view = r.t->View(tv, !image, shaderType, &r.range);
   if (!image && d.sp) {
     SamplerImpl* const* s = d.sp->slots.Find(sampId);
-    if (s && *s) r.samp = (*s)->sampler;   // a destroyed sampler can leave a null slot
+    if (s && *s) r.samp = SamplerLive(*s);   // a destroyed sampler can leave a null slot
   }
   return r;
 }
@@ -1943,11 +1943,11 @@ void PersistScrub(QueueImpl* q, const std::unordered_set<const void*>& dead) {
 // remapped to texture space, at floats 16..31 of a 132-byte buffer at slot 9). Called from BindUbo BEFORE the buffer is mirrored to the GPU: the
 // x and y columns are scaled by 1/k about the map centre. Idempotent: a buffer the game did not rewrite (it still holds our output) is skipped.
 static float ShadowDistK() {
-  static const float k = [] {
+  const float k = SNAP_LIVE(float, ([] {   // the Lighting preset and Shadow distance rows apply with no restart (hle/live.h)
     float v = snaplight::shadow_distance();   // SNAP_LIGHTING preset (hle/lighting_preset.h)
     if (const char* e = getenv("SNAP_SHADOW_DISTANCE")) { float f = (float)atof(e); if (f >= 1.0f && f <= 16.0f) v = f; }
     return v;
-  }();
+  }()));
   return snaplight::ab_on((unsigned long long)g_presentCount) ? k : 1.0f;   // SNAP_LIGHT_AB: even blocks use the original
 }
 

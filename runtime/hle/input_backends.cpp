@@ -202,6 +202,12 @@ class Win32Backend final : public Backend {
     }
     const char* bg = std::getenv("SNAP_INPUT_BACKGROUND");
     background_ = bg && *bg && *bg != '0';
+    // A scripted run that takes input in the background (the hidden test desktop) must not see the real pads: XInput and SDL pads are
+    // global devices, so a controller in use for something else on the PC pressed buttons in route runs (2026-11-18: stray focus moves
+    // on photo select, and D-pad routes that reached three different courses). SNAP_INPUT_REAL_PADS=1 keeps them.
+    const char* sc = std::getenv("SNAP_INPUT_SCRIPT");
+    const char* rp = std::getenv("SNAP_INPUT_REAL_PADS");
+    drop_pads_ = script_run_drops_pads(background_, sc, rp);
   }
   ~Win32Backend() override {
     if (clipped_) ClipCursor(nullptr);
@@ -254,6 +260,15 @@ class Win32Backend final : public Backend {
       }
     }
     if (!out.focused) { out.pad.reset(); out.lx = out.ly = out.rx = out.ry = out.lt = out.rt = 0; out.gyro_present = false; out.gyro_x = out.gyro_y = out.gyro_z = 0; }
+    if (drop_pads_) {
+      const bool live = out.pad.any() || std::fabs(out.lx) > 0.5f || std::fabs(out.ly) > 0.5f || std::fabs(out.rx) > 0.5f || std::fabs(out.ry) > 0.5f || out.lt > 0.5f || out.rt > 0.5f;
+      const ULONGLONG now = GetTickCount64();
+      if (live && now - drop_log_tick_ > 1000) {   // evidence for a run log, at most one line a second
+        drop_log_tick_ = now;
+        log("pad: real pad input ignored in this scripted background run (buttons %s, sticks %.2f,%.2f %.2f,%.2f)", out.pad.to_string().c_str(), out.lx, out.ly, out.rx, out.ry);
+      }
+      out.pad.reset(); out.lx = out.ly = out.rx = out.ry = out.lt = out.rt = 0; out.gyro_present = false; out.gyro_x = out.gyro_y = out.gyro_z = 0;
+    }
     // XInput vibration has no timeout of its own: stop it when the window loses focus, or when the game stopped refreshing it (hang, pause).
     if (rumbling_ && set_ && (!out.focused || GetTickCount64() - rumble_tick_ > kRumbleStaleMs)) {
       XVibration z{0, 0};
@@ -333,6 +348,8 @@ class Win32Backend final : public Backend {
   DWORD pad_index_ = 0;
   bool xslot_[4] = {false, false, false, false};
   bool rumbling_ = false, background_ = false, have_last_ = false;
+  bool drop_pads_ = false;          // see the constructor
+  ULONGLONG drop_log_tick_ = 0;
   ULONGLONG rumble_tick_ = 0;
   static constexpr ULONGLONG kRumbleStaleMs = 2000;   // the game refreshes its values every frame
   bool lock_ = false, recenter_ = false, clipped_ = false, was_recenter_ = false, swallow_enter_ = false;   // swallow_enter_: Alt+Enter (fullscreen) must not reach the game as Plus

@@ -8,11 +8,15 @@
 //   --fullscreen | --borderless   borderless full-screen window on the chosen monitor (the game has no exclusive mode)
 //   --windowed                    a normal window
 //   --monitor <n>  --width <px>  --height <px>
+//   --steam-deck                  the Steam Deck preset (host/steamdeck.h, docs/steam-deck.md): borderless 1280 x 800, handheld picture settings,
+//                                 bigger HUD, Xbox button icons. Flags after it win (--set hud_scale=200, --width ...).
 //   --profile <name or id>        the profile to play (also the profile of --import-save / --export-save)
 //   --set <key>=<value>           one settings key for this run only (repeatable); a name that starts with SNAP_ sets that variable
 //   --data-dir <folder>           one folder for saves, settings, mods, caches and logs
 //   --update | --check-install | --report | --restore-backup | --upscalers | --hdtex
-//                                 one launcher action without the launcher window (host/launcher.cpp run_action); the game does not start
+//                                 one launcher action without the launcher window (host/launcher.cpp run_action); the game does not start.
+//                                 No action opens a dialog. --restore-backup, --upscalers and --hdtex take everything after them as their
+//                                 own arguments (action_takes_args), so the other player flags go before them.
 //   --help | -h | /?   --version
 #pragma once
 #include <cstdlib>
@@ -20,12 +24,15 @@
 #include <utility>
 #include <vector>
 
+#include "steamdeck.h"
+
 namespace snap_cli {
 
 struct Parsed {
   bool help = false, version = false, play = false, safe = false;
   std::string data_dir, profile;
   std::string action;                                      // one launcher action (action_names) without its "--", or ""
+  std::vector<std::string> action_args;                    // what followed an action that takes arguments (action_takes_args)
   std::vector<std::pair<std::string, std::string>> env;    // variables to set for this run (window flags, --set SNAP_X=v)
   std::vector<std::pair<std::string, std::string>> sets;   // --set key=value, in order
   std::vector<std::string> rest;                           // everything else, in order, for the older handlers
@@ -44,6 +51,10 @@ inline const std::vector<std::string>& action_names() {
   return k;
 }
 
+// These actions own every argument after them: --restore-backup [latest | <n>], --upscalers [<name> --accept-license <name>],
+// --hdtex [the builder's hdtex options]. Without arguments each one prints its state and changes nothing.
+inline bool action_takes_args(const std::string& n) { return n == "restore-backup" || n == "upscalers" || n == "hdtex"; }
+
 inline Parsed parse(const std::vector<std::string>& args) {
   Parsed p;
   auto value = [&](size_t& i, std::string* out) {
@@ -60,6 +71,10 @@ inline Parsed parse(const std::vector<std::string>& args) {
     else if (a == "--safe-mode") p.safe = true;
     else if (a == "--fullscreen" || a == "--borderless") p.env.push_back({"SNAP_WINDOW_MODE", "borderless"});
     else if (a == "--windowed") p.env.push_back({"SNAP_WINDOW_MODE", "windowed"});
+    else if (a == "--steam-deck") {
+      for (auto& kv : snapdeck::env()) p.env.push_back(kv);
+      for (const snapdeck::Kv& kv : snapdeck::cfg()) p.sets.push_back({kv.key, kv.val});
+    }
     else if (a == "--monitor" || a == "--width" || a == "--height") {
       if (!value(i, &v)) break;
       if (!is_number(v)) { p.error = a + " needs a whole number, got \"" + v + "\""; break; }
@@ -82,6 +97,10 @@ inline Parsed parse(const std::vector<std::string>& args) {
       if (!act) { p.rest.push_back(a); continue; }
       if (!p.action.empty()) { p.error = "only one of --" + p.action + " and " + a + " at a time"; break; }
       p.action = a.substr(2);
+      if (action_takes_args(p.action)) {
+        p.action_args.assign(args.begin() + (std::ptrdiff_t)i + 1, args.end());
+        break;
+      }
     }
   }
   if (p.error.empty() && !p.action.empty() && p.play) p.error = "--" + p.action + " does not start the game; leave out --play";
@@ -141,9 +160,11 @@ inline const char* help_text() {
          "  --update                     install the newest version; it runs in its own window (exit 0 = started)\n"
          "  --check-install              check the game files and print the result (exit 0 = all good, 1 = something is wrong)\n"
          "  --report                     make the problem report zip and print where it is; nothing is uploaded\n"
-         "  --restore-backup             open the list of save backups\n"
-         "  --upscalers                  open the DLSS / FSR / XeSS downloads\n"
-         "  --hdtex                      open the HD texture tools\n"
+         "  --restore-backup [latest|<n>]\n"
+         "                               list the save backups, or put one back (no window)\n"
+         "  --upscalers [<name> --accept-license <name>]\n"
+         "                               list DLSS / FSR / XeSS, or download one whose license you accept (no window)\n"
+         "  --hdtex [options]            HD texture state, or the HD texture tool with its own options (no window)\n"
          "\n"
          "Other commands (no game window unless noted):\n"
          "  --import-save <folder or zip>, --export-save <folder>\n"

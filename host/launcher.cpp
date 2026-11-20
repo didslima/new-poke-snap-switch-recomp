@@ -34,6 +34,7 @@
 #include "hle/save_backup.h"
 #include "hle/save_port.h"
 #include "launcher.h"
+#include "cli_flags.h"
 #include "mods/problem_report.h"
 #include "mods/install_check.h"
 #include "elf_check.h"
@@ -1074,7 +1075,85 @@ static fs::path logs_dir() {
 
 // One launcher action from the command line (host/cli_flags.h), without the launcher window. Returns the process exit code. A test run
 // (SNAP_LAUNCHER_AUTOPLAY) names what a window or the updater would do instead of opening it.
-static int run_action(const std::string& action, const fs::path& exe_dir, const fs::path& cfg_path, hle::Json& cfg, const hle::Json& data) {
+// --restore-backup without a window. No argument: the list, newest first. "latest" or a number from that list: puts that backup back
+// (the current save is backed up first, as in the window). Exit code 0 done, 1 not restored, 2 the argument is wrong.
+static int restore_backup_cli(const fs::path& cfg_path, const std::vector<std::string>& args, const std::function<void(const std::string&)>& say) {
+  hle::load_config(U8(cfg_path.wstring()));
+  std::string label;
+  const std::string root = hle::saveport::target_save_root("", &label);
+  if (root.empty()) { say("No save folder could be chosen: " + label); return 1; }
+  const auto backups = hle::savebackup::list(root);
+  if (args.empty()) {
+    if (backups.empty()) { say("There are no backups of " + label + " yet. A backup is made each time the game starts and before every import or restore."); return 0; }
+    say("Backups of " + label + ", newest first:");
+    for (size_t i = 0; i < backups.size(); ++i) {
+      char line[64];
+      snprintf(line, sizeof line, "  %zu  %.1f MB  ", i + 1, (double)backups[i].bytes / (1024.0 * 1024.0));
+      say(line + hle::savebackup::describe(backups[i]));
+    }
+    say("Put one back with --restore-backup <number> or --restore-backup latest. Your current save is backed up first.");
+    return 0;
+  }
+  size_t pick = 0;
+  if (args.size() != 1) { say("--restore-backup takes one argument: latest, or a number from its list"); return 2; }
+  if (args[0] != "latest") {
+    if (!snap_cli::is_number(args[0]) || std::atoi(args[0].c_str()) < 1) { say("--restore-backup takes latest or a number from its list, got \"" + args[0] + "\""); return 2; }
+    pick = (size_t)std::atoi(args[0].c_str()) - 1;
+  }
+  if (pick >= backups.size()) { say(backups.empty() ? "There are no backups of " + label + " yet." : "There is no backup number " + args[0] + "; the list has " + std::to_string(backups.size()) + "."); return 1; }
+  hle::saveport::Report r;
+  std::string err;
+  if (!hle::savebackup::restore(root, backups[pick].folder, &r, &err, nullptr)) { say("The backup was not restored. " + err); return 1; }
+  say("The backup from " + hle::savebackup::describe(backups[pick]) + " was restored.\n" + hle::saveport::format_report(r, true));
+  return 0;
+}
+
+// One command-line argument, quoted for CreateProcess when it needs it.
+static std::wstring quote_arg(const std::string& a) {
+  if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos) return W(a);
+  std::string q = "\"";
+  size_t bs = 0;
+  for (char c : a) {
+    if (c == '\\') { bs++; q += c; continue; }
+    if (c == '"') q.append(bs + 1, '\\');
+    bs = 0;
+    q += c;
+  }
+  q.append(bs, '\\');
+  return W(q + "\"");
+}
+
+// --hdtex without a window: the builder's hdtex command (builder/snapbuild/hdtex_cli.py) with the arguments as they came, its output on
+// this process's output, its exit code as ours. No arguments: --status.
+static int hdtex_cli(const hle::Json& cfg, const std::vector<std::string>& args, bool test, const std::function<void(const std::string&)>& say) {
+  std::wstring a = L"hdtex";
+  if (args.empty()) a += L" --status";
+  for (const std::string& s : args) a += L" " + quote_arg(s);
+  std::wstring cmd = builder_cmd(cfg, a);
+  if (cmd.empty()) { say("The HD texture tool could not be started (the builder folder is missing)."); return 1; }
+  if (test) { say("launcher: would run: " + U8(cmd)); return 0; }
+  STARTUPINFOW si{};
+  si.cb = sizeof si;
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdInput = INVALID_HANDLE_VALUE;
+  si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+  si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+  for (HANDLE h : {si.hStdOutput, si.hStdError}) if (h && h != INVALID_HANDLE_VALUE) SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+  PROCESS_INFORMATION pi{};
+  const std::wstring cwd = g_work_dir.empty() ? std::wstring() : g_work_dir.wstring();
+  if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
+    say("The HD texture tool could not be started.");
+    return 1;
+  }
+  CloseHandle(pi.hThread);
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hProcess);
+  return (int)code;
+}
+
+static int run_action(const std::string& action, const std::vector<std::string>& args, const fs::path& exe_dir, const fs::path& cfg_path, hle::Json& cfg, const hle::Json& data) {
   const bool test = std::getenv("SNAP_LAUNCHER_AUTOPLAY") != nullptr;
   auto say = [](const std::string& s) { std::fprintf(stdout, "%s\n", s.c_str()); std::fflush(stdout); };
   if (action == "check-install") {   // host/mods/install_check.cpp; reads only
@@ -1099,12 +1178,12 @@ static int run_action(const std::string& action, const fs::path& exe_dir, const 
     say("The update runs in its own window.");
     return 0;
   }
-  if (test) { say("launcher: would open: " + action); return 0; }
-  if (action == "restore-backup") restore_backup_flow(cfg_path);
-  else if (action == "upscalers") offer_upscalers(exe_dir, data, false);
-  else if (action == "hdtex") hd_textures_flow(exe_dir, cfg_path, cfg);
-  else { say("unknown action " + action); return 2; }
-  return 0;
+  // These three never open a window from the command line (release standard: every option has a flag another launcher can use).
+  if (action == "restore-backup") return restore_backup_cli(cfg_path, args, say);
+  if (action == "upscalers") return upscalers_cli(exe_dir, data, args, say);
+  if (action == "hdtex") return hdtex_cli(cfg, args, test, say);
+  say("unknown action " + action);
+  return 2;
 }
 
 bool prepare(Result& r) {
@@ -1124,7 +1203,7 @@ bool prepare(Result& r) {
   read_json(exe_dir / L"launcher_data.json", data);   // optional
   if (const hle::Json* w = cfg.get("work")) if (!w->str().empty()) g_work_dir = fs::u8path(w->str());
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  if (!r.action.empty()) { r.exit_code = run_action(r.action, exe_dir, cfg_path, cfg, data); return true; }
+  if (!r.action.empty()) { r.exit_code = run_action(r.action, r.action_args, exe_dir, cfg_path, cfg, data); return true; }
   const bool autoplay = std::getenv("SNAP_LAUNCHER_AUTOPLAY") != nullptr;
   const bool quiet = autoplay || r.play;   // no message boxes: a test run, or --play from another launcher (the reason goes to stderr)
   // First start: offer FSR (pre-selected, never accepted for the user). A test run skips this unless SNAP_UPSCALER_AUTOACCEPT is set.

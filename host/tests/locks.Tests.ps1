@@ -99,6 +99,26 @@ try {
     (Get-Item $p).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-13)
     Assert (Try-TakeLock $p 'malformed') 'overflow PID treated as malformed'
 
+    # A waiter reading a lock file must not stop its owner from releasing it, and must not stop a cap rewrite (the flake under slot load:
+    # Get-Content readers made Remove-Item fail silently, so the lock stayed under a live PID and the waiters timed out).
+    Fresh 'reader-open'
+    $p = Path 'build\slots\run0.lock'
+    Assert (Try-TakeLock $p 'held') 'take lock for reader test'
+    $reader = Open-LockRead $p
+    try { Release-Lock $p } finally { $reader.Dispose() }
+    Assert (-not (Test-Path $p)) 'release succeeds while a waiter reads the lock'
+    Assert (Try-TakeLock $p 'again') 'lock can be taken again after that release'
+    Release-Lock $p
+    Set-RunSlotCap '2'
+    $reader = Open-LockRead (Path 'build\slots\max.txt')
+    try { Set-RunSlotCap '3' } finally { $reader.Dispose() }
+    Assert ((Get-RunSlotCap) -eq 3) 'cap rewrite succeeds while a waiter reads it'
+    Set-Content (Path 'two-lines.txt') "a`r`nb"
+    Assert ((Get-LockText (Path 'two-lines.txt')) -eq 'a b') 'lock text joins lines with a space'
+    Set-Content (Path 'empty.txt') ''
+    Assert ((Get-LockText (Path 'empty.txt')) -eq '') 'empty file reads as empty text'
+    Assert ($null -eq (Get-LockText (Path 'missing.txt'))) 'missing file reads as null'
+
     Fresh 'write-failure'
     function Write-LockRecord($Stream, [byte[]]$Bytes) { throw 'synthetic write failure' }
     Assert (-not (Try-TakeLock (Path 'partial.lock') 'fail')) 'write failure denies acquisition'
@@ -123,19 +143,19 @@ try {
     Set-Content (Path 'release') 'go'; Finish $m
 
     Fresh 'cap'
-    Set-Content (Path 'build\slots\max.txt') '1'
+    Set-RunSlotCap '1'
     Assert ((Enter-RunSlots 'cap' -WaitSec 1) -eq 0) 'cap one uses slot zero'
     Exit-RunSlots
     Assert (Try-TakeLock (Path 'build\slots\run0.lock') 'occupy') 'occupy only capped slot'
     $w = Spawn 'normal' 'cap-raised'; Wait-Ticket $w
-    Set-Content (Path 'build\slots\max.txt') '2'
+    Set-RunSlotCap '2'
     Wait-For { Test-Path (Path "result-$($w.Id)") } 'waiting process rereads raised cap' 5
     Assert ((Get-Content (Path "result-$($w.Id)")) -eq '1') 'waiter acquires newly allowed slot'
     Set-Content (Path "release-$($w.Id)") 'go'; Finish $w
     Release-Lock (Path 'build\slots\run0.lock')
-    Set-Content (Path 'build\slots\max.txt') ''
+    Set-RunSlotCap ''
     Assert ((Get-RunSlotCap) -eq 4) 'empty cap defaults to four'
-    Set-Content (Path 'build\slots\max.txt') 'invalid'
+    Set-RunSlotCap 'invalid'
     Assert ((Get-RunSlotCap) -eq 4) 'invalid cap defaults to four'
     Remove-Item (Path 'build\slots\max.txt')
     Assert ((Get-RunSlotCap) -eq 4) 'removed cap defaults to four'
@@ -143,7 +163,7 @@ try {
     Fresh 'cap-reduced'
     foreach ($n in 0..3) { Assert (Try-TakeLock (Path "build\slots\run$n.lock") 'hold') 'occupy slot before cap reduction' }
     $w = Spawn 'normal' 'cap-reduced'; Wait-Ticket $w
-    Set-Content (Path 'build\slots\max.txt') '1'
+    Set-RunSlotCap '1'
     Release-Lock (Path 'build\slots\run1.lock')
     Start-Sleep -Milliseconds 1100
     Assert (-not (Test-Path (Path "result-$($w.Id)"))) 'waiter cannot use slot above reduced cap'
@@ -154,7 +174,7 @@ try {
     foreach ($n in 2..3) { Release-Lock (Path "build\slots\run$n.lock") }
 
     Fresh 'exclusive'
-    Set-Content (Path 'build\slots\max.txt') '1'
+    Set-RunSlotCap '1'
     $held = @(Enter-RunSlots 'exclusive' -Exclusive -WaitSec 1)
     Assert (($held -join ',') -eq '0,1,2,3,4,5,6,7') 'exclusive reserves all physical slots despite cap'
     Exit-RunSlots
@@ -169,7 +189,7 @@ try {
     Assert (Test-Path (Path 'build\slots\exclusive.lock')) 'exit does not release unacquired gate'
 
     Fresh 'daytime-exclusive'
-    Set-Content (Path 'build\slots\max.txt') '1'
+    Set-RunSlotCap '1'
     $env:SNAP_LOCK_OWNER = 'pc-in-use'
     foreach ($n in 1..7) { Assert (Try-TakeLock (Path "build\slots\run$n.lock") 'closed') 'create daytime reservation' }
     $env:SNAP_LOCK_OWNER = 'test'
@@ -185,7 +205,7 @@ try {
     Assert ((Get-Content (Path "result-$($daytime.Id)")) -eq '0') 'exclusive child accepts above-cap daytime holds'
     Set-Content (Path "release-$($daytime.Id)") 'go'; Finish $daytime
     Assert (-not (Test-Path (Path 'build\slots\exclusive.lock'))) 'exclusive child releases its gate'
-    Set-Content (Path 'build\slots\max.txt') '2'
+    Set-RunSlotCap '2'
     Assert ($null -eq (Enter-RunSlots 'below-cap reservation' -Exclusive -WaitSec 1)) 'pc-in-use below cap blocks exclusive'
     Assert (-not (Test-Path (Path 'build\slots\exclusive.lock'))) 'blocked daytime bench cleans its gate'
 

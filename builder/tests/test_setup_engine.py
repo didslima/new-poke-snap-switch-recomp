@@ -112,6 +112,17 @@ class SetupEngineTests(unittest.TestCase):
         self.assertFalse(r['ok'])
         self.assertIn('is not there', r['error'])
 
+    def test_scan_count_matches_log_when_scan_stops_early(self):
+        # a dump folder that stops before the files are read (no keys, or no file reader) still lists the files it found
+        g = self.t / 'dumpdir'
+        g.mkdir()
+        (g / 'game.xci').write_bytes(b'x')
+        r = se.scan_folder(g)
+        self.assertFalse(r['ok'])
+        self.assertEqual(len(r['dumps']), 1)
+        self.assertIn('Found 1 game file(s)', r['text'])
+        self.assertNotIn('Found 0 game file(s)', r['text'])
+
     def test_scan_empty_folder(self):
         (self.t / 'empty').mkdir()
         r = se.scan_folder(self.t / 'empty')

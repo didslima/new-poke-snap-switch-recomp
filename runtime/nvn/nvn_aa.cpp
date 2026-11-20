@@ -28,6 +28,7 @@
 #include "nvn_os_host.h"
 #include "nvn_fx.h"   // [wide] FxReemitViewState
 #include "hle/visual_defaults.h"   // the one table of visual defaults
+#include "hle/live.h"              // rows that apply with no restart
 
 namespace nvn {
 int g_aaMode = AA_FXAA;
@@ -388,6 +389,7 @@ float AaParseEnv() {
     g_aaSharpen = std::clamp((float)atof(snapdef::get("SNAP_SHARPEN")), 0.0f, 1.0f);
     SmaaPreset(getenv("SNAP_SMAA_QUALITY"));
     for (auto& ch : s) { ch = (char)tolower((unsigned char)ch); if (ch == '+') ch = ','; }
+    g_aaMode = AA_FXAA;   // a second parse (AaReparseLive) starts from the same state as the first
     size_t pos = 0;
     while (pos <= s.size()) {
       size_t c = s.find(',', pos); if (c == std::string::npos) c = s.size();
@@ -402,6 +404,21 @@ float AaParseEnv() {
   fprintf(stderr, "aa: mode %s, sharpen %.2f, ssaa render scale %.3f, smaa threshold %.2f steps %.0f/%.0f corners %.0f\n", g_aaMode == AA_SMAA ? "smaa" : g_aaMode == AA_OFF ? "off" : "fxaa",
           g_aaSharpen, scale, g_smaaQ[0], g_smaaQ[1], g_smaaQ[2], g_smaaQ[3]);
   g_ssaaScale = scale;
+  return scale;
+}
+
+// Live options: the Anti-aliasing row changed while the game runs. SMAA, none and the supersampling scale follow at once (the scale through
+// nvn_retarget.cpp). The game's own FXAA cannot be switched on or off here: AaPatchFragment below patches its shaders when they are built, so
+// that change keeps the mode in force and reports *blocked (the options menu keeps its restart note).
+float AaReparseLive(bool* blocked) {
+  if (!g_parsed) return AaParseEnv();
+  const int was = g_aaMode;
+  g_parsed = false;
+  const float scale = AaParseEnv();
+  if ((was == AA_FXAA) != (g_aaMode == AA_FXAA)) {
+    g_aaMode = was; if (blocked) *blocked = true;
+    fprintf(stderr, "aa: live: switching to or from the game's own FXAA needs a restart, mode kept\n");
+  }
   return scale;
 }
 
@@ -440,7 +457,24 @@ void AaForgetTexture(const TextureImpl* t) {
 
 bool AaIsTonemapKey(const char* key) { return IsTonemap(key); }   // [fx]
 
+// The Sharpening and SMAA quality rows (and the Look row's sharpening default) apply with no restart: both are plain numbers handed to the pass
+// shaders every frame, and the passes build what they need the first time they run. The AA mode and the supersampling scale are not read here.
+bool g_aaUpscalerOn = false;
+static void AaLive() {
+  static std::atomic<unsigned> seen{0};
+  if (!g_parsed || !hle::live::changed(seen)) return;
+  hle::live::EnvRead env_read;
+  const char* own = getenv("SNAP_SHARPEN");
+  float sh = std::clamp((float)atof(snapdef::get("SNAP_SHARPEN")), 0.0f, 1.0f);
+  if (g_aaUpscalerOn && !(own && *own)) sh = 0.0f;
+  const float q0 = g_smaaQ[0], q1 = g_smaaQ[1];
+  SmaaPreset(getenv("SNAP_SMAA_QUALITY"));
+  if (sh != g_aaSharpen || q0 != g_smaaQ[0] || q1 != g_smaaQ[1]) fprintf(stderr, "aa: live: sharpen %.2f, smaa threshold %.2f steps %.0f/%.0f\n", sh, g_smaaQ[0], g_smaaQ[1], g_smaaQ[2]);
+  g_aaSharpen = sh;
+}
+
 void AaAfterDraw(ReplayCtx& cx, const char* key) {
+  AaLive();
   if (g_aaMode != AA_SMAA && g_aaSharpen <= 0.0f) return;
   if (g.failed || !IsTonemap(key)) return;
   // SNAP_AA_AB=<P> (test aid): SMAA/CAS run only while (present count / P) is odd, for same-frame before/after shots in one run

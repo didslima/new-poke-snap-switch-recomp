@@ -1397,6 +1397,46 @@ static void test_input_mapping() {
   CHECK(m.mouse_look);                               // the default is on
 }
 
+// Route line "course <name>" (runtime/hle/input_core.cpp course_steps): each D-pad press is tied to the stage that has focus.
+static void test_course_steps() {
+  g_test = "course_steps";
+  using hle::input::course_steps;
+  const std::vector<std::string> florio = course_steps("florio");
+  CHECK_EQ(florio.size(), (size_t)3);   // no press: wait for Florio, confirm, wait for the course list
+  CHECK(florio[0] == "wait focus=1 timeout=120");
+  CHECK(florio[1] == "repeat @f120 @f60000 240 6 A");
+  CHECK(florio[2] == "wait ui=map_select:CourseSelect timeout=240");
+  const std::vector<std::string> snow = course_steps("snow");
+  CHECK_EQ(snow.size(), (size_t)10);
+  CHECK(snow[0] == "repeat @f60 @f60000 240 6 Right if=focus=1");
+  CHECK(snow[4] == "repeat @f60 @f60000 240 6 Right if=focus=4");
+  CHECK(snow[5] == "repeat @f60 @f60000 240 6 Up if=focus=11");
+  CHECK(snow[6] == "repeat @f60 @f60000 240 6 Left if=focus=10");
+  CHECK(snow[7] == "wait focus=9 timeout=120");
+  const std::vector<std::string> river = course_steps("river");
+  CHECK(river[1] == "repeat @f60 @f60000 240 6 Up if=focus=12");
+  CHECK(river[2] == "wait focus=13 timeout=120");
+  const char* all[] = {"florio", "jungle", "forest", "sands", "river", "beach", "reef", "volcano", "ruins", "cave", "snow"};
+  for (const char* c : all) {
+    const std::vector<std::string> s = course_steps(c);
+    CHECK(s.size() >= 3);
+    for (size_t i = 0; i + 3 < s.size(); i++) {   // every press is gated on a different stage: no press can land twice
+      CHECK(s[i].find(" if=focus=") != std::string::npos);
+      for (size_t j = 0; j < i; j++) CHECK(s[i].substr(s[i].find(" if=")) != s[j].substr(s[j].find(" if=")));
+    }
+  }
+  CHECK(course_steps("nowhere").empty());
+  CHECK(course_steps("").empty());
+  // scripted background runs ignore the real pads (runtime/hle/input_backends.cpp)
+  using hle::input::script_run_drops_pads;
+  CHECK(script_run_drops_pads(true, "route.txt", nullptr));
+  CHECK(script_run_drops_pads(true, "route.txt", "0"));
+  CHECK(!script_run_drops_pads(true, "route.txt", "1"));   // SNAP_INPUT_REAL_PADS=1
+  CHECK(!script_run_drops_pads(false, "route.txt", nullptr));   // a visible, focused game keeps its pads
+  CHECK(!script_run_drops_pads(true, nullptr, nullptr));
+  CHECK(!script_run_drops_pads(true, "", nullptr));
+}
+
 // Button icon mod (runtime/hle/btn_icons.h): Auto detection, and the glyph for every binding case.
 static void test_button_icons() {
   g_test = "button_icons";
@@ -3053,6 +3093,7 @@ int main(int argc, char** argv) {
       {"input.mapping", test_input_mapping},
       {"input.config", test_input_config},
       {"button_icons", test_button_icons},
+      {"course_steps", test_course_steps},
       {"input.hub", test_input_hub},
       {"profiles", test_profiles},
 #ifdef _WIN32

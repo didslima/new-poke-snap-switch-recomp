@@ -72,7 +72,14 @@ void main() {
             float w = wb * wd + 1e-5;
             acc += s.rgb * w; wsum += w;
         }
-        add += acc / wsum * clamp(exp2(st0.a), 0.05, 16.0);   // the shaft term is 1.0 at scene scale 1: scale it to this scene's mean brightness
+        // The shaft term is 1.0 at scene scale 1: scale it to this scene's mean brightness. The light comes through the sky, so it is never
+        // brighter than the sky the frame measured, and it fades out when that sky is dark (night: there is no sun, and a term sized by the
+        // mean of a dark scene with a few lamps in it lay over everything as a gray haze).
+        float skyLum = lumOf(st0.rgb);
+        float shaftScale = clamp(exp2(st0.a), 0.05, 16.0);
+        if (u.shaftB.w >= 0.0) shaftScale = min(shaftScale, 2.0 * skyLum);   // below 0: the old rule (A/B tests only), its 0.05 floor is a gray haze over a night scene
+        float day = u.shaftB.w > 0.0 ? smoothstep(u.shaftB.w, 3.0 * u.shaftB.w, skyLum) : 1.0;
+        add += acc / wsum * (shaftScale * day);
     }
     if (u.flags.w > 0.5) {
         vec2 uv = (vec2(p) + 0.5) / u.size.xy;

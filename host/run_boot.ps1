@@ -19,7 +19,8 @@ Set-Location $root
 . (Join-Path $PSScriptRoot 'locks.ps1')
 $logGiven = $PSBoundParameters.ContainsKey('Log')
 # a game is being played from build\play (host\play.ps1): do not start a test boot meanwhile
-if (Test-Path 'build\play.lock') {
+# SNAP_RUN_WHILE_PLAYING=1: the owner asked for background test runs while he plays (they still take the normal run slots, never build\play)
+if ((Test-Path 'build\play.lock') -and $env:SNAP_RUN_WHILE_PLAYING -ne '1') {
     $pl = (Get-Content 'build\play.lock' -ErrorAction SilentlyContinue) -join ' '
     if ($pl -match 'pid=(\d+)' -and (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue)) { Write-Host "play.lock held ($pl): not starting a boot run"; exit 3 }
 }

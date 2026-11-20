@@ -272,6 +272,14 @@ void script_event(const char* name);
 void list_pads(int seconds);
 
 // Writes the default mapping JSON (used on first run and by the tests); returns false on I/O error.
+// True when the real pads must be ignored: a scripted run (SNAP_INPUT_SCRIPT) that takes input in the background (SNAP_INPUT_BACKGROUND,
+// the hidden test desktop), unless SNAP_INPUT_REAL_PADS is set. Pads are global devices: one in use elsewhere on the PC pressed buttons in route runs.
+inline bool script_run_drops_pads(bool background, const char* script, const char* real_pads) {
+  return background && script && *script && !(real_pads && *real_pads && *real_pads != '0');
+}
+// Route line "course <name>" (test routes): the route lines it stands for, or none for an unknown name. On the stage-select map each
+// D-pad press is tied to the stage that has focus, so the choice does not depend on timing (see input_core.cpp).
+std::vector<std::string> course_steps(const std::string& name);
 bool write_default_mapping(const std::string& path);
 // Atomic JSON write: <path>.tmp then rename over <path>.
 bool write_mapping_file(const Mapping& m, const std::string& path, std::string* err);

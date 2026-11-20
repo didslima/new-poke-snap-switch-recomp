@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "nvn_dev.h"
+#include "hle/live.h"   // rows that apply with no restart
 #include "nvn_fx.h"
 #include "nvn_internal.h"
 #include "nvn_os_host.h"
@@ -25,9 +26,10 @@ namespace nvn {
 namespace {
 bool EnvOn(const char* n) { const char* e = getenv(n); return e && *e && strcmp(e, "0") != 0 && !nvn::os_host::ascii_ieq(e, "off"); }
 // Live values (dev loop: the A/B capture tool and F1 "Tuning" set them by env name); without SNAP_DEV they are the env values read once.
+float LeafEnv() { const char* e = getenv("SNAP_LEAF_TRANSLUCENCY"); if (!e || !*e || nvn::os_host::ascii_ieq(e, "off")) return 0.0f; const float f = (float)atof(e); return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }
 struct Live {
   int aa = EnvOn("SNAP_FOLIAGE_AA") ? 1 : 0;
-  float leaf = [] { const char* e = getenv("SNAP_LEAF_TRANSLUCENCY"); if (!e || !*e || nvn::os_host::ascii_ieq(e, "off")) return 0.0f; const float f = (float)atof(e); return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }();
+  float leaf = LeafEnv();
   int soft = EnvOn("SNAP_SOFT_PARTICLES") ? 1 : 0;
   float sway = [] { const char* e = getenv("SNAP_WIND_SWAY"); if (!e || !*e || nvn::os_host::ascii_ieq(e, "off")) return 0.0f; const float f = (float)atof(e); return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }();
   int pick = 0;   // dev: one value runs one effect (cost runs): 1 edge smoothing, 2 translucency 1.0, 3 wind sway 1.0, 4 all three; 0 = the rows as set
@@ -47,7 +49,14 @@ struct Live {
     if (aa || leaf > 0 || soft || sway > 0) fprintf(stderr, "[foliage] on: leaf edge smoothing %d, leaf translucency %.2f, soft particles %d, wind sway %.2f (photo frames keep the game's draw)\n", aa, leaf, soft, sway);
   }
 };
-Live& L() { static Live l; return l; }
+// The Leaf edge smoothing and Leaf translucency rows apply with no restart (hle/live.h): both pick a shader variant per draw, built on demand.
+// Soft particles stays as read at the start: it also doubles the particle targets when the game creates them.
+Live& L() {
+  static Live l;
+  static std::atomic<unsigned> seen{hle::live::gen().load()};   // the constructor just read the start values
+  if (hle::live::changed(seen)) { hle::live::EnvRead env_read; l.aa = EnvOn("SNAP_FOLIAGE_AA") ? 1 : 0; l.leaf = LeafEnv(); }
+  return l;
+}
 }  // namespace
 bool FoliageAaEnabled() { const int p = L().pick; return p ? (p == 1 || p == 4) : L().aa != 0; }
 float FoliageLeafStrength() { const int p = L().pick; if (p) return (p == 2 || p == 4) ? 1.0f : 0.0f; const float f = L().leaf; return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }

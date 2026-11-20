@@ -9,9 +9,11 @@
 // Pre-tonemap slot: the upscaler reads the scene colour when the window texture is bound (UpscaleOnSetRenderTargets -> Resolve), not in the tonemap draw, and
 //   UpscaleSubstitute then swaps the tonemap's input. An effect therefore has to be recorded right BEFORE that call (nvn_vk.cpp, SetRenderTargets), where no
 //   rendering scope is open, so it needs no EndRendering / re-BeginRendering dance. Post-tonemap slot: FxAfterDraw, after the tonemap draw (AaAfterDraw's place).
-// Photo guard: a submit whose lists draw into the Evaluation depth target (DEPTH32F_STENCIL8, 1920 wide) or a 360x240 photo target is a photo frame, as
-//   in upscale.cpp: that present and the next two stay native (no Fx), and a press of A / ZR / R holds six presents (the photo pass often runs at the start of
-//   a present and downscales the previous one). Fx work is never recorded while an occlusion query scope is open (Evaluation counts visible pixels in one).
+// Photo guard: a submit whose lists draw into the Evaluation depth target (DEPTH32F_STENCIL8, 1920 wide) is a photo frame: that present and the next two
+//   stay native (no Fx). Those are the photo-select and scoring passes, which render the pictures the game keeps. A photo taken on a ride is only a
+//   360x240 pass that downscales the display two presents after the press (the present before it, which had the effects on anyway), so since 2026-11-19
+//   it holds nothing: the old hold only made the effects drop out for 3 presents per photo (SNAP_FX_PHOTO_HOLD=1 brings it back). Fx work is never
+//   recorded while an occlusion query scope is open (Evaluation counts visible pixels in one).
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -27,7 +29,10 @@
 #include "upscale/upscale_nvn.h"
 #include "../hle/input_core.h"
 
+extern "C" int snap_route_cond(const char* c, char* why, int n);   // runtime/hle/input_core.cpp: a route `wait` condition, read now
+
 namespace nvn {
+extern int g_fdBurst;   // nvn_vk.cpp: NVN_FRAME_DUMP burst request
 namespace {
 constexpr uint32_t kCamBytes = 0x250;
 constexpr uint32_t kOffProj = 0x80, kOffViewProj = 0x100, kOffCamPos = 0x240;
@@ -255,27 +260,49 @@ void FxAfterDraw(ReplayCtx& cx, const char* key) {
   for (const FxEffect* e : Effects()) if (e->postTonemap && e->enabled && e->enabled()) e->postTonemap(cx, key);
 }
 
+// Submits that held a photo pass (Evaluation or 360x240), whether or not the effects were held for it: host\ab_capture.ps1 reads it to know a photo was taken
+static std::atomic<uint64_t> g_photoPasses{0};
+uint64_t FxPhotoPassCount() { return g_photoPasses.load(std::memory_order_relaxed); }
+
+// SNAP_FX_PHOTO_HOLD: which photo passes switch the effects off. 0 (default): only the Evaluation passes. 1: a 360x240 photo pass too, and the two
+// presents after it (the behaviour before 2026-11-19: the effects dropped out for 3 presents at every photo of a ride).
+int PhotoHoldMode() { static const int m = [] { const char* e = getenv("SNAP_FX_PHOTO_HOLD"); return e && *e ? atoi(e) : 0; }(); return m; }
+
 void FxBeforeSubmit(int n, CmdList* const* lists) {
   if (!Active()) return;
-  bool photo = false;
-  for (int k = 0; k < n && !photo; k++) {
+  bool eval = false, thumb = false;
+  char seen[256] = ""; size_t sl = 0;   // SNAP_FX_LOG: the targets this submit draws into
+  for (int k = 0; k < n && !(eval && thumb && !Log()); k++) {
     if (!lists[k]) continue;
-    int bound = 0;
+    int bound = 0; bool noted = true;
+    const TextureImpl* c0 = nullptr; const TextureImpl* d = nullptr;
     for (const Cmd& c : lists[k]->cmds) {
       if (c.op == Op::SetRenderTargets) {
-        bound = (IsEvalDepth(c.tex[8]) || IsPhotoColor(c.tex[0])) ? 1 : 0;
-      } else if (bound && (c.op == Op::Draw || c.op == Op::DrawIndexed || c.op == Op::DrawIndirect || c.op == Op::DrawIndexedIndirect)) { photo = true; break; }
+        bound = IsEvalDepth(c.tex[8]) ? 1 : IsPhotoColor(c.tex[0]) ? 2 : 0;
+        c0 = c.tex[0]; d = c.tex[8]; noted = false;
+      } else if (c.op == Op::Draw || c.op == Op::DrawIndexed || c.op == Op::DrawIndirect || c.op == Op::DrawIndexedIndirect) {
+        if (bound == 1) eval = true; else if (bound == 2) thumb = true;
+        if (!noted && Log() && sl + 40 < sizeof seen) {
+          noted = true;
+          char one[40]; snprintf(one, sizeof one, " %ux%u/f%d+d%d", c0 ? c0->b.width : 0, c0 ? c0->b.height : 0, c0 ? (int)c0->b.format : 0, d ? (int)d->b.format : 0);
+          if (!strstr(seen, one)) { memcpy(seen + sl, one, strlen(one) + 1); sl += strlen(one); }
+        }
+        if (eval && thumb && !Log()) break;
+      }
     }
   }
+  const bool photo = eval || (thumb && PhotoHoldMode() >= 1);
+  if (Log() && (eval || thumb)) fprintf(stderr, "fx: p%d photo submit (%s%s%s): %s; draws into%s\n", g_presentCount, eval ? "Evaluation depth" : "", eval && thumb ? " + " : "",
+                                        thumb ? "360x240" : "", photo ? "Fx held" : "Fx stays on", seen);
+  if (eval || thumb) g_photoPasses++;
   F.submitPhoto = photo;
   if (!photo) return;
   F.photoSubmits++;
   F.hold = std::max(F.hold, 2);
   if (F.phase == 1) F.frameHold = true;
-  if (Log()) fprintf(stderr, "fx: p%d photo submit: Fx held\n", g_presentCount);
 }
 
-// Counters for host\ab_capture.ps1 (docs/ab-capture.md): effect passes that drew, and how many of those drew on a photo frame (a gating bug; must stay 0)
+// Counters for host\ab_capture.ps1 (docs/ab-capture.md): effect passes that drew, and how many of those drew on a held frame (FxIsPhotoFrame; a gating bug; must stay 0)
 static std::atomic<uint64_t> g_ranTotal{0}, g_ranOnPhoto{0};
 uint64_t FxRanCount() { return g_ranTotal.load(std::memory_order_relaxed); }
 uint64_t FxRanOnPhotoCount() { return g_ranOnPhoto.load(std::memory_order_relaxed); }
@@ -288,6 +315,19 @@ void FxOnPresent() {
   if (F.phase) F.prevDraws = F.sceneDraws;
   F.phase = 0; F.depth = nullptr; F.color = nullptr; F.cam.valid = false;
   if (F.hold > 0 && !F.submitPhoto) F.hold--;
+  // SNAP_FX_SHUTTER_DUMP=<n> (test aid, needs NVN_FRAME_DUMP): every present of the n after a press of A is dumped, for the first 4 presses on a course ride that are
+  // at least 240 presents apart, so a run shows whether the picture changes while a photo is taken. SNAP_FX_LOG names the photo passes by present.
+  static const int dumpN = [] { const char* e = getenv("SNAP_FX_SHUTTER_DUMP"); return e ? std::max(0, atoi(e)) : 0; }();
+  if (dumpN > 0) {
+    static uint64_t lastBtn = 0; static int left = 0, presses = 0, lastPress = -100000;
+    const uint64_t btn = hle::input::hub().pad().buttons;
+    if (((btn & ~lastBtn) >> hle::input::kA & 1) && left == 0 && presses < 4 && g_presentCount - lastPress > 240 && snap_route_cond("ride>=1", nullptr, 0)) {
+      left = dumpN; presses++; lastPress = g_presentCount;
+      fprintf(stderr, "fx: p%d A pressed: dumping %d presents\n", g_presentCount, dumpN);
+    }
+    lastBtn = btn;
+    if (left > 0) { g_fdBurst = 4; left--; }
+  }
   // No hold on button presses: the photo pass renders into its own 360x240 / Evaluation targets (guarded by the submit look-ahead above), and a hold
   // on every A press made the effect drop out for six presents each time the player advanced a dialog line.
 }

@@ -1,0 +1,14 @@
+# fixture: unlock_all
+# Florio Nature Park (Night), entered by state waits so it holds at any frame rate; used by tests\live for rows checked at night.
+repeat @f60 @f30000 40 4 A
+wait ui=title timeout=200
+repeat @f60 @f30000 40 4 A
+wait ui=map_select:StageSelect timeout=300
+@f240 6 A
+wait ui=map_select:CourseSelect timeout=60
+@f90 6 Down
+@f360 6 A
+wait ride timeout=300
+repeat 0 900 1.5 0.067 A
+wait rail>=110 timeout=600
+end @f30

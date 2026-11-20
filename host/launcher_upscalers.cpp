@@ -319,6 +319,60 @@ static bool auto_accepted(const std::string& n) {
   return s.find("," + n + ",") != std::string::npos;
 }
 
+// The receipt next to the exe: the user accepted this upscaler's license (a button in the window, or --accept-license on the command line).
+static void write_receipt(const fs::path& exe_dir, const std::string& name) {
+  fs::path rc = exe_dir / "upscalers.json";
+  hle::Json r;
+  { std::ifstream f(rc, std::ios::binary); if (f) { std::stringstream ss; ss << f.rdbuf(); std::string e; hle::json_parse(ss.str(), r, e); } }
+  if (r.type != hle::Json::Obj) r = hle::Json::object();
+  hle::Json one = hle::Json::object();
+  one.set("license_accepted_by_user", hle::Json::boolean_(true));
+  r.set(name, one);
+  std::string text; hle::json_dump(r, text);
+  std::ofstream(rc, std::ios::binary | std::ios::trunc) << text << "\n";
+}
+
+int upscalers_cli(const fs::path& exe_dir, const hle::Json& data, const std::vector<std::string>& args, const std::function<void(const std::string&)>& say) {
+  const std::vector<Up> ups = parse(data);
+  auto find = [&](const std::string& n) -> const Up* { for (auto& u : ups) if (u.name == n) return &u; return nullptr; };
+  std::string all;
+  for (auto& u : ups) all += (all.empty() ? "" : ", ") + u.name;
+  std::vector<std::string> want, accepted;
+  for (size_t i = 0; i < args.size(); i++) {
+    if (args[i] == "--accept-license") {
+      if (i + 1 >= args.size()) { say("--accept-license needs an upscaler name (" + all + ")"); return 2; }
+      accepted.push_back(args[++i]);
+    } else if (args[i].compare(0, 2, "--") == 0) { say("--upscalers does not know " + args[i]); return 2; }
+    else want.push_back(args[i]);
+  }
+  for (auto& n : want) if (!find(n)) { say("There is no upscaler named \"" + n + "\". The names are: " + (all.empty() ? "(none in this build)" : all)); return 2; }
+  for (auto& n : accepted) if (!find(n)) { say("--accept-license: there is no upscaler named \"" + n + "\". The names are: " + (all.empty() ? "(none in this build)" : all)); return 2; }
+  if (want.empty()) {
+    if (!accepted.empty()) { say("Name the upscaler to download as well, for example: --upscalers " + accepted[0] + " --accept-license " + accepted[0]); return 2; }
+    if (ups.empty()) say("This build lists no upscalers.");
+    for (auto& u : ups) say(u.name + "  " + u.title + "  " + (installed(u, exe_dir) ? "installed" : "not installed") + "  license: " + u.lic.url);
+    if (!ups.empty()) say("Download one with: --upscalers <name> --accept-license <name>. The files come from the vendor's official download; you accept the vendor's license yourself.");
+    return 0;
+  }
+  int rc = 0;
+  for (auto& n : want) {
+    const Up& u = *find(n);
+    if (installed(u, exe_dir)) { say(u.title + " is already installed."); continue; }
+    if (std::find(accepted.begin(), accepted.end(), n) == accepted.end()) {
+      say(u.title + " was not downloaded: read " + u.vendor + "'s license at " + u.lic.url + " and, if you accept it, add --accept-license " + n + ".");
+      rc = 1;
+      continue;
+    }
+    Job job;
+    job.u = u; job.dir = exe_dir; job.tmp = exe_dir / "downloads" / u.name;
+    say("Downloading " + u.title + " from " + u.vendor + "'s official source...");
+    run_job(&job);
+    if (job.ok) { write_receipt(exe_dir, u.name); say(u.title + " is installed."); }
+    else { say(u.title + " was not installed: " + job.err + ". Nothing was changed."); rc = 1; }
+  }
+  return rc;
+}
+
 // One pass over every upscaler that is not installed: license dialog, then the download with a progress bar. `only_default_unasked`
 // restricts the pass to the pre-selected upscaler (FSR) when the launcher offers it at the first start. Returns the number installed.
 int offer_upscalers(const fs::path& exe_dir, const hle::Json& data, bool first_start) {
@@ -359,16 +413,7 @@ int offer_upscalers(const fs::path& exe_dir, const hle::Json& data, bool first_s
     th.join();
     if (job->ok) {
       ++installed_now;
-      // receipt: the user accepted this license by clicking the button above
-      fs::path rc = exe_dir / "upscalers.json";
-      hle::Json r;
-      { std::ifstream f(rc, std::ios::binary); if (f) { std::stringstream ss; ss << f.rdbuf(); std::string e; hle::json_parse(ss.str(), r, e); } }
-      if (r.type != hle::Json::Obj) r = hle::Json::object();
-      hle::Json one = hle::Json::object();
-      one.set("license_accepted_by_user", hle::Json::boolean_(true));
-      r.set(u.name, one);
-      std::string text; hle::json_dump(r, text);
-      std::ofstream(rc, std::ios::binary | std::ios::trunc) << text << "\n";
+      write_receipt(exe_dir, u.name);   // the user accepted this license by clicking the button above
     } else if (job->err != "cancelled" && !job->err.empty()) {
       MessageBoxW(nullptr, W(u.title + " was not installed: " + job->err + ".\nNothing was changed. The game works without it.").c_str(), L"Snap Recomp", MB_OK | MB_ICONWARNING);
     }

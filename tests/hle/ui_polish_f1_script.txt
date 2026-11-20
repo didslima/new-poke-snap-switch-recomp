@@ -1,0 +1,26 @@
+# F1 overlay audit walk (UI polish pass): every page, the long ones at several scroll positions, one stop every 3 s starting at 27 s.
+# Run with NVN_FRAME_DUMP_POST=1 NVN_FRAME_DUMP_FULL=1 NVN_FRAME_DUMP_FROM=27 NVN_FRAME_DUMP_EVERY=1.5 NVN_FRAME_DUMP_MAX=45; the picture of stop k is the frame at 27+3k+1.5 s
+# (tests/hle/ui_polish_shots.py). Keep the page list in step with kTabs in runtime/ui/ui_controls.cpp.
+25 key F1 1
+26 expect_open 1
+27.0 tab Bindings
+30.0 tab Mouse
+33.0 tab Controller
+36.0 tab Accessibility
+39.0 tab Audio
+42.0 tab Graphics
+42.3 scroll 0
+45.3 scroll 0.34
+48.3 scroll 0.67
+51.3 scroll 1.0
+54.0 tab Display
+54.3 scroll 0
+57.3 scroll 1.0
+60.0 tab Photos
+63.0 tab Mods
+66.0 tab Saves
+69.0 tab Save_state
+72.0 tab Cheats
+75.0 tab Benchmark
+78.0 tab Test_input
+82.0 quit

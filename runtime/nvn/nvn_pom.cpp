@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <vector>
 #include "hle/visual_defaults.h"
+#include "hle/live.h"   // the Parallax detail row applies with no restart
 #include "nvn_fx.h"
 #include "nvn_internal.h"
 #include "nvn_os_host.h"
@@ -125,7 +126,7 @@ int PomLevel() {
   static int cached = 0, at = -999;
   if (at == g_presentCount) return cached;
   at = g_presentCount;
-  cached = ParseLevel(snapdef::get("SNAP_POM"));
+  { hle::live::EnvRead env_read; cached = ParseLevel(snapdef::get("SNAP_POM")); }   // once per present: the row is live
   return cached;
 }
 

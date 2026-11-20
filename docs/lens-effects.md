@@ -19,7 +19,7 @@ Both are Fx effects (`nvn_fx.cpp`): they draw into the linear HDR scene colour b
 
 ## Display only: photos and scoring
 
-Both effects are pre-tonemap Fx effects, and the Fx plumbing never runs those on a photo frame: the Evaluation passes, the 360x240 photo passes, and the presents that a shutter press (A, ZR, R) holds as native. `FxWritable` also refuses the Evaluation depth target and the photo targets. Neither effect reads or writes anything the photo or its scoring uses; both read only the scene depth and colour of the live view, and write only the live view's scene colour. So the photo is the game's sharp picture even while the bokeh is on the screen.
+Both effects are pre-tonemap Fx effects, and the Fx plumbing never runs those on an Evaluation frame (photo select and scoring, where the game renders the pictures it keeps). Since 2026-11-19 a photo taken on a ride no longer switches them off: that pass is only the 360x240 preview, a downscale of the screen, so the preview shows what the screen showed (`SNAP_FX_PHOTO_HOLD=1` restores the 3-present pause). `FxWritable` also refuses the Evaluation depth target and the photo targets. Neither effect reads or writes anything the photo or its scoring uses; both read only the scene depth and colour of the live view, and write only the live view's scene colour. So the photo is the game's sharp picture even while the bokeh is on the screen.
 
 ## Settings and test switches
 

@@ -8,7 +8,7 @@ wait ui=map_select:CourseSelect timeout=240
 @f120 6 Down
 @f270 6 A
 wait ride timeout=300
-aim ev:CH_099@Sleep_01 cap=12 range=22 zoom=1 timeout=1 tol=0.08
+aim ev:CH_099@Sleep_01 cap=12 range=12 timeout=1 tol=0.08
 @f200 4 A
 repeat @f0 @f60000 50 6 A if=act=_
 repeat @f0 @f60000 300 1 shot=1

@@ -1,0 +1,51 @@
+# fixture: post_tutorial
+# UI polish audit: every PC tab of the game's own Settings screen, one picture each (scripts/ui/make_native_options.py, host/mods/nativeopt.cpp).
+# Same opening as look_native_opt.txt (Settings from the lab hub, A closes the info popup, R x4 to "Other", R to the first PC tab Quality), then R to every
+# further tab with a picture 45 frames after each press (the tab slide has settled). Nothing is changed. Run with SNAP_MODS_DIR=<mods root holding native-options>,
+# SNAP_NATIVE_OPT_SETTINGS=<settings.cfg>, SNAP_NATIVE_OPT_TRACE=1. Tabs in order: Quality Textures Effects Output View | Display Controller Mouse Audio Photos |
+# Shadows&AO Performance Upscaler Interface Lens Atmosphere Water.
+repeat @f200 @f1400 100 8 ZL
+repeat @f1500 @f30000 240 8 Up
+repeat @f1530 @f30000 240 8 A
+anchor options
+@f120 8 A
+@f300 8 R
+@f370 8 R
+@f440 8 R
+@f510 8 R
+@f650 8 R
+@f720 40 shot=20
+@f780 8 R
+@f830 40 shot=20
+@f890 8 R
+@f940 40 shot=20
+@f1000 8 R
+@f1050 40 shot=20
+@f1110 8 R
+@f1160 40 shot=20
+@f1220 8 R
+@f1270 40 shot=20
+@f1330 8 R
+@f1380 40 shot=20
+@f1440 8 R
+@f1490 40 shot=20
+@f1550 8 R
+@f1600 40 shot=20
+@f1660 8 R
+@f1710 40 shot=20
+@f1770 8 R
+@f1820 40 shot=20
+@f1880 8 R
+@f1930 40 shot=20
+@f1990 8 R
+@f2040 40 shot=20
+@f2100 8 R
+@f2150 40 shot=20
+@f2210 8 R
+@f2260 40 shot=20
+@f2320 8 R
+@f2370 40 shot=20
+@f2430 8 R
+@f2480 40 shot=20
+@f2540 8 B
+end @f2780

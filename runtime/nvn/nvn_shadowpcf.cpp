@@ -34,12 +34,11 @@ void Emit(std::vector<uint32_t>& v, uint32_t op, std::initializer_list<uint32_t>
 // (texel fetches), converts the average receiver-to-blocker depth gap into a filter radius (contact hardening: sharp where the shadow starts, soft far
 // from the caster) and then runs the Vogel PCF at that radius. Needs ShadowFilterTaps() > 0 (the enhanced preset sets 16 unless SNAP_SHADOW_FILTER says otherwise).
 static bool PcssWanted() {
-  static const bool on = [] {
+  return SNAP_LIVE(bool, ([] {   // follows the Lighting preset row with no restart (hle/live.h)
     const char* e = getenv("SNAP_SHADOW_PCSS");
     if (e && *e) return atoi(e) != 0;
     return snaplight::enhanced();
-  }();
-  return on;
+  }()));
 }
 bool ShadowPcss() { return PcssWanted() && snaplight::ab_on((unsigned long long)g_presentCount); }
 PcssParams ShadowPcssParams() {
@@ -59,13 +58,13 @@ float ShadowFilterBias() {
   return b;
 }
 int ShadowFilterTaps() {
-  static const int taps = [] {
+  const int taps = SNAP_LIVE(int, ([] {
     const char* e = getenv("SNAP_SHADOW_FILTER");
     const int v = (!e || !*e || !strcmp(e, "default")) ? 0 : atoi(e);
     if (v == 4 || v == 8 || v == 16 || v == 32) return v;
     if ((!e || !*e || !strcmp(e, "default")) && PcssWanted()) return 16;   // PCSS (and so the Enhanced preset) filters with 16 taps
     return ShadowFilterBias() > 0.0f ? 1 : 0;   // a bias alone: one tap at the original coordinate, reference depth lowered
-  }();
+  }()));
   return snaplight::ab_on((unsigned long long)g_presentCount) ? taps : 0;   // SNAP_LIGHT_AB
 }
 float ShadowFilterRadius() {

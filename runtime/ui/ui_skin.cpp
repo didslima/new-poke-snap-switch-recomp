@@ -446,8 +446,8 @@ void skin_help_draw(ImVec2 pos, float w, float h) {
     ImFont* font = ImGui::GetFont();
     const float base = ImGui::GetFontSize();
     float fs = base, th = 0, eh = 0;
-    for (int i = 0; i < 8; ++i) {   // largest size (down to 70 %) at which the description and its small second line fit the bar
-      fs = base * (1.0f - 0.043f * (float)i);
+    for (int i = 0; i < 8; ++i) {   // largest size (down to about 80 %, still easy to read) at which the description and its small second line fit the bar
+      fs = base * (1.0f - 0.03f * (float)i);
       th = font->CalcTextSizeA(fs, 1e9f, maxw, g_help.text.c_str()).y;
       eh = g_help.extra.empty() ? 0.0f : font->CalcTextSizeA(fs * 0.84f, 1e9f, maxw, g_help.extra.c_str()).y + px(3);
       if (th + eh <= h - 2 * padv) break;

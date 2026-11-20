@@ -71,6 +71,8 @@ _REVIEWED_SWITCHES = {
     'runtime/os/os_thread.cpp': {'SwitchToFiber', 'ExitProcess'},
     # the guest's SVC names in the table that labels the SVC log (loader.cpp, {6, "QueryMemory"} ... {69, "CreateEvent"}); strings, not host calls
     'host/loader.cpp': {'CreateEvent', 'CreateThread', 'ExitProcess', 'GetCurrentProcessorNumber', 'OutputDebugString', 'SetThreadPriority'},
+    # guarded _WIN32 (_putenv_s) / POSIX (setenv/unsetenv) branch in export_env()
+    'runtime/hle/settings.cpp': {'_WIN32'},
 }
 
 

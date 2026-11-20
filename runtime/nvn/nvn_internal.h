@@ -201,7 +201,10 @@ void MarkGpuWritten(PoolImpl* p, uint64_t off, uint64_t size);   // the GPU writ
 
 // ownPool: the guest passed no memory pool (its GPU arena was full, crash B1) and the host gave the buffer private storage
 struct BufferImpl { PoolImpl* pool = nullptr; int64_t offset = 0; uint64_t size = 0; uint64_t acctVa = 0; bool ownPool = false; int arenaSlot = -1; int arenaBorn = 0; };
-struct SamplerImpl { Host* host = nullptr; VkSampler sampler = VK_NULL_HANDLE; SamplerBuilder b{}; };
+struct SamplerImpl { Host* host = nullptr; VkSampler sampler = VK_NULL_HANDLE; SamplerBuilder b{}; unsigned policyGen = 0; };
+VkSampler SamplerLive(SamplerImpl* s);   // replay thread: the sampler, made again first when the texture filtering / mip bias options changed (nvn_gfx.cpp)
+bool SamplerPolicyReparse();             // SNAP_ANISO / SNAP_LOD_BIAS read again; true when a value moved (nvn_entry.cpp)
+extern std::atomic<unsigned> g_samplerPolicyGen;   // moves when samplers have to be made again (the options above, the render scale)
 // seq is a sequence lock: odd while TexturePoolRegisterTexture rewrites the slot, so ResolveHandle (replay thread) always copies a
 // matching {tex, view} pair (re-registration of a live id during replay used to be able to pair the old texture with the new view).
 struct TexSlot { std::atomic<uint32_t> seq{0}; TextureImpl* tex = nullptr; TexView view{}; bool hasView = false; };
@@ -669,6 +672,12 @@ void ListRecorderGone(const void* recorder, uintptr_t ctlLo = 0, uintptr_t ctlHi
 void QueueLive(QueueImpl* q, bool live);   // InitQueue / DestroyQueue (after it finished): the queues GraveReap stamps and waits for
 enum GraveKind : uint8_t { GK_TEXTURE, GK_SAMPLER, GK_POOL, GK_TEXPOOL, GK_SAMPPOOL, GK_PROGRAM, GK_FN };
 void Retire(GraveKind k, void* obj);   // destroyed once every queue's timeline passes every submit made before this call
+// nvn_retarget.cpp: the size rows (Internal resolution, Shadow resolution, Ultrawide, supersampling) applied with no restart
+void RetargetNote(TextureImpl* t, uint32_t tag, float boost);   // TextureInitialize: what its size was decided from
+void RetargetGone(TextureImpl* t);                              // TextureFinalize
+void RetargetAtPresent(Host* h, VkCommandBuffer cb, uint32_t scW, uint32_t scH);   // queue mutex held, the present's command buffer outside a render pass
+void RetargetAfterSubmit();                                     // after that command buffer was submitted
+void RetireVkImage(Host* h, VkImage img, VkImageView view, VkDeviceMemory mem);   // an effect module's own image: freed once the GPU is past it
 void RetireFn(std::function<void()> fn);   // the same for host-owned Vulkan objects (runs fn then)
 void GraveReap(QueueImpl* q);          // at present, under queueMutex
 void GraveDrain(Host* h);              // Host::Shutdown after vkDeviceWaitIdle

@@ -5,13 +5,15 @@
 // contact.frag. One full-screen triangle at render resolution; output r = AO visibility, g = contact-shadow visibility (1 = lit). Both are noisy by design
 // (per-pixel slice rotation and step jitter, shifted every frame): lfx_resolve.frag filters and accumulates them.
 // World positions come from the scene depth (reversed infinite Z, the upscaler viewport jitter undone like upscale_mv.comp).
+// Half resolution (q.w >> 4 = 1..4): the target has half the width and height and each of its pixels works out one pixel of its 2x2 block of the
+// picture, a different one each frame (q.w >> 4 picks it), so over four frames every pixel gets its own result; lfx_resolve.frag spreads and accumulates.
 layout(set = 0, binding = 0) uniform sampler2D depthTex;
 layout(push_constant) uniform P {
     mat4 ivp;     // (ndc.xy, depth, 1) -> homogeneous world, w = 1 / clip.w
     vec4 dclip;   // VP * (L, 0): clip-space change per world unit toward the sun (contact shadows)
     vec4 light;   // xyz: unit world direction toward the sun, w: frame counter
     vec4 size;    // xy: render size in pixels, zw: scene viewport jitter in pixels
-    vec4 q;       // x: AO radius (world units), y: contact ray length (0 = no contact shadows), z: contact thickness, w: AO quality (slices)
+    vec4 q;       // x: AO radius (world units), y: contact ray length (0 = no contact shadows), z: contact thickness, w: AO quality (slices) + 16 * (0 full resolution, 1..4 half resolution: the pixel of the 2x2 block + 1)
 } pc;
 layout(location = 0) out vec4 outV;
 
@@ -32,7 +34,10 @@ vec3 posAt(ivec2 p, out float w) {
 
 void main() {
     outV = vec4(1.0);
+    int qw = int(pc.q.w), hm = qw >> 4;
     ivec2 p = ivec2(gl_FragCoord.xy);
+    if (hm > 0) p = min(p * 2 + ivec2((hm - 1) & 1, (hm - 1) >> 1), ivec2(pc.size.xy) - 1);
+    vec2 fc = vec2(p) + 0.5;   // the picture pixel this result is for
     float d = texelFetch(depthTex, p, 0).r;
     if (d <= 0.0) return;   // sky / infinity (reversed Z)
     float wC, wR, wL, wU, wD;
@@ -54,8 +59,8 @@ void main() {
 
     float frame = pc.light.w;
     float fr = fract(frame * 0.6180339887);
-    float n1 = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + fr);
-    float n2 = fract(0.7548776662 * gl_FragCoord.x + 0.5698402910 * gl_FragCoord.y + fr * 3.7);
+    float n1 = fract(52.9829189 * fract(dot(fc, vec2(0.06711056, 0.00583715))) + fr);
+    float n2 = fract(0.7548776662 * fc.x + 0.5698402910 * fc.y + fr * 3.7);
 
     // ---- ambient occlusion -------------------------------------------------------------------------------------------------------------------------
     float ao = 1.0;
@@ -67,8 +72,26 @@ void main() {
         float radius = pc.q.x;
         float radiusPix = clamp(radius / upp, 0.0, 0.1 * pc.size.y);
         if (radiusPix >= 2.0) {
+            // The AO normal is taken over a wider footprint than one pixel (a quarter of the AO radius): the one-pixel normal is the triangle's,
+            // and the game shades with smooth normals, so on a low-poly curved surface in a close-up (a sleeve, a chin) every triangle got its own
+            // AO level and the mesh showed as light and dark patches. A wide tap pair is used only when the depth runs evenly through it (no edge).
+            vec3 nA = n;
+            {
+                int k = int(clamp(radiusPix * 0.25, 1.0, 24.0));
+                if (k > 1) {
+                    float wr, wl, wu, wd;
+                    vec3 qR = posAt(p + ivec2(k, 0), wr), qL = posAt(p - ivec2(k, 0), wl);
+                    vec3 qD = posAt(p + ivec2(0, k), wd), qU = posAt(p - ivec2(0, k), wu);
+                    float tol = 0.02 * wC + 0.25 * radius;
+                    vec3 ax = abs(wr + wl - 2.0 * wC) < tol && abs(wr - wl) < 4.0 * radius ? qR - qL : dx;
+                    vec3 ay = abs(wd + wu - 2.0 * wC) < tol && abs(wd - wu) < 4.0 * radius ? qD - qU : dy;
+                    vec3 m = cross(ax, ay);
+                    float ml = length(m);
+                    if (ml > 1e-12) { m /= ml; if (dot(m, V) < 0.0) m = -m; if (dot(m, n) > 0.5) nA = m; }
+                }
+            }
             const int STEPS = 8;
-            int slices = int(pc.q.w);
+            int slices = qw & 15;
             float falloffRange = 0.4 * radius, falloffFrom = radius - falloffRange;
             float falloffMul = -1.0 / falloffRange, falloffAdd = falloffFrom / falloffRange + 1.0;
             float vis = 0.0;
@@ -78,10 +101,11 @@ void main() {
                 vec3 dir3 = normalize(rightW * om.x + downW * om.y);     // the same direction in the world
                 vec3 orthoDir = dir3 - dot(dir3, V) * V;
                 vec3 axis = normalize(cross(dir3, V));
-                vec3 projN = n - axis * dot(n, axis);
+                vec3 projN = nA - axis * dot(nA, axis);
                 float projNLen = length(projN);
                 if (projNLen < 1e-4) { vis += 1.0; continue; }
                 float signN = sign(dot(orthoDir, projN));
+                if (signN == 0.0) signN = 1.0;
                 float cosN = clamp(dot(projN, V) / projNLen, 0.0, 1.0);
                 float nAng = signN * acos(cosN);
                 float low0 = cos(nAng + 0.5 * PI), low1 = cos(nAng - 0.5 * PI);
@@ -106,6 +130,14 @@ void main() {
                 float h0 = -acos(clamp(hc1, -1.0, 1.0)), h1a = acos(clamp(hc0, -1.0, 1.0));
                 h0 = nAng + max(h0 - nAng, -0.5 * PI);
                 h1a = nAng + min(h1a - nAng, 0.5 * PI);
+                // Angle bias: a horizon less than ANGLE_BIAS above the tangent plane does not occlude, and the rest of the range is stretched to
+                // keep full occlusion. The normal here is the triangle's (from the depth), while the game shades with smooth normals: on a low-poly
+                // curved surface (a sleeve in a cutscene close-up) every shallow crease between two triangles darkened one of them and the mesh
+                // showed as jagged light and dark patches. Real creases and contact lines are far steeper than the bias.
+                const float ANGLE_BIAS = 0.35, ANGLE_SCALE = (0.5 * PI) / (0.5 * PI - ANGLE_BIAS);
+                float e0 = (h0 - nAng) + 0.5 * PI, e1 = 0.5 * PI - (h1a - nAng);   // each horizon's elevation above the tangent plane
+                if (e0 < 0.5 * PI) h0 = nAng - 0.5 * PI + max(e0 - ANGLE_BIAS, 0.0) * ANGLE_SCALE;
+                if (e1 < 0.5 * PI) h1a = nAng + 0.5 * PI - max(e1 - ANGLE_BIAS, 0.0) * ANGLE_SCALE;
                 float sn = sin(nAng);
                 float iarc0 = (cosN + 2.0 * h0 * sn - cos(2.0 * h0 - nAng)) * 0.25;
                 float iarc1 = (cosN + 2.0 * h1a * sn - cos(2.0 * h1a - nAng)) * 0.25;

@@ -11,7 +11,7 @@ layout(set = 0, binding = 4, std140) uniform U {
     vec4 fog;      // x: density at the ground, y: height falloff per world unit, z: ground height offset, w: strongest fog (0..1)
     vec4 fogB;     // x: fog start distance
     vec4 shaft;    // x: intensity, y: scattering density per world unit, z: ray length limit, w: steps
-    vec4 shaftB;   // x: HG anisotropy g, y: depth bias, z: debug / convention flags, w: lit weight outside the map
+    vec4 shaftB;   // x: HG anisotropy g, y: depth bias, z: debug / convention flags, w: night fade (sky luminance where the shafts start to appear; full at 3x; 0 = no fade)
     vec4 sunCol;   // rgb: sun tint
     vec4 expo;     // x: target log2 luminance, y: strength (0..1), z: gain min, w: gain max
     vec4 expoB;    // x: adaptation time constant (s)

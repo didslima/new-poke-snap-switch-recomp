@@ -3,7 +3,7 @@
 25 key F1 1
 27 expect_open 1
 27.5 expect_pending 0
-28 expect_when gfx_render_scale restart
+28 expect_when gfx_render_scale live
 28.1 expect_when frame_cap live
 28.2 expect_when gfx_upscale_quality restart
 28.4 expect_when win_mode live
@@ -93,8 +93,8 @@
 29.986872 expect_opt water_foam default
 29.986872 expect_opt water_foam default
 29.98688 expect_opt gfx_profile enhanced
-29.987 expect_when gfx_shadow_dist restart
-29.9871 expect_when gfx_hdr_expand restart
+29.987 expect_when gfx_shadow_dist live
+29.9871 expect_when gfx_hdr_expand live
 30 opt gfx_render_scale 1.50
 30.2 opt gfx_aa smaa
 30.4 opt gfx_aniso 8

@@ -5,6 +5,7 @@
 //     present (static-only course, night) = the effect skips that frame.
 //   * Tunables (env, test aids): SNAP_CONTACT_STRENGTH (0.6), SNAP_CONTACT_LEN world units (0.6), SNAP_CONTACT_THICK (0.25), SNAP_CONTACT_FADE view distance (45),
 //     SNAP_CONTACT_LSIGN (+1 / -1: force the sign of the light direction; default: the sign that points the light upward in world space).
+#include <chrono>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -72,30 +73,43 @@ bool SkyGate(ReplayCtx& cx, TextureImpl* z, float nearZ) {
   if (!sky.failed && !sky.buf) {
     sky.w = z->HW(); sky.step = 16; sky.rows = z->HH() / sky.step;
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO}; bi.size = (VkDeviceSize)sky.w * sky.rows * 4; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT; bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    VkMemoryRequirements mr;
+    VkMemoryRequirements mr; uint32_t ai_type = 0;
     bool ok = vkCreateBuffer(cx.h->device, &bi, nullptr, &sky.buf) == VK_SUCCESS;
     if (ok) {
       vkGetBufferMemoryRequirements(cx.h->device, sky.buf, &mr);
       VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(cx.h->phys, &mp);
       uint32_t ti = UINT32_MAX;
-      for (uint32_t i = 0; i < mp.memoryTypeCount; i++) if ((mr.memoryTypeBits >> i & 1) && (mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { ti = i; break; }
-      VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO}; ai.allocationSize = mr.size; ai.memoryTypeIndex = ti;
+      // The buffer is read on the CPU (the count below), so take cached memory first: the plain host-visible type is write-combined on desktop GPUs and
+      // reading 290,000 floats from it took 10 to 14 ms of the replay every 20 presents. SNAP_CONTACT_SKY_WC=1 restores the old pick.
+      const bool wc = [] { const char* e = getenv("SNAP_CONTACT_SKY_WC"); return e && e[0] == '1'; }();
+      for (int pass = wc ? 1 : 0; pass < 2 && ti == UINT32_MAX; pass++) {
+        const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | (pass == 0 ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0);
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++) if ((mr.memoryTypeBits >> i & 1) && (mp.memoryTypes[i].propertyFlags & want) == want) { ti = i; break; }
+      }
+      VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO}; ai.allocationSize = mr.size; ai.memoryTypeIndex = ti; ai_type = ti;
       void* m = nullptr;
       ok = ti != UINT32_MAX && vkAllocateMemory(cx.h->device, &ai, nullptr, &sky.mem) == VK_SUCCESS && vkBindBufferMemory(cx.h->device, sky.buf, sky.mem, 0) == VK_SUCCESS && vkMapMemory(cx.h->device, sky.mem, 0, VK_WHOLE_SIZE, 0, &m) == VK_SUCCESS;
       sky.map = (const float*)m;
     }
+    if (ok && ai_type < VK_MAX_MEMORY_TYPES) { VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(cx.h->phys, &mp); fprintf(stderr, "contact: sky gate buffer %ux%u, host memory %s\n", sky.w, sky.rows, (mp.memoryTypes[ai_type].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "cached" : "write-combined"); }
     if (!ok) { sky.failed = true; fprintf(stderr, "contact: sky gate buffer failed, gate off\n"); }
   }
   if (sky.failed) return true;
-  if (z->HW() != sky.w || z->HH() / sky.step != sky.rows) return false;   // render scale changed: skip until the next rebuild (rare)
+  if (z->HW() != sky.w || z->HH() / sky.step != sky.rows) {   // render scale changed (live options): the buffer is made again at the next call
+    VkDevice d = cx.h->device; VkBuffer b = sky.buf; VkDeviceMemory m = sky.mem;
+    RetireFn([d, b, m] { if (b) vkDestroyBuffer(d, b, nullptr); if (m) vkFreeMemory(d, m, nullptr); });
+    sky.buf = VK_NULL_HANDLE; sky.mem = VK_NULL_HANDLE; sky.map = nullptr; sky.issued = -1;
+    return false;
+  }
   const int now = g_presentCount;
   if (sky.issued >= 0 && now - sky.issued >= 6) {   // the copy was submitted a few presents ago
     const float thr = nearZ / 150.0f;   // the sky dome sits beyond ~150 view units (reversed infinite Z: depth = near / distance)
+    const auto t0 = std::chrono::steady_clock::now();
     size_t zero = 0; const size_t n = (size_t)sky.w * sky.rows;
     for (size_t i = 0; i < n; i++) zero += sky.map[i] < thr;
     sky.frac = (float)zero / (float)n; sky.issued = -1;
     if (sky.frac >= 0.02f) sky.armedUntil = now + 1800;
-    static int lg; if (getenv("SNAP_FX_LOG") && lg++ % 20 == 0) fprintf(stderr, "contact: p%d sky fraction %.3f, outdoors %d\n", now, sky.frac, (int)(now <= sky.armedUntil));
+    static int lg; if (getenv("SNAP_FX_LOG") && lg++ % 20 == 0) fprintf(stderr, "contact: p%d sky fraction %.3f, outdoors %d, count %.2f ms\n", now, sky.frac, (int)(now <= sky.armedUntil), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
   }
   static int lastTry = -1000;
   if (sky.issued < 0 && now - lastTry >= 20) { lastTry = now; FxDepthCopyRows(cx, z, sky.buf, sky.step, sky.rows); sky.issued = now; }

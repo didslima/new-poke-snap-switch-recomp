@@ -35,6 +35,17 @@ int main() {
     CHECK(p.data_dir == "D:\\snap data");
     CHECK(p.sets.size() == 1 && p.sets[0].first == "fps_target" && p.sets[0].second == "120");
   }
+  {   // --steam-deck: 1280 x 800 borderless, the handheld rows; flags after it win
+    auto p = snap_cli::parse({"--play", "--steam-deck", "--set", "hud_scale=200", "--width", "1920"});
+    CHECK(p.error.empty() && p.rest.empty() && p.play);
+    CHECK(env_of(p, "SNAP_WINDOW_MODE") == "borderless");
+    CHECK(env_of(p, "SNAP_WINDOW_W") == "1920" && env_of(p, "SNAP_WINDOW_H") == "800");
+    std::string hud, icons, scale;
+    for (auto& kv : p.sets) { if (kv.first == "hud_scale") hud = kv.second; if (kv.first == "button_icons") icons = kv.second; if (kv.first == "gfx_render_scale") scale = kv.second; }
+    CHECK(hud == "200" && icons == "xbox" && scale == "0.75");   // the last hud_scale (the player's own) is the one boot.cpp leaves in force
+    auto q = snap_cli::parse({"--steam-deck"});
+    CHECK(q.error.empty() && env_of(q, "SNAP_WINDOW_W") == "1280" && env_of(q, "SNAP_WINDOW_H") == "800" && q.sets.size() == snapdeck::cfg().size());
+  }
   {   // window mode: the last flag wins; --borderless is the same as --fullscreen
     auto p = snap_cli::parse({"--fullscreen", "--windowed"});
     CHECK(env_of(p, "SNAP_WINDOW_MODE") == "windowed");
@@ -100,6 +111,19 @@ int main() {
     CHECK(snap_cli::parse({"--updates"}).action.empty());                       // a near miss is not an action...
     CHECK(snap_cli::first_unknown(snap_cli::parse({"--updates"}).rest) == "--updates");   // ...and is named as unknown
     CHECK(snap_cli::parse({"--play"}).action.empty());
+  }
+  {   // --restore-backup, --upscalers and --hdtex run without a window: what follows them is theirs, word for word
+    auto p = snap_cli::parse({"--data-dir", "D:\\Snap", "--restore-backup", "latest"});
+    CHECK(p.error.empty() && p.action == "restore-backup" && p.action_args == V({"latest"}) && p.data_dir == "D:\\Snap" && p.rest.empty());
+    p = snap_cli::parse({"--upscalers", "fsr", "--accept-license", "fsr"});
+    CHECK(p.error.empty() && p.action == "upscalers" && p.action_args == V({"fsr", "--accept-license", "fsr"}));
+    p = snap_cli::parse({"--hdtex", "--level", "hd", "--set", "creature.scale=4", "--dry-run"});   // --set here is the HD tool's, not the game's
+    CHECK(p.error.empty() && p.action == "hdtex" && p.action_args.size() == 5 && p.sets.empty() && p.rest.empty());
+    p = snap_cli::parse({"--hdtex"});
+    CHECK(p.error.empty() && p.action_args.empty());
+    CHECK(!snap_cli::parse({"--play", "--restore-backup", "latest"}).error.empty());
+    CHECK(!snap_cli::parse({"--check-install", "latest"}).error.empty());   // the other actions still take nothing
+    CHECK(snap_cli::action_takes_args("hdtex") && !snap_cli::action_takes_args("update"));
   }
   if (g_fail) { std::printf("cli_flags_test: %d FAILED\n", g_fail); return 1; }
   std::printf("cli_flags_test: all passed\n");

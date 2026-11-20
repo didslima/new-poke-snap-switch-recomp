@@ -9,7 +9,7 @@ On a window wider than 16:9, the 3D view gets wider: the vertical field of view 
 | `SNAP_ULTRAWIDE` | `auto`, `off` | `auto` |
 | Launcher and F1 > Graphics: "Ultrawide" (`gfx_ultrawide`) | Auto (wider 3D view), Off (16:9 with side bars) | Auto |
 
-The setting needs a restart. The factor is k = window aspect / (16/9), capped at 4. It is read once from the window's client size when the game starts (`host/boot.cpp`, log line `ultrawide: auto, window client WxH, factor k`). A window at 16:9 or narrower gets k = 1, and every path then runs exactly as before. Off keeps the 16:9 picture with black bars.
+The setting applies with no restart since 2026-11-19: the render targets are made again at the next frame (`runtime/nvn/nvn_retarget.cpp`). The factor is k = window aspect / (16/9), capped at 4. It is read from the window's client size when the game starts (`host/boot.cpp`, log line `ultrawide: auto, window client WxH, factor k`) and again when the row changes; resizing the window alone does not change it mid-run. A window at 16:9 or narrower gets k = 1, and every path then runs exactly as before. Off keeps the 16:9 picture with black bars.
 
 ## How it works
 

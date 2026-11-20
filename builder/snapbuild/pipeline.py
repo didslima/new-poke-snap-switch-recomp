@@ -274,7 +274,7 @@ def build(opt, log):
         log.write(f'generated C {mod}: {n} files, tree digest {digest}')
         report[mod] = {'files': n, 'digest': digest}
         cflags = '-march=x86-64-v3'
-        ckey = sha256_text(gkey, digest, cflags, toolchain.clang_version(llvm), files_digest(sorted(include.glob('*.h'))))
+        ckey = sha256_text(gkey, digest, cflags, toolchain.clang_version(llvm), toolchain.clang_target(llvm), files_digest(sorted(include.glob('*.h'))))
         compile_keys[mod] = ckey
         lib = work / 'build' / mod / 'lib' / f'snap_{mod}.lib'
 

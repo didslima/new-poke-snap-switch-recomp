@@ -147,14 +147,14 @@ if any(h is None for h in hs):
     # No identical-scene photo frames (the game's photo flow needs game time: the shutter did nothing while time was frozen). Fall back to the gating
     # counters of the shutter run with time running: effect passes that drew on presents marked as photo frames must be 0, while the effect did draw
     # on ordinary frames (otherwise the effect was not on and the check proves nothing).
-    seen = [p for p in pruns if p['photo_presents'] > 0]
+    seen = [p for p in pruns if p['photo_presents'] > 0 or p.get('photo_passes', 0) > 0]   # held presents, or the photo pass itself (a ride photo holds nothing)
     bad = [p for p in seen if p['effect_draws_on_photo_frames'] > 0]
     active = [p for p in pruns if p['effect_draws'] > 0]
     if not seen and any(p.get('film_empty') for p in pruns): verdict = 'INCONCLUSIVE'; why = 'no film left at this moment (the route used it up): pick an earlier -Moment'
-    elif not seen: verdict = 'INCONCLUSIVE'; why = 'no photo frame appeared, with time frozen or running (shutter not accepted at this moment)'
+    elif not seen: verdict = 'INCONCLUSIVE'; why = 'no photo pass appeared, with time frozen or running (shutter not accepted at this moment)'
     elif bad: verdict = 'FAIL'; why = 'effect passes drew on photo frames for ' + ','.join('%s (%d draws)' % (p['value'], p['effect_draws_on_photo_frames']) for p in bad)
-    elif not active: verdict = 'INCONCLUSIVE'; why = 'photo frames seen (%d) with no effect draw: this effect has no FxNoteRan counter, or it was off for every value' % sum(p['photo_presents'] for p in seen)
-    else: verdict = 'PASS'; why = 'gating: 0 effect draws on %d photo presents (effect drew %d times on ordinary frames); scenes differ with time running, so the image hash was not compared' % (sum(p['photo_presents'] for p in seen), sum(p['effect_draws'] for p in active))
+    elif not active: verdict = 'INCONCLUSIVE'; why = 'photo passes seen (%d) with no effect draw: this effect has no FxNoteRan counter, or it was off for every value' % sum(max(p['photo_presents'], p.get('photo_passes', 0)) for p in seen)
+    else: verdict = 'PASS'; why = 'gating: %d photo passes, 0 effect draws on the %d held presents (effect drew %d times on the other frames; a ride photo holds none, the Evaluation passes do); scenes differ with time running, so the image hash was not compared' % (sum(p.get('photo_passes', 0) for p in seen), sum(p['photo_presents'] for p in seen), sum(p['effect_draws'] for p in active))
 elif len(set(hs)) == 1:
     verdict = 'PASS'; why = 'identical photo frame for %s (sha256 %s)' % ('/'.join(vals), hs[0][:12])
 else:

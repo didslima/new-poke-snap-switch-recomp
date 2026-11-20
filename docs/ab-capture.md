@@ -75,7 +75,9 @@ counters showed 0 draws on photo frames. Add a repeated value (`-Values 0,1,0`):
    * the game's photo flow needs game time: at a frozen moment a fresh shutter does nothing (film counter unchanged, no photo pass; the tail of an earlier shot can still show up as
      photo presents). Then the tool unfreezes, presses A again
      and reports the **gating counters** (`FxRanCount` / `FxRanOnPhotoCount` in `runtime\nvn\nvn_fx.cpp`, counted in `FxNoteRan`): effect passes that drew on presents the Fx plumbing marks as photo
-     frames. PASS: 0 draws on photo presents while the effect drew on ordinary frames; FAIL: any draw on a photo frame. The scenes differ with time running, so this variant
+     frames. Since 2026-11-19 a photo taken on a ride holds no present (the effects stay on; only the Evaluation passes of photo select hold), so the tool
+     knows a photo was taken from the photo-pass count (`FxPhotoPassCount`, result field `photo_passes`). PASS: a photo pass was seen, 0 draws on held presents and the
+     effect drew on other frames; FAIL: any draw on a held frame; INCONCLUSIVE: no photo pass. The scenes differ with time running, so this variant
      does not compare image hashes. An effect that never calls `FxNoteRan` reads INCONCLUSIVE (it must call it when it draws, as the existing ones do).
 6. Unfreezes, runs 30 presents more, writes `result.json` and exits.
 

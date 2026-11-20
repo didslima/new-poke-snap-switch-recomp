@@ -18,6 +18,7 @@
 #include "nvn_foliage.h"
 #include "nvn_internal.h"
 #include "hle/visual_defaults.h"   // default anisotropy comes from the shared table
+#include "hle/live.h"
 #include "hle/lighting_preset.h"   // SNAP_LIGHTING parser shared with host/mods/gamemods.cpp
 #include "upscale/upscale_nvn.h"   // [upscale]
 
@@ -260,7 +261,9 @@ Boolean TextureInitialize(void* tex, const void* b) {
     uint64_t chain[8] = {}; const int nChain = GuestCallChain(chain, 8);
     if (!tag) for (int i = 0; i < nChain; i++) if (chain[i] == kGuestMain + kEvalDepthRet) tag = kTagEvalDepth;   // call-site tag
     t->scale = g_scale.For(*tb, tag);
+    const float policyScale = t->scale;
     { uint64_t rel[8]; for (int i = 0; i < nChain; i++) rel[i] = chain[i] - kGuestMain; t->scale *= FoliageParticleBoost(t, tb->width, tb->height, tb->format, rel, nChain); }   // [foliage] SNAP_SOFT_PARTICLES: full-resolution particle targets
+    RetargetNote(t, tag, policyScale > 0.f ? t->scale / policyScale : 1.0f);   // live size rows (nvn_retarget.cpp)
     if (tag == kTagEvalDepth) ModelNoteEvalDepth(t);   // nvn_model.cpp: the evaluation pass draws original meshes
     { uint64_t rel[8]; for (int i = 0; i < nChain; i++) rel[i] = chain[i] - kGuestMain; UpscaleTagTexture(t, rel, nChain, tag); }   // [upscale]
     if (g_scale.scale != 1.0f || g_scale.shadowRes) { static const bool lg = getenv("SNAP_SCALE_LOG") != nullptr; if (lg && (tb->width >= 192 || t->scale != 1.0f)) {
@@ -291,6 +294,7 @@ void TextureFinalize(void* tex) {
   if (auto* t = Impl<TextureImpl>(tex, MAGIC_TEXTURE)) {
     if (t->acctPool) PoolAcct(t->acctPool, t->acctVa, -t->acctBytes);
     if (t->arenaSlot >= 0) ArenaUnacct(t->arenaSlot, t->arenaBytes);
+    RetargetGone(t);            // live size rows
     TexPrefetchForget(t);       // [perf] a prefetch job may be reading its guest data: stop it now (the guest frees the storage)
     UpscaleForgetTexture(t);    // [upscale]
     FoliageTextureGone(t);      // [foliage]
@@ -673,7 +677,7 @@ void ApplyHostEnvPolicy() {
   if (const char* e = getenv("SNAP_RENDER_SCALE")) { float v = (float)atof(e); if (v >= 0.25f && v <= 8.f) g_scale.scale = v; }
   { const float ss = AaParseEnv(); if (ss > 0.f) g_scale.scale = ss; }   // SNAP_AA=ssaa2: 2x the window height (nvn_aa.cpp)
   { float sc = 0, oc = 0; if (UpscaleApplyPolicy(&sc, &oc)) {   // [upscale] SNAP_UPSCALER: scene at sc, window textures at oc; game FXAA off unless SNAP_AA set
-      g_scale.scale = sc; g_scale.displayScale = oc; if (!getenv("SNAP_AA")) g_aaMode = AA_OFF;
+      g_scale.scale = sc; g_scale.displayScale = oc; g_aaUpscalerOn = true; if (!getenv("SNAP_AA")) g_aaMode = AA_OFF;
       if (!getenv("SNAP_SHARPEN")) g_aaSharpen = 0.0f; } }   // CAS sharpening (profile default) stays off with an upscaler unless SNAP_SHARPEN is set
   if (snaplight::enhanced()) g_scale.shadowRes = snaplight::shadow_res_for_scale(g_scale.scale);   // Enhanced lighting: shadow map follows the internal resolution
   else if (snaplight::shadow_res()) g_scale.shadowRes = snaplight::shadow_res();   // lighting preset (hle/lighting_preset.h, one parser for high and ultra) (host/mods/gamemods.cpp); SNAP_SHADOW_RES below wins
@@ -683,6 +687,18 @@ void ApplyHostEnvPolicy() {
     if (nvn::os_host::ascii_ieq(e, "auto")) g_lodBiasAuto = true; else { g_lodBiasExtra = (float)atof(e); g_lodBiasAuto = false; }
   } else g_lodBiasAuto = g_scale.scale != 1.0f || (g_scale.displayScale > 0.f && g_scale.displayScale != 1.0f);   // [upscale] scene 1.0, output 2.0: bias -1
   Log("host policy: scale=%.2f shadowRes=%d aniso=%.0f lodBias=%s%.2f", g_scale.scale, g_scale.shadowRes, g_anisoOverride, g_lodBiasAuto ? "auto " : "", g_lodBiasExtra);
+}
+// Live options: the two sampler overrides read again (the auto mip bias follows the render scale as at start).
+bool SamplerPolicyReparse() {
+  hle::live::EnvRead r;
+  const float an0 = g_anisoOverride, lb0 = g_lodBiasExtra; const bool au0 = g_lodBiasAuto;
+  g_anisoOverride = 0.f;
+  if (const char* e = snapdef::get("SNAP_ANISO")) { float v = (float)atof(e); g_anisoOverride = v > 1.f ? std::min(v, 16.f) : 0.f; }
+  const char* e = getenv("SNAP_LOD_BIAS");
+  if (e && *e) {
+    if (nvn::os_host::ascii_ieq(e, "auto")) g_lodBiasAuto = true; else { g_lodBiasExtra = (float)atof(e); g_lodBiasAuto = false; }
+  } else { g_lodBiasExtra = 0.f; g_lodBiasAuto = g_scale.scale != 1.0f || (g_scale.displayScale > 0.f && g_scale.displayScale != 1.0f); }
+  return an0 != g_anisoOverride || lb0 != g_lodBiasExtra || au0 != g_lodBiasAuto;
 }
 }  // namespace nvn
 NVN_HOST_EXPORT void nvnHostSetLodBias(float bias) { nvn::g_lodBiasExtra = bias; nvn::g_lodBiasAuto = false; }

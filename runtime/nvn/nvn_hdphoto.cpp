@@ -16,6 +16,8 @@
 //               loaded lazily from disk by a worker thread.
 // Display textures are created on first large draw (sprite >= kMinDrawW UI units wide; small grid cells keep the game's texture,
 // the HD image has no mip chain) and kept in an LRU of about kGpuBudget bytes. Missing or corrupt files fall back silently.
+#include <chrono>
+#include <smmintrin.h>
 #include <windows.h>
 #include <wincodec.h>
 #include <objidl.h>
@@ -1171,6 +1173,26 @@ void HdPhotoCopyRegion(ReplayCtx& cx, TextureImpl* s, TextureImpl* d, int sx, in
     if (g_log) fprintf(stderr, "[hdphoto] capture %llu from the copy\n", (unsigned long long)hd->id);
 }
 
+// The readback buffer is mapped GPU memory of a write-combined type: a plain read of it gets about 200 MB/s, so copying the 12 MB capture stalled
+// the game thread for 60 to 80 ms on every shot (it runs inside the guest's sync wait). Streaming loads read write-combined memory at full speed
+// and are ordinary loads on cached memory. SNAP_HDPHOTO_PLAIN_COPY=1 restores the plain copy.
+#if defined(__clang__) || defined(__GNUC__)
+__attribute__((target("sse4.1")))
+#endif
+static void CopyFromMapped(uint8_t* dst, const uint8_t* src, size_t n) {
+  static const bool plain = [] { const char* e = getenv("SNAP_HDPHOTO_PLAIN_COPY"); return e && *e && *e != '0'; }();
+  size_t i = 0;
+  if (!plain && ((uintptr_t)src & 15) == 0) {
+    for (; i + 64 <= n; i += 64) {
+      const __m128i a = _mm_stream_load_si128((__m128i*)(src + i)), b = _mm_stream_load_si128((__m128i*)(src + i + 16));
+      const __m128i c = _mm_stream_load_si128((__m128i*)(src + i + 32)), d = _mm_stream_load_si128((__m128i*)(src + i + 48));
+      _mm_storeu_si128((__m128i*)(dst + i), a); _mm_storeu_si128((__m128i*)(dst + i + 16), b);
+      _mm_storeu_si128((__m128i*)(dst + i + 32), c); _mm_storeu_si128((__m128i*)(dst + i + 48), d);
+    }
+  }
+  if (i < n) memcpy(dst + i, src + i, n - i);
+}
+
 void HdPhotoReadback(uint64_t id, const uint8_t* map, uint64_t size) {
   std::lock_guard<std::mutex> g(g_mu);
   auto it = g_pending.find(id);
@@ -1179,8 +1201,12 @@ void HdPhotoReadback(uint64_t id, const uint8_t* map, uint64_t size) {
   g_pending.erase(it);
   if (size != kBytes) return;
   if (hd->hi) PostHires(hd);
-  hd->rgba.assign(map, map + size);
+  const auto t0 = std::chrono::steady_clock::now();
+  hd->rgba.resize((size_t)size);
+  CopyFromMapped(hd->rgba.data(), map, (size_t)size);
+  const auto t1 = std::chrono::steady_clock::now();
   Mini(hd->rgba.data(), kW, kH, (size_t)kW * 4, hd->mini);
+  { static int n; if (n++ < 3 || g_log) fprintf(stderr, "[hdphoto] capture %llu read back: copy %.1f ms, mini %.1f ms\n", (unsigned long long)id, std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count()); }
   g_recent.push_back(hd);
   if (g_recent.size() > 160) g_recent.pop_front();   // more than one expedition of shots
   PostEncode(hd);

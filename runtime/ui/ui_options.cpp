@@ -45,6 +45,7 @@ extern "C" void snap_vsync_set(const char* mode);   // runtime/nvn/nvn_vk.cpp [v
 extern "C" const char* snap_vsync_get();
 extern "C" void snap_contact_shadows_set(int on);   // runtime/nvn/nvn_contact.cpp: live, the next scene frame
 extern "C" int snap_contact_shadows_get();
+extern "C" int snap_live_size_blocked(void);   // runtime/nvn/nvn_retarget.cpp: bit 0 the anti-aliasing mode, bit 1 the size rows could not follow (restart)
 extern "C" void snap_water_fx_set(int which, int on);   // runtime/nvn/nvn_ssr.cpp: 0 reflections, 1 caustics, 2 foam; live, the next scene frame
 extern "C" int snap_water_fx_get(int which);
 extern "C" void snap_hud_scale_set(const char* v);   // runtime/nvn/nvn_hud.cpp: live, the next frame ("auto", "100".."200")
@@ -379,10 +380,7 @@ std::vector<Opt>& graphics_opts() {
   static std::vector<Opt> v = {
       {"", "Picture quality", kSection, kLive, "", ""},
       {"gfx_profile", "Graphics preset", kChoice, kRestart,
-       "Sets the picture rows below together. Original: the game as it shipped. Balanced: the Enhanced look made lighter (SMAA or your best installed upscaler at Quality, 8x filtering, medium SMAA). "
-       "Enhanced: what a new install runs (every row at its default). Max: DLAA when DLSS is installed (else 2x supersampling with SMAA), the Maximum lighting preset, Ultra SMAA and occlusion, "
-       "leaf and particle upgrades, light bokeh, the atmosphere and water effects, bounce light and 120 fps; it needs a fast graphics card and CPU. Changing any single row afterwards shows Custom. Draw distance, frame generation, "
-       "motion blur, HDR, color, the frame rate limit and vsync are not part of any preset.",
+       "Sets the picture rows below together. Original: the game as it shipped. Balanced: the Enhanced look, made lighter. Enhanced: what a new install runs. Max: the highest quality; it needs a fast graphics card and CPU. Changing any single row afterwards shows Custom. Draw distance, frame generation, motion blur, HDR, color, the frame rate limit and vsync are not part of any preset.",
        "enhanced", {{"original", "Original"}, {"balanced", "Balanced"}, {"enhanced", "Enhanced"}, {"max", "Max"}, {"custom", "Custom"}}, 0, 0, "", nullptr, get_profile, set_profile},
       {"gfx_look", "Look", kChoice, kRestart,
        "Enhanced is the look new installs start with: supersampling sized to your screen (2x at 1080p, 1.5x at 1440p, none extra at 4K) with SMAA, sharpening 0.30, 16x anisotropic filtering, sharper menu text, a PNG file for every photo and HD photos. "
@@ -399,23 +397,23 @@ std::vector<Opt>& graphics_opts() {
        "Changing any row by hand shows Custom. Draw distance and full-rate animation are not part of any preset.",
        "normal",
        {{"verylow", "Very Low"}, {"low", "Low"}, {"normal", "Default"}, {"high", "High"}, {"ultra", "Ultra"}, {"maximum", "Maximum"}, {"custom", "Custom"}}, 0, 0, "", nullptr, get_preset, set_preset},
-      {"gfx_render_scale", "Internal resolution", kChoice, kRestart,
+      {"gfx_render_scale", "Internal resolution", kChoice, kLive,
        "How many pixels the 3D picture is drawn with, as a size over the game's own 1920 x 1080. Automatic lets the Look and the Anti-aliasing row decide (the Enhanced look draws it supersampled); "
        "a size sets it yourself. Higher is crisper and slower. Below 1920 x 1080 the scene is drawn smaller and stretched: blurrier, but much lighter for a weak graphics card. "
        "Photo scoring still uses the original-size data. Saved photos stay 1080 x 720 but are as sharp as the scene they were taken from.",
        "auto", {}, 0, 0, "", "SNAP_RENDER_SCALE", nullptr, nullptr, res_choices, nullptr, note_res},
-      {"gfx_aa", "Anti-aliasing", kChoice, kRestart,
+      {"gfx_aa", "Anti-aliasing", kChoice, kLive,
        "Smooths jagged edges. FXAA is what the game ships with. SMAA keeps more detail. 2x supersampling draws at twice the window height first (capped at 3x the game's size): very sharp, and costs a lot of GPU time. The Enhanced look sizes it to your screen instead, so 4K stays smooth. "
        "DLAA, FSR and XeSS use an upscaler at full size; they appear when their files are installed (the launcher's Install upscalers button).",
        "default", {}, 0, 0, "", "SNAP_AA", get_aa, set_aa, aa_choices, "SNAP_AA", note_aa},
-      {"gfx_smaa_quality", "SMAA quality", kChoice, kRestart,
+      {"gfx_smaa_quality", "SMAA quality", kChoice, kLive,
        "Only SMAA reads this. Low is the fastest and misses fine edges. Medium is a good balance. High is the default. Ultra catches the faintest edges and costs the most. Low and Medium skip diagonal and corner handling. Takes effect when SMAA is the anti-aliasing in use.",
        "high", {{"low", "Low"}, {"medium", "Medium"}, {"high", "High"}, {"ultra", "Ultra"}}, 0, 0, "", "SNAP_SMAA_QUALITY", nullptr, nullptr, nullptr, nullptr, note_smaa},
       {"gfx_upscale_quality", "Performance scaling", kChoice, kRestart,
        "Draws fewer pixels and enlarges them with DLSS, FSR or XeSS, so a slower graphics card keeps up. Off draws at full size. Quality draws 1.5x fewer pixels per side, Balanced about 1.7x, Performance 2x. "
        "It needs an upscaler: picking one here switches Anti-aliasing to the best one you have installed. Photos stay at native size.",
        "off", {}, 0, 0, "", "SNAP_UPSCALE_QUALITY", get_perf, set_perf, perf_choices, nullptr, note_perf},
-      {"gfx_sharpen", "Sharpening", kSlider, kRestart,
+      {"gfx_sharpen", "Sharpening", kSlider, kLive,
        "A gentle sharpening pass after anti-aliasing. 0 is off. Too much makes edges look hard.", snapdef::def("SNAP_SHARPEN"), {}, 0.0f, 1.0f, "%.2f", "SNAP_SHARPEN", nullptr, nullptr, nullptr, "SNAP_SHARPEN", note_sharpen},
       {"frame_generation", "Frame generation", kChoice, kRestart,
        "AMD FSR frame generation shows an extra, computed frame between two real ones, so a 60 fps game looks like about 120 on a 120 Hz or faster screen. The menus and HUD are kept out of it. "
@@ -423,84 +421,84 @@ std::vector<Opt>& graphics_opts() {
        "Needs the FSR files from the launcher's Upscalers entry (a one-time download you accept).", "default",
        {{"default", "Off"}, {"fsr", "AMD FSR"}}, 0, 0, "", "SNAP_FRAMEGEN"},
       {"", "Textures and shadows", kSection, kLive, "", ""},
-      {"gfx_aniso", "Anisotropic filtering", kChoice, kRestart,
+      {"gfx_aniso", "Anisotropic filtering", kChoice, kLive,
        "Keeps ground and walls sharp when you look at them from a shallow angle. The original game does not force any (Off keeps its own filtering); 16x costs almost nothing on a PC GPU.",
        snapdef::def("SNAP_ANISO"), {{"0", "Off (1x)"}, {"2", "2x"}, {"4", "4x"}, {"8", "8x"}, {"16", "16x"}}, 0, 0, "", "SNAP_ANISO", nullptr, nullptr, nullptr, "SNAP_ANISO"},
-      {"gfx_lod_bias", "Texture sharpness", kChoice, kRestart,
+      {"gfx_lod_bias", "Texture sharpness", kChoice, kLive,
        "Picks which texture detail level is used. Automatic sharpens textures when the render scale is above 1 and leaves the game alone at 1. Sharper values can shimmer.",
        "auto", {{"auto", "Automatic"}, {"-2", "Sharpest (-2.0)"}, {"-1.5", "-1.5"}, {"-1", "Sharper (-1.0)"}, {"-0.5", "A little sharper (-0.5)"}, {"0", "As the game ships (0)"},
                 {"0.25", "+0.25"}, {"0.5", "Softer (+0.5)"}, {"1", "Much softer (+1.0)"}, {"2", "Softest (+2.0)"}}, 0, 0, "", "SNAP_LOD_BIAS"},
-      {"gfx_shadow_res", "Shadow resolution", kChoice, kRestart,
+      {"gfx_shadow_res", "Shadow resolution", kChoice, kLive,
        "Size of the moving shadow map. The game uses 1024. Higher gives crisper shadow edges and uses more video memory.", "default",
        {{"512", "512 (fast, blocky shadows)"}, {"default", "1024 (the game's own)"}, {"2048", "2048"}, {"4096", "4096"}, {"8192", "8192 (very heavy)"}}, 0, 0, "", "SNAP_SHADOW_RES"},
       // in kPresetKeys (2026-11-14): High/Ultra/Maximum double it with the shadow resolution, so shadow detail per meter stays the game's own
-      {"gfx_shadow_dist", "Shadow distance", kChoice, kRestart,
+      {"gfx_shadow_dist", "Shadow distance", kChoice, kLive,
        "How far the moving shadows reach (runtime/nvn/nvn_draw.cpp ShadowDistanceOnBind). The same shadow map covers more ground, so shadows get softer; pair it with a higher shadow resolution. Costs no GPU time.", "default",
        {{"default", "1x (the game's own)"}, {"1.5", "1.5x"}, {"2", "2x"}, {"3", "3x"}, {"4", "4x"}, {"6", "6x"}, {"8", "8x"}, {"12", "12x"}, {"16", "16x"}}, 0, 0, "", "SNAP_SHADOW_DISTANCE"},
       {"contact_shadows", "Contact shadows", kChoice, kLive,
        "Thin screen-space shadows where Pokemon and objects touch the ground, traced toward the sun (runtime/nvn/nvn_contact.cpp). Only frames with the sun's moving shadows get them. Off is the game's own look.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_CONTACT_SHADOWS", get_contact, set_contact},
       // foliage and particle upgrades (runtime/nvn/nvn_foliage.cpp): display only, photos and their scores keep the game's own draw; restart to apply
-      {"foliage_aa", "Leaf edge smoothing", kChoice, kRestart,
+      {"foliage_aa", "Leaf edge smoothing", kChoice, kLive,
        "Smooths the jagged edges of leaves and grass, which the game cuts out with a hard test that anti-aliasing cannot reach. Works best with Anti-aliasing or a render scale above 1. Photos are unchanged.", "default",
        {{"default", "Off (the game's own)"}, {"1", "On"}}, 0, 0, "", "SNAP_FOLIAGE_AA"},
-      {"leaf_translucency", "Leaf translucency", kChoice, kRestart,
+      {"leaf_translucency", "Leaf translucency", kChoice, kLive,
        "Sunlight glows through leaves when you look at them from the shade side. Off is the game's own look. Photos are unchanged.", "default",
        {{"default", "Off (the game's own)"}, {"0.5", "Subtle"}, {"1", "Strong"}}, 0, 0, "", "SNAP_LEAF_TRANSLUCENCY"},
-      {"gfx_pom", "Parallax detail", kChoice, kRestart,
+      {"gfx_pom", "Parallax detail", kChoice, kLive,
        "Gives ground, rock and bark real depth: the surface shifts with your viewing angle and its crevices shade themselves (runtime/nvn/nvn_pom.cpp). Costs GPU time on the nearest terrain. Silhouettes, collision and photo scores are unchanged. Off is the game's own look.", "default",
        {{"default", "Off (the game's own)"}, {"low", "Low"}, {"high", "High"}}, 0, 0, "", "SNAP_POM"},
       {"soft_particles", "Soft particles", kChoice, kRestart,
        "Dust, splashes and pollen fade out where they meet the ground and objects instead of cutting a hard line, and draw at full resolution. Photos are unchanged.", "default",
        {{"default", "Off (the game's own)"}, {"1", "On"}}, 0, 0, "", "SNAP_SOFT_PARTICLES"},
       // lens effects (runtime/nvn/nvn_lens_fx.cpp): display only, never in the photo or in anything photo scoring reads; restart to apply
-      {"gfx_bokeh_dof", "Zoom bokeh", kChoice, kRestart,
+      {"gfx_bokeh_dof", "Zoom bokeh", kChoice, kLive,
        "While you zoom, the background blurs into round bokeh like a telephoto lens, focused on what is under the reticle. The strength grows with the zoom and it is off when you are not zoomed. Photos stay sharp and scores are unchanged.", "default",
        {{"default", "Off (the game's own)"}, {"0.6", "Light"}, {"1", "Medium"}, {"1.6", "Strong"}}, 0, 0, "", "SNAP_BOKEH_DOF"},
-      {"gfx_motion_blur", "Motion blur", kChoice, kRestart,
+      {"gfx_motion_blur", "Motion blur", kChoice, kLive,
        "Blurs the picture along the camera's motion while the NEO-ONE moves or you turn, like a real shutter. Display only: photos stay sharp and scores are unchanged. Costs a little GPU time.", "default",
        {{"default", "Off (the game's own)"}, {"0.5", "Light"}, {"1", "Medium"}, {"2", "Strong"}}, 0, 0, "", "SNAP_MOTION_BLUR"},
-      {"ssao_quality", "Ambient occlusion", kChoice, kRestart,
+      {"ssao_quality", "Ambient occlusion", kChoice, kLive,
        "Soft contact shadows in corners and under objects. High and Ultra take more samples. The courses draw no ambient occlusion while you play (their contact shadows are baked in); the effect shows only on the photo-select screen, so this does not change the course view or its frame rate.", "default",
        {{"default", "Default"}, {"high", "High (96 samples)"}, {"ultra", "Ultra (256 samples)"}}, 0, 0, "", "SNAP_SSAO_QUALITY"},
-      {"gfx_ssao_samples", "Occlusion samples", kChoice, kRestart,
+      {"gfx_ssao_samples", "Occlusion samples", kChoice, kLive,
        "How many samples the simple ambient-occlusion pass takes per pixel. Overrides the Ambient occlusion choice above. Like the row above, it only matters on the photo-select screen, not in the course. 512 is the most the game's pass holds.", "default",
        {{"default", "Default (the game's own)"}, {"8", "8"}, {"16", "16"}, {"64", "64"}, {"128", "128"}, {"256", "256"}, {"512", "512"}}, 0, 0, "", "SNAP_SSAO_SAMPLES"},
-      {"gfx_ssao_hbao", "Horizon occlusion", kChoice, kRestart,
+      {"gfx_ssao_hbao", "Horizon occlusion", kChoice, kLive,
        "Directions and steps per direction for the horizon-based occlusion pass (used where the game selects it). More is smoother and costs more.", "default",
        {{"default", "Default (the game's own)"}, {"12,48", "12 x 48"}, {"16,64", "16 x 64"}, {"24,96", "24 x 96"}, {"32,128", "32 x 128 (very heavy)"}}, 0, 0, "", "SNAP_SSAO_HBAO"},
-      {"gfx_pass_bloom", "Bloom", kChoice, kRestart,
+      {"gfx_pass_bloom", "Bloom", kChoice, kLive,
        "The soft glow around bright areas. Off skips the bloom passes: no glow is added and the picture stays sharp. Saves a little GPU time.", "default",
        {{"default", "On (the game's own)"}, {"off", "Off"}}, 0, 0, "", "SNAP_PASS_OFF"},
-      {"gfx_pass_dof", "Depth of field", kChoice, kRestart,
+      {"gfx_pass_dof", "Depth of field", kChoice, kLive,
        "The blur the game puts on out-of-focus distance in some scenes. Off keeps the whole picture sharp.", "default",
        {{"default", "On (the game's own)"}, {"off", "Off"}}, 0, 0, "", "SNAP_PASS_OFF"},
-      {"gfx_pass_grain", "Film grain", kChoice, kRestart,
+      {"gfx_pass_grain", "Film grain", kChoice, kLive,
        "The film-grain noise the game lays over the picture in some scenes. Off removes it.", "default",
        {{"default", "On (the game's own)"}, {"off", "Off"}}, 0, 0, "", "SNAP_PASS_OFF"},
-      {"gfx_pass_aberration", "Chromatic aberration", kChoice, kRestart,
+      {"gfx_pass_aberration", "Chromatic aberration", kChoice, kLive,
        "The red and blue color fringing at the screen edges in some scenes. Off removes it.", "default",
        {{"default", "On (the game's own)"}, {"off", "Off"}}, 0, 0, "", "SNAP_PASS_OFF"},
-      {"gfx_lighting", "Lighting preset", kChoice, kRestart,
+      {"gfx_lighting", "Lighting preset", kChoice, kLive,
        "One switch for the whole lighting look. Enhanced: soft shadows that sharpen where they touch the ground (PCSS), a shadow map that follows your render resolution at twice the reach, ambient occlusion in corners and under objects, and clean contact shadows. Maximum adds a larger shadow map, four times the reach and a finer occlusion pass. The extra passes are skipped while a photo is taken, so scoring is untouched. The separate shadow and occlusion rows above still win over the preset.", "default",
        {{"default", "Original"}, {"enhanced", "Enhanced"}, {"maximum", "Maximum"}}, 0, 0, "", "SNAP_LIGHTING"},
       // Atmosphere effects (2026-11-15, runtime/nvn/nvn_atmos.cpp, docs/atmosphere.md): six display-only pre-tonemap effects, each off by default and skipped on photo frames
-      {"atmos_shafts", "Light shafts", kChoice, kRestart,
+      {"atmos_shafts", "Light shafts", kChoice, kLive,
        "Soft sunbeams: sky seen through gaps in leaves and between trunks is smeared toward the sun into rays and added to the picture. Never in photos, so scores do not change.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_ATMOS_SHAFTS"},
-      {"atmos_fog", "Height fog", kChoice, kRestart,
+      {"atmos_fog", "Height fog", kChoice, kLive,
        "Haze that gets thicker toward the ground and with distance, tinted by the sky color of the moment. Never in photos, so scores do not change.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_ATMOS_FOG"},
-      {"atmos_exposure", "Auto exposure", kChoice, kRestart,
+      {"atmos_exposure", "Auto exposure", kChoice, kLive,
        "Your eyes adjust: dark caves open up and bright beaches ease down over about a second. Never in photos, so scores do not change.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_ATMOS_EXPOSURE"},
-      {"atmos_bloom", "Soft glow", kChoice, kRestart,
+      {"atmos_bloom", "Soft glow", kChoice, kLive,
        "A wide, soft glow around the brightest highlights, built from a chain of blurred copies of the picture. It is added on top of the game's own bloom and does not wash the picture out. Never in photos, so scores do not change.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_ATMOS_BLOOM"},
-      {"atmos_clouds", "Cloud shadows", kChoice, kRestart,
+      {"atmos_clouds", "Cloud shadows", kChoice, kLive,
        "Slow cloud shadows drift across the ground and the water, darkening the surfaces they pass over. Never in photos, so scores do not change.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_ATMOS_CLOUDS"},
-      {"atmos_sky", "Sky gradient", kChoice, kRestart,
+      {"atmos_sky", "Sky gradient", kChoice, kLive,
        "A warm glow around the sun's side of the sky, pale haze at the horizon and a deeper blue overhead. Never in photos, so scores do not change.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_ATMOS_SKY"},
       // Water effects (runtime/nvn/nvn_ssr.cpp, docs/water-effects.md): live, display only, skipped on photo frames
@@ -516,7 +514,7 @@ std::vector<Opt>& graphics_opts() {
       {"water_ocean", "Ocean waves", kChoice, kLive,
        "Rolling open-sea waves from a wave simulation on the GPU: the reflections follow the swell and whitecaps appear on the crests. Looks best with Water reflections on. Never in photos, so scores do not change.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_WATER_OCEAN", get_water_ocean, set_water_ocean},
-      {"gfx_bounce", "Bounce light", kChoice, kRestart,
+      {"gfx_bounce", "Bounce light", kChoice, kLive,
        "Colored light that bounces off nearby surfaces: green from the grass onto a Pokemon's flank, warm from a rock onto the ground beside it. Display only; the photo itself is never changed. Costs a little GPU time.", "default",
        {{"default", "Off"}, {"1", "On"}}, 0, 0, "", "SNAP_SSGI"},
       {"", "Experimental", kSection, kLive, "", ""},
@@ -530,41 +528,41 @@ std::vector<Opt>& graphics_opts() {
        "Rays per pixel for the ray traced bounce light. More rays look less grainy and cost more: about 1.3 ms for one, 1.8 for two and 3.2 for four at 1440p.", "default",
        {{"default", "1 ray (fastest)"}, {"2", "2 rays"}, {"4", "4 rays"}}, 0, 0, "", "SNAP_RT_GI_RAYS"},
       {"", "Color", kSection, kLive, "", ""},
-      {"look", "Color look", kChoice, kRestart,
+      {"look", "Color look", kChoice, kLive,
        "A color grade on the finished picture. Neutral leaves the game as shipped.", "neutral",
        {{"neutral", "Neutral (as shipped)"}, {"vivid", "Vivid"}, {"warm", "Warm"}, {"cool", "Cool"}}, 0, 0, "", "SNAP_LOOK"},
-      {"look_intensity", "Look strength", kSlider, kRestart, "How strongly the color look is applied. Has no effect while the look is Neutral.", "1.00", {}, 0.0f, 1.5f, "%.2f", "SNAP_LOOK"},
+      {"look_intensity", "Look strength", kSlider, kLive, "How strongly the color look is applied. Has no effect while the look is Neutral.", "1.00", {}, 0.0f, 1.5f, "%.2f", "SNAP_LOOK"},
       // HDR mode (2026-11-14): was an on/off toggle that stored 1, which nvn_hdr.cpp reads as hdr10, so old saves keep working
-      {"gfx_hdr", "HDR output", kChoice, kRestart,
+      {"gfx_hdr", "HDR output", kChoice, kLive,
        "Sends a high-dynamic-range picture to an HDR monitor. Turn Windows HDR on first. On a normal monitor leave this off. scRGB (16-bit float) has far less banding than HDR10; if the display refuses it the game falls back to HDR10, then to SDR.", "0",
        {{"0", "Off"}, {"1", "HDR10"}, {"scrgb", "scRGB"}}, 0, 0, "", "SNAP_HDR"},
       // Auto = the key erased: the monitor's reported peak, else 1000 (nvn_hdr.cpp). The old slider stored a value on every save.
-      {"gfx_hdr_peak", "HDR peak brightness", kChoice, kRestart,
+      {"gfx_hdr_peak", "HDR peak brightness", kChoice, kLive,
        "The brightest highlight to send, in nits. Auto uses the peak the monitor reports (1000 if it reports none); otherwise use your monitor's rated peak.", "default",
        {{"default", "Auto (the monitor's)"}, {"400", "400 nits"}, {"600", "600 nits"}, {"800", "800 nits"}, {"1000", "1000 nits"}, {"1500", "1500 nits"}, {"2000", "2000 nits"},
         {"3000", "3000 nits"}, {"4000", "4000 nits"}}, 0, 0, "", "SNAP_HDR_PEAK"},
-      {"gfx_hdr_paper", "HDR paper white", kSlider, kRestart,
+      {"gfx_hdr_paper", "HDR paper white", kSlider, kLive,
        "How bright ordinary white (menus, snow) is, in nits. Lower it if the picture feels too bright in a dark room.", "200", {}, 80.0f, 400.0f, "%.0f nits", "SNAP_HDR_PAPER"},
-      {"gfx_hdr_expand", "HDR highlights", kChoice, kRestart,
+      {"gfx_hdr_expand", "HDR highlights", kChoice, kLive,
        "How far near-white scene pixels are lifted above paper white into HDR highlights (0 = none, 1 = up to the peak). Needs HDR on.", "0.30",
        {{"0.00", "0"}, {"0.10", "0.1"}, {"0.20", "0.2"}, {"0.30", "0.3 (default)"}, {"0.40", "0.4"}, {"0.50", "0.5"}, {"0.60", "0.6"}, {"0.80", "0.8"}, {"1.00", "1"}}, 0, 0, "",
        "SNAP_HDR_EXPAND"},
       {"", "View", kSection, kLive, "", ""},
       // Field of view row removed (owner 2026-11-12: "turn off fov, hide the option, stop working on it for now"; it changes photo
       // scores). SNAP_FOV still works as a developer env switch, off by default.
-      {"gfx_lod_dist", "Detail distance", kChoice, kRestart,
+      {"gfx_lod_dist", "Detail distance", kChoice, kLive,
        "How far out scenery and Pokemon keep their detailed models. High is 3 times the game's distance, Max 8 times. Display only: photo scoring "
        "keeps the game's own models. Costs some speed.",
        "1", {{"1", "Original"}, {"3", "High"}, {"8", "Max"}}, 0, 0, "", "SNAP_LOD_DIST"},
-      {"gfx_lod_force0", "Always full detail", kToggle, kRestart,
+      {"gfx_lod_force0", "Always full detail", kToggle, kLive,
        "Every model that is drawn uses its most detailed version at any distance. Costs speed.", "0", {}, 0, 0, "", "SNAP_LOD_FORCE0"},
-      {"gfx_draw_dist", "Draw distance", kSlider, kRestart,
+      {"gfx_draw_dist", "Draw distance", kSlider, kLive,
        "Pushes out the distance where scenery and Pokemon stop being drawn (1 to 8, 1 is the game's own). May change photo scores, being tested.",
        "1", {}, 1.0f, 8.0f, "%.1fx", "SNAP_DRAW_DIST"},
-      {"gfx_full_rate_anim", "Full-rate distant animation", kToggle, kRestart,
+      {"gfx_full_rate_anim", "Full-rate distant animation", kToggle, kLive,
        "Far-away Pokemon animate every 2nd or 4th frame in the original. On animates them every frame: smoother, a little more CPU. May change photo scores, being tested.", "0", {}, 0, 0, "", "SNAP_FULL_RATE_ANIM"},
       {"", "Frame rate", kSection, kLive, "", ""},
-      {"fps_target", "Frame rate target", kChoice, kRestart,
+      {"fps_target", "Frame rate target", kChoice, kLive,
        "How fast the game runs. Default is the game's own 60 FPS. 90, 120, 144, 165 and 240 run the game itself faster and need a fast CPU; the menus and dialogue keep their original speed. "
        "The frame rate limit below still applies. On a variable refresh rate (G-Sync, FreeSync) monitor any of them is smooth.", "default",
        {{"default", "60 (the game's own)"}, {"72", "72"}, {"90", "90"}, {"120", "120"}, {"144", "144"}, {"165", "165"}, {"240", "240"}}, 0, 0, "", "SNAP_FPS"},
@@ -605,7 +603,7 @@ std::vector<Opt>& display_opts() {
       {"win_size", "Windowed size", kChoice, kRestart,
        "The size of the picture area when the game is windowed. Without a choice the game remembers the size you dragged it to. Output resolution of the finished picture follows the window.",
        "", {{"", "Remembered"}, {"1280x720", "1280 x 720"}, {"1600x900", "1600 x 900"}, {"1920x1080", "1920 x 1080"}, {"2560x1440", "2560 x 1440"}, {"3840x2160", "3840 x 2160"}}, 0, 0, "", "SNAP_WINDOW_W"},
-      {"gfx_ultrawide", "Ultrawide", kChoice, kRestart,
+      {"gfx_ultrawide", "Ultrawide", kChoice, kLive,
        "On a screen wider than 16:9, Auto shows more of the world at the sides with the same height of view. Menus, the interface and your photos stay 16:9 in the middle. Off shows the 16:9 picture with side bars.",
        "auto", {{"auto", "Auto (wider 3D view)"}, {"off", "Off (16:9 with side bars)"}}, 0, 0, "", "SNAP_ULTRAWIDE"},
       {"hud_scale", "HUD scale", kChoice, kLive,
@@ -793,9 +791,28 @@ void capture_start() {
   g_mods_start = mods_state();
 }
 
+// The size rows (Internal resolution, Anti-aliasing, Shadow resolution, Ultrawide) apply with no restart (runtime/nvn/nvn_retarget.cpp) except where
+// the running game cannot follow: an upscaler or frame generation in use, or a switch to or from an upscaler or the game's own FXAA. Those
+// changes keep the restart note.
+bool live_blocked(const Opt& o) {
+  const bool aa = !std::strcmp(o.key, "gfx_aa");
+  if (!aa && std::strcmp(o.key, "gfx_render_scale") && std::strcmp(o.key, "gfx_shadow_res") && std::strcmp(o.key, "gfx_ultrawide")) return false;
+  if (env_set_by_hand(o)) return false;
+  auto it = g_start.find(o.key);
+  if (it == g_start.end()) return false;
+  const std::string cur = cur_of(o);
+  if (same_value(o, it->second, cur)) return false;
+  const int b = snap_live_size_blocked();
+  if (b & 2) return true;
+  if (!aa) return false;
+  auto up = [](const std::string& v) { return v == "dlaa" || v == "fsr" || v == "xess"; };
+  return (b & 1) || up(it->second) || up(cur);
+}
+
 struct Pend { std::vector<std::string> names; };
 
 void pend_one(const Opt& o, void* u) {
+  if (live_blocked(o)) { ((Pend*)u)->names.push_back(tr(o.label)); return; }
   if (o.when != kRestart || env_set_by_hand(o)) return;
   auto it = g_start.find(o.key);
   if (it != g_start.end() && !same_value(o, it->second, cur_of(o))) ((Pend*)u)->names.push_back(tr(o.label));
@@ -803,6 +820,7 @@ void pend_one(const Opt& o, void* u) {
 
 // look strength has no effect on a neutral look: do not count it alone
 bool is_pending(const Opt& o) {
+  if (live_blocked(o)) return true;
   if (o.when != kRestart || env_set_by_hand(o)) return false;
   auto it = g_start.find(o.key);
   if (it == g_start.end() || same_value(o, it->second, cur_of(o))) return false;
@@ -827,6 +845,7 @@ void row_tag(const Opt& o, const SkinRow& r) {
     if (is_pending(o)) { t = tr("Restart to apply"); c = p.warn; }
     else t = tr("Restart needed");
   }
+  if (!t && live_blocked(o)) { t = tr("Restart to apply"); c = p.warn; }
   if (!t) return;
   const ImVec2 ts = ImGui::CalcTextSize(t);
   const float s2 = 0.82f;
@@ -1012,9 +1031,9 @@ void draw_row(const Opt& o, bool inline_help) {
   if (over_bar && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) g_help = &o;
   if (o.note) {   // which value is in effect when another row overrides this one
     const std::string n = o.note();
-    if (!n.empty()) { ImGui::Indent(px(24)); ImGui::TextColored(theme().title, "%s", tx(n).c_str()); ImGui::Unindent(px(24)); }
+    if (!n.empty()) { ImGui::Indent(px(24)); ImGui::TextColored(theme().title, "%s", tx(n).c_str()); ImGui::Unindent(px(24)); ImGui::Dummy(ImVec2(0, px(4))); }
   }
-  if (env_set_by_hand(o)) ImGui::TextColored(theme().error, tr("    %s is set in the environment and wins over this choice."), st::env_name(o.key) ? st::env_name(o.key) : o.env);
+  if (env_set_by_hand(o)) { ImGui::TextColored(theme().error, tr("    %s is set outside the game and wins over this choice."), st::env_name(o.key) ? st::env_name(o.key) : o.env); ImGui::Dummy(ImVec2(0, px(4))); }
   if (inline_help) {
     ImGui::Indent(px(24));
     ImGui::PushStyleColor(ImGuiCol_Text, theme().text_dim);
@@ -1051,8 +1070,7 @@ void draw_help(const std::vector<Opt>& list, const Opt** remembered) {
   const std::string dl = default_label(*o);
   if (!dl.empty()) add(sub(tr("Default: %s"), tx(dl, o->dyn && !o->note)));
   if (o->key && std::strcmp(o->key, "gfx_render_scale") == 0) add(sub(tr("Now: scene drawn at %s"), snappic::dims(snappic::effective(pic_cfg(), pic_ctx()).scene)));
-  const char* en = st::env_name(o->key) ? st::env_name(o->key) : o->env;
-  if (en) add(sub(tr("Environment variable: %s"), en));
+  // (the environment variable name is not shown here: it is for the command line and is listed in docs/command-line.md)
   skin_help_set(tr(o->help), extra, o->when == kRestart);
 }
 
@@ -1343,6 +1361,10 @@ bool options_test_set(const std::string& key, const std::string& value) {
   if (o->vis && !std::strcmp(o->def, "default") && std::strcmp(o->key, "gfx_aa") && value == snapdef::def(o->vis)) { set_of(*o, "default"); return true; }
   set_of(*o, value);
   return true;
+}
+std::string options_test_default(const std::string& key) {   // the value the row's Default choice stores
+  const Opt* o = find_opt(key);
+  return o ? std::string(o->def) : std::string();
 }
 void options_test_scroll(float fraction) { g_scroll_req = fraction; }
 std::string options_test_get(const std::string& key) {

@@ -25,6 +25,7 @@
 #include "../../runtime/nvn/nvn_dev.h"
 #include "../../runtime/ui/ui_present.h"
 #include "look_spv.h"
+#include "../../runtime/hle/live.h"
 
 namespace {
 
@@ -32,8 +33,11 @@ struct Look { float gain[3], sat, contrast; };
 bool g_parsed, g_on;
 float g_gain[3] = {1, 1, 1}, g_sat = 1, g_con = 1, g_t = 1;
 
+// Runs at the first present and again when a setting changed (hle/live.h): the Color look and Look strength rows apply with no restart.
 void parse() {
   g_parsed = true;
+  hle::live::EnvRead env_read;
+  g_on = false; g_gain[0] = g_gain[1] = g_gain[2] = 1.0f; g_sat = 1.0f; g_con = 1.0f; g_t = 1.0f;   // from scratch: Neutral really is off
   const char* e = getenv("SNAP_LOOK");
   if (!e || !*e) return;
   std::string s = e, name = s;
@@ -49,7 +53,8 @@ void parse() {
   else return;   // neutral or unknown: off
   g_t = t;
   g_on = t > 0.001f;
-  fprintf(stderr, "look: SNAP_LOOK=%s intensity %.2f\n", name.c_str(), t);
+  static std::string said;   // once per value, not on every unrelated setting
+  if (said != s) { said = s; fprintf(stderr, "look: SNAP_LOOK=%s intensity %.2f\n", name.c_str(), t); }
 }
 
 struct State {
@@ -287,8 +292,10 @@ void barrier(VkCommandBuffer cb, VkImage im, VkImageLayout from, VkImageLayout t
 }  // namespace
 
 extern "C" void snap_look_present(const SnapUiFrame* f) {
-  if (!g_parsed) {
-    parse();
+  static std::atomic<unsigned> live_seen{0};
+  const bool first = !g_parsed;
+  if (hle::live::changed(live_seen) || first) parse();
+  if (first) {
     // live params for scripts (ab_capture -Effect SNAP_ACCESS_CVD -Values 0,2); the menus change the same fields through hle::access::set
     hle::access::State& a = hle::access::state();
     dev_param_i("SNAP_ACCESS_CVD", &a.cvd, 0, 3, 0);

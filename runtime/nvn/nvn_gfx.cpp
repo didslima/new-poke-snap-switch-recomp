@@ -13,6 +13,7 @@
 
 #include "nvn_internal.h"
 #include "nvn_os_host.h"
+#include "hle/live.h"
 #include "nvn_state.h"
 #include "nvn_shiny.h"   // shiny mod
 
@@ -274,10 +275,7 @@ VkSamplerAddressMode Wrap(int w) {
     default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;           // 7 CLAMP_TO_EDGE
   }
 }
-Boolean SamplerInitialize(void* samp, const void* builder) {
-  auto* b = reinterpret_cast<const SamplerBuilder*>(builder);
-  Host* h = H(b->device);
-  if (!h) return 0;
+static VkSampler MakeSampler(Host* h, const SamplerBuilder* b) {
   VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
   const int mn = b->minFilter;   // 0 N, 1 L, 2 N_MIP_N, 3 L_MIP_N, 4 N_MIP_L, 5 L_MIP_L
   ci.minFilter = (mn == 1 || mn == 3 || mn == 5) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -326,9 +324,19 @@ Boolean SamplerInitialize(void* samp, const void* builder) {
   else ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
   static int borderLogged = 0;
   if (getenv("NVN_BORDER_LOG") && borderLogged < 40 && (ci.borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT || (c[3] != 0.f && c[3] != 1.f))) fprintf(stderr, "[nvn] sampler border color %g %g %g %g (address modes %d %d %d)\n", c[0], c[1], c[2], c[3], (int)ci.addressModeU, (int)ci.addressModeV, (int)ci.addressModeW), borderLogged++;
+  VkSampler out = VK_NULL_HANDLE;
+  if (vkCreateSampler(h->device, &ci, nullptr, &out) != VK_SUCCESS) return VK_NULL_HANDLE;
+  return out;
+}
+Boolean SamplerInitialize(void* samp, const void* builder) {
+  auto* b = reinterpret_cast<const SamplerBuilder*>(builder);
+  Host* h = H(b->device);
+  if (!h) return 0;
   auto* s = new SamplerImpl();
   s->host = h; s->b = *b;
-  if (vkCreateSampler(h->device, &ci, nullptr, &s->sampler) != VK_SUCCESS) { delete s; LogError("vkCreateSampler failed"); return 0; }
+  s->policyGen = g_samplerPolicyGen.load(std::memory_order_relaxed);
+  s->sampler = MakeSampler(h, b);
+  if (!s->sampler) { delete s; LogError("vkCreateSampler failed"); return 0; }
   DebugSamplerNote((void*)s->sampler, *b);   // no-op unless NVN_DRAW_LOG is set
   Bind(samp, MAGIC_SAMPLER, s);
   StateMade(SK_SAMPLER, s);
@@ -619,6 +627,25 @@ const Entry kGfx[] = {
 #undef X
 
 }  // namespace
+std::atomic<unsigned> g_samplerPolicyGen{1};
+// Live options (hle/live.h): Texture filtering and Texture sharpness are baked into the VkSampler, so a change makes each sampler again the next
+// time a draw uses it. The old one may be in descriptors of this frame: the graveyard frees it once the GPU is past them.
+VkSampler SamplerLive(SamplerImpl* s) {
+  static std::atomic<unsigned> seen{hle::live::gen().load()};   // the policy was parsed at start (ApplyHostEnvPolicy)
+  if (hle::live::changed(seen) && SamplerPolicyReparse()) g_samplerPolicyGen.fetch_add(1, std::memory_order_relaxed);
+  const unsigned g = g_samplerPolicyGen.load(std::memory_order_relaxed);
+  if (s->policyGen == g) return s->sampler;
+  s->policyGen = g;
+  const int mn = s->b.minFilter;
+  if (mn < 2 || s->b.compareMode != 0 || !s->host) return s->sampler;   // the overrides never touch these
+  VkSampler fresh = MakeSampler(s->host, &s->b);
+  if (!fresh) return s->sampler;
+  VkSampler old = s->sampler; VkDevice dev = s->host->device;
+  s->sampler = fresh;
+  if (old) RetireFn([dev, old] { vkDestroySampler(dev, old, nullptr); });
+  static int n = 0; if (n++ == 0) Log("samplers: made again for the changed filtering options (aniso %.0f, mip bias %s%.2f)", g_anisoOverride, g_lodBiasAuto ? "auto " : "", g_lodBiasExtra);
+  return s->sampler;
+}
 
 const Entry* GfxEntries(int* count) {
   *count = (int)(sizeof kGfx / sizeof *kGfx);

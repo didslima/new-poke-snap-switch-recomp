@@ -175,6 +175,7 @@ void ImgBar(VkCommandBuffer cb, Img& im, VkImageLayout to) {
   im.layout = to;
 }
 bool MakeImg(Host* h, Img& o, uint32_t w, uint32_t hh, VkFormat fmt, VkImageAspectFlags aspect) {
+  if (o.img || o.view || o.mem) { RetireVkImage(h, o.img, o.view, o.mem); o = Img{}; }   // a size change: the old image goes once the GPU is past it
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ci.imageType = VK_IMAGE_TYPE_2D; ci.format = fmt; ci.extent = {w, hh, 1}; ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT;
   ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -253,7 +254,7 @@ bool Setup(Host* h, VkFormat fmt) {
 
 bool EnsureImages(Host* h, uint32_t w, uint32_t hh, uint32_t hw, uint32_t hhh, VkFormat colFmt) {
   if (g.w == w && g.h == hh && g.hw == hw && g.hh == hhh && g.col.img) return true;
-  if (g.col.img) fprintf(stderr, "water: render size changed to %ux%u, the old images are kept until exit\n", w, hh);   // a command buffer may still read them
+  if (g.col.img) fprintf(stderr, "water: render size changed to %ux%u\n", w, hh);   // a command buffer may still read them
   if (!MakeImg(h, g.col, w, hh, colFmt, VK_IMAGE_ASPECT_COLOR_BIT) || !MakeImg(h, g.hdPre, hw, hhh, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT) ||
       !MakeImg(h, g.hdPost, hw, hhh, VK_FORMAT_D32_SFLOAT, VK_IMAGE_ASPECT_DEPTH_BIT)) return false;
   g.w = w; g.h = hh; g.hw = hw; g.hh = hhh;

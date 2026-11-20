@@ -24,6 +24,7 @@
 //   SNAP_UI_PACE=0     kill switch for the handler and event hooks (every frame steps, as without this file).
 //   SNAP_PAD_PACE=0    kill switch for the pad sampling (the pad stays as the game wrote it).
 //   SNAP_PTR_PACE=0    kill switch for the pointer time (a stopped clock moves the pointer per frame, as without this file).
+//   SNAP_UI_PACE_HOVER=0  kill switch for keeping the pointer's "over an entry" flag on frames without a step (the cursor arc blinks again).
 //   SNAP_UI_PACE_TRACE=1  logs the handler counts every 5 s ("[uipace]" in stderr).
 #include <windows.h>
 
@@ -44,7 +45,7 @@ namespace nvn { extern double g_paceHz; }   // runtime/nvn/nvn_vk.cpp: rate of p
 
 namespace {
 
-bool g_ui_on = true, g_pad_on = true, g_ptr_on = true, g_trace;
+bool g_ui_on = true, g_pad_on = true, g_ptr_on = true, g_hover_on = true, g_trace;
 std::atomic<bool> g_cfg{false};
 
 uint64_t now_ns() {
@@ -57,6 +58,7 @@ void cfg_once() {
     if (const char* e = std::getenv("SNAP_PAD_PACE")) g_pad_on = !(*e == '0' && !e[1]);
     if (const char* e = std::getenv("SNAP_PTR_PACE")) g_ptr_on = !(*e == '0' && !e[1]);
     if (const char* e = std::getenv("SNAP_UI_PACE_TRACE")) g_trace = *e && *e != '0';
+    if (const char* e = std::getenv("SNAP_UI_PACE_HOVER")) g_hover_on = !(*e == '0' && !e[1]);
     if (g_trace || !g_ui_on || !g_pad_on || !g_ptr_on)
         std::fprintf(stderr, "[uipace] ui=%d pad=%d ptr=%d trace=%d\n", (int)g_ui_on, (int)g_pad_on, (int)g_ptr_on, (int)g_trace);
     g_cfg.store(true, std::memory_order_release);
@@ -90,6 +92,7 @@ int pace_step(uint64_t now) {
 }
 
 uint64_t g_ran, g_drawn, g_win_ns, g_win_present, g_edges, g_steps, g_pad_frames;
+uint64_t g_hover_frames, g_hover_set, g_hover_fixed, g_hover_present = ~0ull;   // the pointer flag below (UI-HZ-02)
 
 void trace_counts(uint64_t now, int ran) {
     if (ran) g_ran++; else g_drawn++;
@@ -100,10 +103,37 @@ void trace_counts(uint64_t now, int ran) {
     std::fprintf(stderr, "[uipace] %.1f s: %.1f presents/s, handlers run %.1f/s, draw only %.1f/s, period %.3f ms; game frames %.1f/s, steps %.1f/s, pad press edges %llu\n", s,
                  (double)(snap_present_count() - g_win_present) / s, (double)g_ran / s, (double)g_drawn / s, (double)period_ns() / 1e6, (double)g_pad_frames / s,
                  (double)g_steps / s, (unsigned long long)g_edges);
-    g_win_ns = now, g_win_present = fr, g_ran = g_drawn = g_pad_frames = g_steps = 0;
+    std::fprintf(stderr, "[uipace] pointer over an entry in %llu of %llu frames (put back after a skipped step: %llu)\n", (unsigned long long)g_hover_set,
+                 (unsigned long long)g_hover_frames, (unsigned long long)g_hover_fixed);
+    g_win_ns = now, g_win_present = fr, g_ran = g_drawn = g_pad_frames = g_steps = 0, g_hover_frames = g_hover_set = g_hover_fixed = 0;
 }
 
 }  // namespace
+
+// The pointer's "over an entry" flag (pointer +0x128, one byte). The end of every frame rebuilds it from what the menu logic reported in that
+// frame, and the cursor draws its orange arc from it in the next one. A frame whose logic is skipped reports nothing, so the frame after it
+// found the flag clear and drew no arc: at 72 to 240 fps the arc blinked after every frame between two steps (UI-HZ-02). The pointer update
+// (first thing in a frame) keeps the value a stepped frame left and puts it back after a skipped one. SNAP_UI_PACE_HOVER=0 turns it off.
+constexpr uint32_t kPtrHoverOff = 0x128;
+std::atomic<uint64_t> g_ptr_obj{0};
+int g_ptr_hover = -1;   // -1 = not known yet
+bool g_prev_step = true;
+
+void hover_seen(uint64_t ptr) {
+    if (!ptr || IsBadWritePtr((void*)(ptr + kPtrHoverOff), 1)) return;
+    g_ptr_obj.store(ptr, std::memory_order_relaxed);
+    uint8_t* f = (uint8_t*)(ptr + kPtrHoverOff);
+    if (g_prev_step) g_ptr_hover = *f;
+    else if (g_hover_on && g_ptr_hover >= 0 && *f != (uint8_t)g_ptr_hover) *f = (uint8_t)g_ptr_hover, g_hover_fixed++;
+    g_prev_step = g_pace.step != 0;
+}
+
+void hover_count() {   // trace: the flag as the frame's first handler finds it
+    const uint64_t ptr = g_ptr_obj.load(std::memory_order_relaxed), fr = snap_present_count();
+    if (!ptr || fr == g_hover_present) return;
+    g_hover_present = fr, g_hover_frames++;
+    g_hover_set += *(const uint8_t*)(ptr + kPtrHoverOff) != 0;
+}
 
 extern "C" void rt_gm_ui_enter(Cpu* c) {
     c->x[16] = 1;
@@ -111,6 +141,7 @@ extern "C" void rt_gm_ui_enter(Cpu* c) {
     if (!g_ui_on) return;
     const uint64_t now = now_ns();
     int step = pace_step(now);
+    if (g_trace) hover_count();
     if (!step) {
         // Only an object the handler would carry on with may be drawn without a step: started (+0xc0), ready (+0xc6), not held (+0xc4).
         const uint8_t* o = (const uint8_t*)c->x[0];
@@ -155,6 +186,7 @@ extern "C" void rt_gm_ui_pad(Cpu* c) {
 
 extern "C" void rt_gm_ui_pointer(Cpu* c) {
     cfg_once();
+    if (g_ui_on && uipace::above60(period_ns())) hover_seen(c->x[21]);
     float t;
     std::memcpy(&t, &c->v[1], sizeof t);
     if (g_trace) {   // per second: frames with a game time / with 0, and how far the pointer (x21+0x118, +0x11c) moved

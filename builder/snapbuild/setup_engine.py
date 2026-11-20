@@ -326,6 +326,9 @@ def _scan_folder(folder, keys=None, nstool_exe=None, table=None, cfg=None):
         out['space'] = space_report(cfg or {}, 'extracted', table=table)
         return out
     if sc.kind == 'dump':
+        # listed before any early return below, so the screen's count always matches the log's "scan: N game file(s)"
+        out['dumps'] = [{'name': d.path.name, 'size': d.size, 'titles': [], 'error': 'not read yet', 'error_code': None, 'reason': None}
+                        for d in sc.dumps]
         if not sc.keys:
             out['error'] = ('This folder has game files but no prod.keys file next to them. Put your own prod.keys in the same folder '
                             '(the file must be named prod.keys; Windows may hide a ".txt" ending), or choose it below. '

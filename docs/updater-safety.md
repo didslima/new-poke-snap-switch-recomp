@@ -32,6 +32,8 @@ Put an empty `portable.txt` next to `SnapRecomp.exe`. At start-up the exe points
 
 Updates keep the portable data: `portable.txt` and `portable_data` are renamed (not copied) into the new build folder before the switch, and back if the switch fails, so they never end up in `builds/previous`. The updater's own state lives in `<work>/updates`, beside `out/`, because `out/` is swapped during an update.
 
+Rollback also puts back the exe you start the game with. An update copies the exe it replaces to `<updater state>/exe/previous.exe`; `update rollback` swaps that copy with the exe in use, so the exe always matches the active build, and a second rollback goes forward again. An install updated before this was added has no kept exe: the rollback says so and leaves the exe alone.
+
 Not covered: the builder's work folder and the extracted game data are not inside `portable_data`; copying `out/` alone does not move an install to another PC.
 
 ## Release notes

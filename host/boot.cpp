@@ -1159,6 +1159,7 @@ int main(int argc, char **argv) {
         snap_launcher::Result lr;
         lr.play = cli.play;
         lr.action = cli.action;
+        lr.action_args = cli.action_args;
         lr.notice = g_data_notice;
         const bool plain = argc == 1;
         if (plain && snap_launcher::prepare(lr)) {

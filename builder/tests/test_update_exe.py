@@ -95,6 +95,29 @@ class OneExeRelease(unittest.TestCase):
         self.assertFalse((self.rig.state / 'downloads').exists())             # nothing left behind
         self.assertEqual(self.rig.user_hash(), before_user)
 
+    def test_rollback_puts_the_old_exe_back_and_a_second_rollback_the_new_one(self):
+        url = make_exe_release(self.rig)
+        new_bytes = (self.rig.rel / 'SnapRecomp.exe').read_bytes()
+
+        def run(cmd, log):   # what the real rebuild does at its end: the old build moves to builds\previous, the new one becomes out\
+            out, prev = self.rig.work / 'out', self.rig.work / 'builds' / 'previous'
+            for d, exe, ver in ((prev, b'MZ-old-game', '1.0.0'), (out, b'MZ-new-game', '1.0.1')):
+                d.mkdir(parents=True, exist_ok=True)
+                (d / 'SnapRecomp.exe').write_bytes(exe)
+                (d / 'config.json').write_text(json.dumps({'builder_version': ver}))
+            return 0
+        r = self.apply(url, run, top=self.top)
+        self.assertTrue(r['exe_replaced'])
+        self.assertEqual(self.top.read_bytes(), new_bytes)
+        r = update.rollback(self.rig.work, self.rig.state, Quiet(), data_root=self.rig.user)
+        self.assertTrue(r['exe_restored'])
+        self.assertEqual(self.top.read_bytes(), b'MZ-old-top-exe')                      # the exe matches the build that is active again
+        self.assertEqual((self.rig.work / 'out' / 'SnapRecomp.exe').read_bytes(), b'MZ-old-game')
+        r = update.rollback(self.rig.work, self.rig.state, Quiet(), data_root=self.rig.user)
+        self.assertTrue(r['exe_restored'])
+        self.assertEqual(self.top.read_bytes(), new_bytes)                              # and forward again
+        self.assertEqual((self.rig.work / 'out' / 'SnapRecomp.exe').read_bytes(), b'MZ-new-game')
+
     def test_failed_rebuild_leaves_the_exe_and_the_build_alone(self):
         url = make_exe_release(self.rig)
         with self.assertRaises(update.UpdateError):

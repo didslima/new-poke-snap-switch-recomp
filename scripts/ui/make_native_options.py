@@ -97,8 +97,8 @@ TABS = [
     ]),
     ('Textures', 'Texture, shadow and shading detail.', [
         row('Texture filtering', 'p', 'opt', 'gfx_aniso', '0',
-            (('0', 'Original'), ('2', '2x anisotropic'), ('4', '4x anisotropic'), ('8', '8x anisotropic'), ('16', '16x anisotropic')),
-            'Keeps ground and walls sharp at shallow angles. 16x costs almost nothing on a PC.' + R),
+            (('0', 'Original'), ('2', '2x'), ('4', '4x'), ('8', '8x'), ('16', '16x')),
+            'Keeps ground and walls sharp when seen at a slant. 16x costs almost nothing on a PC.' + R),
         row('Texture sharpness', 'p', 'opt', 'gfx_lod_bias', 'auto',
             (('auto', 'Automatic'), ('-2', '-2 (sharpest)'), ('-1.5', '-1.5'), ('-1', '-1 (sharper)'), ('-0.5', '-0.5'),
              ('0', '0 (original)'), ('0.25', '+0.25'), ('0.5', '+0.5'), ('1', '+1 (softer)'), ('2', '+2 (softest)')),
@@ -113,8 +113,8 @@ TABS = [
             (('default', 'Original'),) + nums('8', '16', '64', '128', '256', '512'),
             'Samples per pixel for ambient occlusion. Overrides the row above.' + R),
         row('Horizon occlusion', 'p', 'opt', 'gfx_ssao_hbao', 'default',
-            (('default', 'Original'), ('12,48', '12 x 48'), ('16,64', '16 x 64'), ('24,96', '24 x 96'), ('32,128', '32 x 128')),
-            'Detail of the horizon-based occlusion pass. More is smoother and slower.' + R),
+            (('default', 'Original'), ('12,48', 'Low'), ('16,64', 'Medium'), ('24,96', 'High'), ('32,128', 'Maximum')),
+            'Finer shading in creases and corners. Higher looks smoother and costs more speed.' + R),
     ]),
     ('Effects', 'Screen effects and color.', [
         row('Bloom', 'c', 'opt', 'gfx_pass_bloom', 'default', ONOFF,
@@ -146,7 +146,7 @@ TABS = [
             'How bright ordinary white is. Lower it if the picture feels too bright in a dark room.' + R),
         row('HDR highlights', 'p', 'opt', 'gfx_hdr_expand', '0.30',
             nums('0.00', '0.10', '0.20', '0.30', '0.40', '0.50', '0.60', '0.80', '1.00'),
-            'How far near-white scene pixels lift into HDR. Needs HDR on.' + R),
+            'How much bright areas are boosted in HDR. Needs HDR output on.' + R),
         row('Frame rate limit', 'p', 'opt', 'frame_cap', '0',
             (('0', 'Off'),) + nums('30', '45', '60', '75', '90', '120', '144', '165', '240', suffix=' FPS'),
             'Stops the game from drawing faster than this. Off keeps the original 60 FPS pacing.'),
@@ -252,7 +252,7 @@ TABS = [
             'How far moving shadows reach. Pair with shadow resolution: farther is blurrier.' + R),
         # live (runtime/nvn/nvn_contact.cpp snap_contact_shadows_set); stored as "1" or erased
         row('Contact shadows', 'p', 'opt', 'contact_shadows', 'default', (('default', 'Off'), ('1', 'On')),
-            'Thin shadows where Pokémon and objects touch the ground. Needs the sun.'),
+            'Thin shadows where Pokémon and objects touch the ground. Works in sunlit scenes.'),
         # foliage and particle upgrades (runtime/nvn/nvn_foliage.cpp): display only, photos keep the game's draw; read at start
         row('Leaf edge smoothing', 'p', 'opt', 'foliage_aa', 'default', (('default', 'Off'), ('1', 'On')),
             'Smooths jagged leaf and grass edges. Best with Anti-aliasing. Photos are unchanged.' + R),
@@ -276,7 +276,7 @@ TABS = [
             (('0.00', 'Off'),) + nums('0.10', '0.20', '0.30', '0.40', '0.50', '0.60', '0.70', '0.85', '1.00'),
             'Contrast-adaptive sharpening after anti-aliasing. An upscaler turns it off unless set.' + R),
         row('Frame generation', 'p', 'opt', 'frame_generation', 'default', (('default', 'Off'), ('1', 'On')),
-            'FSR adds computed frames between real ones. Menus stay out. Off under 50 fps.' + R),
+            'Adds computed frames for smoother motion (AMD FSR). Turns off below 50 fps.' + R),
     ]),
     # Tab 14: HUD scale is live (runtime/nvn/nvn_hud.cpp snap_hud_scale_set); Skip course intro is read at start (host/mods/introskip.cpp)
     ('Interface', 'HUD size and course intro.', [
@@ -304,8 +304,8 @@ TABS = [
             'Haze that thickens toward the ground and the distance. Photos are unchanged.' + R),
         row('Auto exposure', 'p', 'opt', 'atmos_exposure', 'default', (('default', 'Off'), ('1', 'On')),
             'Caves open up and bright beaches ease down over about a second. Photos are unchanged.' + R),
-        row('Soft glow', 'p', 'opt', 'atmos_bloom', 'default', (('default', 'Off'), ('1', 'On')),
-            'A wide, soft glow around the brightest highlights. Photos are unchanged.' + R),
+        row('Wide glow', 'p', 'opt', 'atmos_bloom', 'default', (('default', 'Off'), ('1', 'On')),
+            'A wider glow around the brightest highlights, on top of Bloom. Photos are unchanged.' + R),
         row('Cloud shadows', 'p', 'opt', 'atmos_clouds', 'default', (('default', 'Off'), ('1', 'On')),
             'Slow cloud shadows drift across the ground. Photos are unchanged.' + R),
         row('Sky gradient', 'p', 'opt', 'atmos_sky', 'default', (('default', 'Off'), ('1', 'On')),

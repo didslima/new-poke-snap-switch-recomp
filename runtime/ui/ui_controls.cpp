@@ -653,7 +653,7 @@ void draw_menu(ImVec2 size, bool* want_close) {
 
   options_restart_bar();   // "N changes need a restart" with the Apply and restart button
 
-  const float bar_h = px(122);   // the description bar at the bottom edge of the panel
+  const float bar_h = px(138);   // the description bar at the bottom edge of the panel (room for four readable lines)
   const float footer_h = bar_h - ImGui::GetStyle().WindowPadding.y + px(6);
   const std::string page = kTabs[S.cur_tab];
   if (page == "Bindings") tab_bindings(footer_h + ImGui::GetTextLineHeightWithSpacing() * 2.4f);

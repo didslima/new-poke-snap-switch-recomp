@@ -3,6 +3,7 @@
 // Overview, switches and the design notes: nvn_rt.h and docs/lighting-rt-plan.md section 4. Everything is inert without SNAP_RT=1.
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -371,6 +372,23 @@ namespace {
 std::mutex g_patchedMu; std::set<std::string> g_patched;   // first 12 hex digits of the vertex programs whose module carries the Xfb decorations
 bool IsPatched(const char* k) { if (!k) return false; std::lock_guard<std::mutex> lk(g_patchedMu); return g_patched.count(std::string(k, 12)) != 0; }
 }
+// Demand gate (SNAP_RT_DEMAND=0 turns it off): the scene capture (transform feedback on every opaque scene draw, the convert pass, the BLAS and TLAS
+// builds) is only worth its cost while something traces against the TLAS. The reflection, bounce light and AO passes say so each frame they run;
+// with no such call for kDemandHold presents (no water in view, Bounce light off) the capture stops, and it starts again on the next call. The first
+// frames after a restart use the screen-space path until a TLAS is built (a stale one is never traced). The debug views keep the capture on always.
+std::atomic<int> g_demandAt{-1000000};
+std::atomic<bool> g_demandLapsed{false};
+constexpr int kDemandHold = 120;
+void NoteDemand() { g_demandAt.store(g_presentCount, std::memory_order_relaxed); }
+bool SceneDemand() {
+  static const bool gated = (ReflectRequested() || GiRequested() || AoRequested()) && EnvInt("SNAP_RT_DEBUG", 0) == 0 && !EnvOn("SNAP_RT_SCENE") && EnvOn("SNAP_RT_DEMAND", true);
+  if (!gated || g_presentCount - g_demandAt.load(std::memory_order_relaxed) <= kDemandHold) return true;
+  if (!g_demandLapsed.exchange(true)) { static int n; if (n++ < 6) fprintf(stderr, "[rt] p%d scene capture paused: nothing has traced the scene for %d presents\n", g_presentCount, kDemandHold); }
+  return false;
+}
+// g.mu held. After a pause the old TLAS describes a scene from before it: dropped, so the passes wait for a fresh build.
+void DemandResume() { if (g_demandLapsed.exchange(false)) { g.tlasValid = false; static int n; if (n++ < 6) fprintf(stderr, "[rt] p%d scene capture resumed\n", g_presentCount); } }
+
 bool Wanted() { static const bool w = EnvOn("SNAP_RT") || ShadowsRequested() || ReflectRequested() || GiRequested() || AoRequested(); return w; }
 bool On() { return g_on; }
 bool Capture() { return g_on && g_capture && !g_failed; }
@@ -812,6 +830,7 @@ void DrawCapture::Begin(ReplayCtx& c, const DrawInfo& di) {
   if (!Capture() || di.hasGeomTess || FxIsPhotoFrame()) return;   // photo / Evaluation frames get no capture work
   if (di.cast) { if (CastBegin(c, di)) { open = true; cx = &c; } return; }   // M3: the dynamic shadow map's caster draws (nvn_rt.cpp, "M3")
   if (!SceneCapture()) return;                                    // shadows only: no scene geometry is captured
+  if (!SceneDemand()) return;                                     // nothing traces the scene now: no capture, so no convert or build at the tonemap draw
   TextureImpl* t8 = c.rt[8]; TextureImpl* t0 = c.rt[0];
   if (!IsSceneDepth(t8) || !IsSceneColor(t0) || !di.depthTest || !di.depthWrite || di.blend0) return;   // scene opaque draws only; never the Evaluation (DEPTH32F_STENCIL8) or photo targets
   if (!IsPatched(di.vsKey)) { static int n; if (n++ < 8) fprintf(stderr, "[rt] scene draw with vertex program %.12s that has no gl_Position block member to decorate: not captured\n", di.vsKey ? di.vsKey : "?"); return; }   // a draw whose module lacks the Xfb decorations must not begin transform feedback
@@ -1171,6 +1190,7 @@ bool CachePass(ReplayCtx& cx, VkImageView col, VkSampler samp, const double vp[4
   if (!col || !samp || FxIsPhotoFrame()) return false;
   std::lock_guard<std::mutex> lk(g.mu);
   if (!g.ready || !g.tlas || !Capture()) return false;
+  DemandResume();
   if (g.rDoneAt == g_presentCount) { out->tlas = g.tlasAddr; out->avg = g.ravg.addr; return true; }   // the other feature already updated the cache this frame
   if (!g.tlasValid || g.killsSinceBuild) { g.rSkip++; return false; }   // no TLAS yet, or a BLAS it names was released since it was built
   if (!RSetup(cx.h)) return false;
@@ -1217,7 +1237,7 @@ bool CachePass(ReplayCtx& cx, VkImageView col, VkSampler samp, const double vp[4
   out->tlas = g.tlasAddr; out->avg = g.ravg.addr;
   return true;
 }
-bool ReflectionPass(ReplayCtx& cx, VkImageView col, VkSampler samp, const double vp[4][4], ReflInfo* out) { return ReflectOn() && CachePass(cx, col, samp, vp, out); }
+bool ReflectionPass(ReplayCtx& cx, VkImageView col, VkSampler samp, const double vp[4][4], ReflInfo* out) { if (!ReflectOn()) return false; NoteDemand(); return CachePass(cx, col, samp, vp, out); }
 
 // ---- RT bounce light (SNAP_RT_GI): the ray traced gather of the bounce-light chain (nvn_lighting_fx.cpp). The gather shader (lfx_gi_rt.frag) is ours; the chain, the denoiser and the
 // composite are the lighting file's. Same fallback shape as the reflections: a failure only returns the chain to its screen-space gather.
@@ -1237,7 +1257,7 @@ VkShaderModule GiModule(Host* h) {
   if (vkCreateShaderModule(h->device, &mi, nullptr, &g.gmod) != VK_SUCCESS) { g.gmod = VK_NULL_HANDLE; GiFail("gather shader module"); }
   return g.gmod;
 }
-bool GiPass(ReplayCtx& cx, VkImageView col, VkSampler samp, const double vp[4][4], ReflInfo* out) { return GiOn() && CachePass(cx, col, samp, vp, out); }
+bool GiPass(ReplayCtx& cx, VkImageView col, VkSampler samp, const double vp[4][4], ReflInfo* out) { if (!GiOn()) return false; NoteDemand(); return CachePass(cx, col, samp, vp, out); }
 
 // ---- RT ambient occlusion (SNAP_RT_AO): the ray traced variant of the GTAO pass of the enhanced-lighting chain (nvn_lighting_fx.cpp). The shader (lfx_ao_rt.frag) only needs the
 // TLAS, not the colour cache. A failure returns the chain to GTAO.
@@ -1259,8 +1279,10 @@ VkShaderModule AoModule(Host* h) {
 }
 bool AoPass(uint64_t* tlas) {
   if (!AoOn() || FxIsPhotoFrame()) return false;
+  NoteDemand();
   std::lock_guard<std::mutex> lk(g.mu);
   if (!g.ready || !g.tlas || !Capture()) return false;
+  DemandResume();
   if (!g.tlasValid || g.killsSinceBuild) { g.aoSkip++; return false; }
   g.aoPasses++;
   *tlas = g.tlasAddr;

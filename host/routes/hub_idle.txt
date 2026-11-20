@@ -1,0 +1,4 @@
+# fixture: post_tutorial
+# Hub menu, idle: ZL taps pass the title (any button does) and do nothing on the hub, so the menu stays on its first entry (Research).
+# For per-frame dumps of the menu cursor: powershell -File host\run_boot.ps1 -Route hub_idle -Timeout 90 -ShotAt 50 -ShotEvery 0.001 -ShotMax 48
+repeat @f300 @f20000 120 8 ZL

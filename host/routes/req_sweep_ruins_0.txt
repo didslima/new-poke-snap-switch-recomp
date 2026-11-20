@@ -3,13 +3,7 @@
 wait ui=title timeout=200
 repeat @f60 @f30000 40 4 A
 wait ui=map_select:StageSelect timeout=420
-@f240 6 Right
-@f600 6 Right
-@f960 6 Right
-@f1320 6 Right
-@f1680 6 Right
-repeat @f2220 @f8040 240 6 A
-wait ui=map_select:CourseSelect timeout=240
+course ruins
 @f180 6 A
 wait ride timeout=300
 aim ev:Mis_Stage011_075|Mis_Stage011_265|Sp_P216_03|Sp_P231_01|CH_262@Eat_01 cap=8 range=16 timeout=1 tol=0.08

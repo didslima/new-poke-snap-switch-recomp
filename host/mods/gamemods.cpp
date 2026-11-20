@@ -35,6 +35,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -42,6 +44,7 @@
 #include "loader.h"
 #include "hle/visual_defaults.h"   // default font scale (SNAP_VISUALS)
 #include "hle/lighting_preset.h"   // SNAP_LIGHTING parser
+#include "hle/live.h"              // rows that apply with no restart
 
 using namespace loader;
 
@@ -62,9 +65,18 @@ bool g_pass_force;
 bool g_ao_force;                // SNAP_SSAO_FORCE=1|2 (P4)
 int g_ao_force_level;           // 1 = strict gate (the Evaluation pass enabled also blocks), 2 = relaxed (only capture / photo / report / resize passes block)
 
+// Runs at the first hook call and again when a setting changed (hle/live.h): the Ambient occlusion, Occlusion samples, Horizon occlusion and the
+// four post-process rows apply with no restart. Everything is parsed from scratch, so a row put back to its default really goes back.
+std::atomic<unsigned> g_cfg_seen{0};
+std::mutex g_cfg_mu;   // g_pass_off: the parse against the pass loop, should the hooks ever run on two threads
 void init() {
-    if (g_init_done) return;
+    if (!hle::live::changed(g_cfg_seen)) return;
+    hle::live::EnvRead env_read;
+    std::lock_guard<std::mutex> cfg_lock(g_cfg_mu);
     g_init_done = true;
+    g_simple_n = g_hbao_dirs = g_hbao_samples = 0;
+    g_ao_radius = g_ao_strength = 0.0f;
+    g_pass_off.clear();
     const char* q = getenv("SNAP_SSAO_QUALITY");
     if (!q || !*q) q = snaplight::ssao_quality();   // SNAP_LIGHTING preset (hle/lighting_preset.h, shared with nvn_entry.cpp and nvn_draw.cpp)
     if (q) {
@@ -91,9 +103,11 @@ void init() {
             else cur.push_back((char)tolower((unsigned char)ch));
         }
     }
-    if (g_simple_n || g_hbao_dirs || g_ao_radius > 0.0f || g_ao_strength > 0.0f || g_trace || g_pass_dump || !g_pass_off.empty())
-        fprintf(stderr, "gamemods: SimpleAO samples %d, HBAO %dx%d, trace %d, pass dump %d, %zu pass(es) off\n", g_simple_n, g_hbao_dirs,
-                g_hbao_samples, (int)g_trace, (int)g_pass_dump, g_pass_off.size());
+    char line[160];
+    snprintf(line, sizeof line, "gamemods: SimpleAO samples %d, HBAO %dx%d, trace %d, pass dump %d, %zu pass(es) off", g_simple_n, g_hbao_dirs, g_hbao_samples, (int)g_trace,
+             (int)g_pass_dump, g_pass_off.size());
+    static std::string last = "gamemods: SimpleAO samples 0, HBAO 0x0, trace 0, pass dump 0, 0 pass(es) off";   // nothing set: say nothing
+    if (last != line) { last = line; fprintf(stderr, "%s\n", line); }
 }
 
 bool readable(const void* p, size_t n) {
@@ -120,7 +134,16 @@ extern "C" void rt_gm_ao_simple(Cpu* c) {
         trace("gamemods: SimpleAO pass %p kernelSize %u radius %g strength %g (hemisphere flag %u)", (void*)self, *(uint32_t*)(self + 0x17c), r, s,
               (unsigned)self[0x188]);
     }
-    if (g_simple_n) *(uint32_t*)(self + 0x17c) = (uint32_t)g_simple_n;
+    // The game sets kernelSize when it builds the pass, not every frame: keep its value so the row can go back to it with no restart.
+    struct Kept { uint8_t* self; uint32_t game, wrote; };
+    static std::vector<Kept> kept;
+    const uint32_t cur = *(uint32_t*)(self + 0x17c);
+    Kept* k = nullptr;
+    for (auto& e : kept) if (e.self == self) k = &e;
+    if (!k) { if (kept.size() >= 64) kept.clear(); kept.push_back({self, cur, 0}); k = &kept.back(); }
+    else if (!k->wrote || cur != k->wrote) { k->game = cur; k->wrote = 0; }   // not our value: the game wrote it (or the pass object is a new one)
+    if (g_simple_n) { *(uint32_t*)(self + 0x17c) = (uint32_t)g_simple_n; k->wrote = (uint32_t)g_simple_n; }
+    else if (k->wrote) { *(uint32_t*)(self + 0x17c) = k->game; k->wrote = 0; }
 }
 
 // Inside the HBAO pass execute (main+0x5a7880), before `ldr w8, [x21, #0x174]` at main+0x5a7bac: x21 = the pass object, +0x174 numDirections,
@@ -244,9 +267,30 @@ void ao_force_visit(Cpu* c, uint8_t* ent, uint8_t* pass, const std::string& name
 
 // Pass loop (main+0x988fe0, entries of 32 bytes at [ctx+0x1b8, ctx+0x1c0)): at main+0x989048 x20 = the entry, [x20+8] = the pass object, whose
 // byte at +0xf0 is the enable flag the loop copies to +0xf1 and tests. Names: pass_name (libc++ string at +0x40).
+// The game's dynamic resolution (controller at main+0x5d6be8, on while a course runs): a frame-time sample above 16.6 ms held for a moment steps the
+// scene targets down a ladder made at boot (1920x1080, 1728x972, 1536x864, 1344x756; ctx+0xce8 = the step), and 0.5 s under 14.94 ms steps back up.
+// On PC it only does harm: every enhanced effect, ray tracing and the upscalers key on the 1920x1080 scene, so each step switched them off and on
+// (lighting and shadows popping during a ride, worst when the frame time sits near the two limits). The step-down limit is one double with one
+// reader (main+0x5d6c0c reads main+0xb0b5d0); raised out of reach, the scene stays at full size. SNAP_DYNRES=1 keeps the game's behavior.
+static void dynres_lock() {
+    static bool done;
+    if (done) return;
+    done = true;
+    const char* e = getenv("SNAP_DYNRES");
+    if (e && atoi(e) != 0) { fprintf(stderr, "[gamemods] dynamic resolution: the game's own (SNAP_DYNRES=1)\n"); return; }
+    double* lim = (double*)(kMainBase + 0xb0b5d0);
+    if (!readable((uint8_t*)lim, 8) || *lim != (double)16.6f) { fprintf(stderr, "[gamemods] dynamic resolution: limit not found at main+0xb0b5d0, left alone\n"); return; }
+    DWORD old = 0;
+    if (!VirtualProtect(lim, 8, PAGE_READWRITE, &old)) { fprintf(stderr, "[gamemods] dynamic resolution: the limit's page cannot be written, left alone\n"); return; }
+    *lim = 1e30;
+    VirtualProtect(lim, 8, old, &old);
+    fprintf(stderr, "[gamemods] dynamic resolution: locked at full size (step-down limit 16.6 ms -> off)\n");
+}
+
 extern "C" void rt_gm_pass(Cpu* c) {
     init();
-    if (!g_pass_dump && g_pass_off.empty() && !g_ao_force) return;
+    dynres_lock();
+    if (!g_pass_dump && g_pass_off.empty() && !g_ao_force && g_pass_state.empty()) return;
     uint8_t* ent = (uint8_t*)c->x[20];
     if (!ent || !readable(ent, 16)) return;
     uint8_t* pass = *(uint8_t**)(ent + 8);
@@ -264,12 +308,16 @@ extern "C" void rt_gm_pass(Cpu* c) {
                   pass[0xf0], (unsigned long long)(vt - kMainBase), pass_class_text(name));
         }
     }
-    if (g_pass_off.empty() || name.empty()) return;
+    if ((g_pass_off.empty() && g_pass_state.empty()) || name.empty()) return;
     std::string low;
     for (char ch : name) low.push_back((char)tolower((unsigned char)ch));
     bool listed = false;
-    for (auto& n : g_pass_off) if (n == low) listed = true;
-    if (!listed) return;
+    { std::lock_guard<std::mutex> cfg_lock(g_cfg_mu); for (auto& n : g_pass_off) if (n == low) listed = true; }
+    if (!listed) {   // a pass this hook switched off whose row went back to On while the game runs: the game's own value returns
+        for (auto& s : g_pass_state)
+            if (s.pass == pass && s.zeroed && !memcmp(s.uuid, pass + 0x30, 16)) { pass[0xf0] = (uint8_t)s.orig_on; s.zeroed = 0; trace("gamemods: pass \"%s\" switched back on", name.c_str()); }
+        return;
+    }
     int cls = pass_class(low);
     PassState* st = nullptr;
     uint64_t uu[2];

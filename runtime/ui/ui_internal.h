@@ -105,6 +105,7 @@ void options_restart_bar();    // the "N changes need a restart / Apply and rest
 // scripted test (ui_test.cpp)
 bool options_test_set(const std::string& key, const std::string& value);
 std::string options_test_get(const std::string& key);
+std::string options_test_default(const std::string& key);
 std::string options_note(const std::string& key);   // one-line "which value is in effect" note of a picture row, "" if none
 void options_test_scroll(float fraction);   // scroll the visible option list (0 top, 1 bottom)
 bool options_test_option_when(const std::string& key, std::string* when);

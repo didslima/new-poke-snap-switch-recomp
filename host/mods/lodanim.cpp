@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "loader.h"
+#include "hle/live.h"   // rows that apply with no restart
 
 using namespace loader;
 
@@ -212,7 +213,7 @@ namespace {
 struct WideSite { uint64_t off; int reg; };
 WideSite g_wide_sites[8] = {{0x296400, 9}};   // ride and lab camera (builder 0x295170)
 int g_wide_nsites = 1;
-float wide_k() { static const float k = nvnHostGetUltrawide(); return k; }
+float wide_k() { return nvnHostGetUltrawide(); }   // not cached: the Ultrawide row applies with no restart (runtime/nvn/nvn_retarget.cpp)
 void wide_camera(Cpu *c, uint64_t off) {
     int reg = -1;
     for (int i = 0; i < g_wide_nsites; i++) if (g_wide_sites[i].off == off) { reg = g_wide_sites[i].reg; break; }
@@ -321,9 +322,14 @@ bool g_full_rate, g_lodsel_trace, g_lodmods_init;
 uint64_t g_dd_ab;              // SNAP_DRAW_DISTANCE_AB=<P> (test aid): the multiplier applies only while (present count / P) is odd
 uint64_t g_lod_hist[2][4], g_lod_calls, g_anim_seen, g_anim_forced;
 
+// Runs at the first hook call and again when a setting changed (hle/live.h): Detail distance, Draw distance, Always full detail and Full-rate
+// distant animation apply with no restart. Parsed from scratch each time, so a row put back to its default goes back.
+std::atomic<unsigned> g_lodmods_seen{0};
 void lodmods_init() {
-    if (g_lodmods_init) return;
+    if (!hle::live::changed(g_lodmods_seen)) return;
+    hle::live::EnvRead env_read;
     g_lodmods_init = true;
+    g_dd_ratio_mul = 1.0f; g_lod_mul2 = 1.0f; g_cull_mul2 = 1.0f;
     if (const char *e = getenv("SNAP_DRAW_DISTANCE")) {
         double m = atof(e);
         if (m > 0.01 && m <= 1000.0 && m != 1.0) g_dd_ratio_mul = (float)(m * m);
@@ -345,7 +351,11 @@ void lodmods_init() {
     g_full_rate = f && f[0] && f[0] != '0';
     const char *t = getenv("SNAP_TRACE_LODSEL");
     g_lodsel_trace = t && t[0] && t[0] != '0';
-    if (g_dd_ratio_mul != 1.0f || g_lod_split || g_full_rate || g_lodsel_trace)
+    static float said[3] = {1.0f, 1.0f, 1.0f}; static int saidFlags = 0;   // say it at the start and when it changed, not on every unrelated setting
+    const int flags = (g_lod_force0 ? 1 : 0) | (g_full_rate ? 2 : 0) | (g_lodsel_trace ? 4 : 0);
+    const bool same = said[0] == g_dd_ratio_mul && said[1] == g_lod_mul2 && said[2] == g_cull_mul2 && saidFlags == flags;
+    said[0] = g_dd_ratio_mul; said[1] = g_lod_mul2; said[2] = g_cull_mul2; saidFlags = flags;
+    if (!same)
         trace("lodanim: SNAP_DRAW_DISTANCE ratio x%g, SNAP_LOD_DIST ratio x%g, SNAP_DRAW_DIST ratio x%g, SNAP_LOD_FORCE0 %d (A/B period %llu presents), SNAP_FULL_RATE_ANIM %d, SNAP_TRACE_LODSEL %d",
               g_dd_ratio_mul, g_lod_mul2, g_cull_mul2, (int)g_lod_force0, (unsigned long long)g_dd_ab, (int)g_full_rate, (int)g_lodsel_trace);
 }

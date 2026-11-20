@@ -55,7 +55,9 @@ if (Test-Path $playLock) {
 # 1. copy under heavy.lock (no build or test boot can run, and snap_boot.exe cannot change under us)
 Take-Lock $heavy "$Name pid=$PID $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (play.ps1 copy)" $LockWaitMinutes 20
 try {
-    foreach ($f in 'snap_boot.exe', 'SDL3.dll', 'snap_boot.pdb') { if (Test-Path "$src\$f") { Copy-Item "$src\$f" "build\play\$f" -Force } }
+    # pipeline_keys_seed.bin (perf, 2026-11-19): the startup precompile reads it from the exe folder (SNAP_PIPELINE_SEED=0 turns it off), so
+    # first course starts (beach, cave) find their pipelines ready; before this it never reached build\play
+    foreach ($f in 'snap_boot.exe', 'SDL3.dll', 'snap_boot.pdb', 'pipeline_keys_seed.bin') { if (Test-Path "$src\$f") { Copy-Item "$src\$f" "build\play\$f" -Force } }
     if (Test-Path "$src\nvn_cache") { robocopy "$src\nvn_cache" 'build\play\nvn_cache' /E /MT:8 /NFL /NDL /NJH /NJS /NP | Out-Null }   # exit codes below 8 are success
 } finally {
     Remove-Item $heavy -Force -ErrorAction SilentlyContinue

@@ -49,7 +49,7 @@ Kind is two-choice (c) or pulldown (p). "Widen" means the key already has a row;
 
 | Group | Label | Kind | Values | Default | Env / settings key | Live? | Help (one line) | GPU cost |
 |---|---|---|---|---|---|---|---|---|
-| Resolution & upscaling | Render scale (widen) | p, 10 | 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0 | 1.0 | `SNAP_RENDER_SCALE` / `gfx_render_scale` | Restart | Scene resolution as a multiple of 1080p. Applies after restart. | Very high; scales with pixels and video memory |
+| Resolution & upscaling | Render scale (widen) | p, 10 | 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0 | 1.0 | `SNAP_RENDER_SCALE` / `gfx_render_scale` | Live | Scene resolution as a multiple of 1080p. Applies at the next frame (the render targets are made again). | Very high; scales with pixels and video memory |
 | Anti-aliasing & sharpening | Sharpening (widen) | p, 10 | 0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85, 1.0 | 0 (original) | `SNAP_SHARPEN` / `gfx_sharpen` | Restart | Contrast-adaptive sharpening after AA. Applies after restart. | Very low |
 | Textures & LOD | Texture LOD bias (widen) | p, 10 | auto, -2, -1.5, -1, -0.5, 0, +0.25, +0.5, +1, +2 | auto | `SNAP_LOD_BIAS` / `gfx_lod_bias` | Restart (live plausible, unverified) | Sharper (negative) or softer (positive) texture detail. Applies after restart. | Small bandwidth cost when negative; can shimmer |
 | Shadows & lighting | Shadow distance (New) | p, 9 | default (1x), 1.5x, 2x, 3x, 4x, 6x, 8x, 12x, 16x | default (1x) | `SNAP_SHADOW_DISTANCE` / `gfx_shadow_dist` | Restart | Widens how far dynamic shadows reach. Pair with shadow size. Applies after restart. | None directly; blurrier at a fixed map size |

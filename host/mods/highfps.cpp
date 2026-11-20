@@ -30,6 +30,8 @@
 #include <mutex>
 #include <string>
 
+#include "hle/live.h"   // rows that apply with no restart
+
 extern "C" volatile int g_fnprof;
 extern "C" void nvnHostSetFramePacing(double hz);
 extern "C" uint64_t snap_present_count();
@@ -151,16 +153,9 @@ DWORD WINAPI sample_thread(LPVOID) {
 
 struct Init {
     Init() {
-        const char* e = std::getenv("SNAP_FPS");
-        if (e && *e) {
-            int v = std::atoi(e);
-            if (v == 72 || v == 90 || v == 120 || v == 144 || v == 165 || v == 240) g_fps = v;
-            else if (v != 60) std::fprintf(stderr, "[highfps] SNAP_FPS=%s ignored (use 60, 72, 90, 120, 144, 165 or 240)\n", e);
-        }
+        // SNAP_FPS and SNAP_FAST_BOOT are not read here: this runs before main(), and the saved Frame rate target and Fast boot rows only become
+        // environment variables when hle/settings loads the profile (a saved 120 was ignored until 2026-11-18). read_rows() below reads them.
         if (const char* u = std::getenv("SNAP_FPS_UNCAPPED")) g_uncapped = *u && *u != '0';
-        if (const char* f = std::getenv("SNAP_FAST_BOOT")) {
-            if (*f && *f != '0') { const char* n = std::getenv("SNAP_FAST_BOOT_FRAMES"); int fr = n ? std::atoi(n) : 3200; g_fast_frames = fr > 0 ? fr : 3200; }
-        }
         if (const char* t = std::getenv("SNAP_FPS_TRACE")) if (*t) {
             g_csv = std::fopen(t, "wb");
             if (g_csv) { std::fprintf(g_csv, "idx,present,wall_ms,lr,mode,dt_prev,ms_prev,ms2_prev,ms3_prev,dt2_prev,dt3_prev\n"); g_fnprof = 1; }
@@ -186,10 +181,29 @@ struct Init {
                 CreateThread(nullptr, 0, sample_thread, nullptr, 0, nullptr);
             }
         }
-        if (g_fps || g_uncapped || g_csv || g_watch_on)
-            std::fprintf(stderr, "[highfps] SNAP_FPS=%d uncapped=%d trace=%d mswatch=%d\n", g_fps, (int)g_uncapped, g_csv != nullptr, (int)g_watch_on);
+        if (g_uncapped || g_csv || g_watch_on)
+            std::fprintf(stderr, "[highfps] uncapped=%d trace=%d mswatch=%d\n", (int)g_uncapped, g_csv != nullptr, (int)g_watch_on);
     }
 } g_init;
+
+// The rows the settings layer exports, read at the first present (the profile is loaded by then) and again whenever a row changes.
+int read_rows(bool first) {
+    hle::live::EnvRead env_read;
+    int v = 0;
+    const char* e = std::getenv("SNAP_FPS");
+    if (e && *e) {
+        v = std::atoi(e);
+        if (!(v == 72 || v == 90 || v == 120 || v == 144 || v == 165 || v == 240)) {
+            if (v != 60 && first) std::fprintf(stderr, "[highfps] SNAP_FPS=%s ignored (use 60, 72, 90, 120, 144, 165 or 240)\n", e);
+            v = 0;
+        }
+    }
+    if (first) {
+        const char* f = std::getenv("SNAP_FAST_BOOT");
+        if (f && *f && *f != '0') { const char* n = std::getenv("SNAP_FAST_BOOT_FRAMES"); int fr = n ? std::atoi(n) : 3200; g_fast_frames = fr > 0 ? fr : 3200; }
+    }
+    return v;
+}
 
 }  // namespace
 
@@ -223,6 +237,23 @@ extern "C" void snap_highfps_observe(uint64_t a, uint64_t lr, uint64_t x0) {
 
 // Called from the present hook (host/boot.cpp hook_present) after snap_window_on_present. n = present number (1-based).
 extern "C" void snap_highfps_on_present(uint64_t n) {
+    static std::atomic<unsigned> seen{0};
+    static bool first = true;
+    if (hle::live::changed(seen)) {   // the first present, then every change: the Frame rate target row applies with no restart (hle/live.h)
+        const bool was_first = first;
+        first = false;
+        const int v = read_rows(was_first);
+        if (was_first) {
+            g_fps = v;
+            if (g_fps) std::fprintf(stderr, "[highfps] SNAP_FPS=%d\n", g_fps);
+            if (n != 1 && g_fps && !g_uncapped) nvnHostSetFramePacing((double)g_fps);   // not reached in practice: the hook runs from present 1
+        } else if (v != g_fps) {
+            g_fps = v;
+            const bool fast_boot = g_fast_frames && n < (uint64_t)g_fast_frames;   // still uncapped: the new target is set when the fast boot window ends
+            if (!g_uncapped && !fast_boot) nvnHostSetFramePacing(v ? (double)v : 60.0);
+            std::fprintf(stderr, "[highfps] pacing target %d Hz at present %llu (changed in the options)\n", v ? v : 60, (unsigned long long)n);
+        }
+    }
     if (!g_fps && !g_uncapped) return;
     // fast_boot_step (window_opts.cpp) sets 0 at present 1 and 60 at present g_fast_frames; our value replaces both.
     if (n == 1 || (g_fast_frames && n == (uint64_t)g_fast_frames)) {

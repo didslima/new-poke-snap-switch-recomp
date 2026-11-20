@@ -913,6 +913,9 @@ bool route_cond(const std::string& c0, std::string* why) {
   } else if (c.rfind("film<=", 0) == 0) {
     r = g_film.load() >= 0 && g_film.load() <= std::atoi(c.c_str() + 6);
     std::snprintf(b, sizeof b, "film counter %d", g_film.load());
+  } else if (c.rfind("present>=", 0) == 0) {   // a fixed present (a cutscene shot of a frame-timed route; host/ab_capture.ps1 -Moment 'present>=4400')
+    r = (int)nvn::g_presentCount >= std::atoi(c.c_str() + 9);
+    std::snprintf(b, sizeof b, "present %d", (int)nvn::g_presentCount);
   } else if (c == "aim") {   // the `aim` line's target sits on the reticle (host/mods/aim.cpp)
     r = snap_aim_ready(b, (int)sizeof b) != 0;
   } else if (c.rfind("act=", 0) == 0) {   // the game's viewfinder is locked on an actor playing that event (a photo now carries it)
@@ -1102,6 +1105,43 @@ bool script_token(const std::string& t, ScriptEntry& en) {
   return true;
 }
 
+}  // namespace
+
+// Route line "course <name>": pick a course on the stage-select map without depending on timing. The map's focus element (UI event 16,
+// route condition focus=<n>) is the stage number. From Florio (1) the D-pad moves: Right 12, 3 (beach), 14 (reef), 4, 11 (ruins);
+// from 11 Up 10 (cave); from 10 Left 9 (snow); from 1 Up 5 (jungle), 6 (forest); from 6 Right 7 (sands); from 12 Up 13 (river);
+// from 4 Up 8 (volcano). Each press repeats only while the stage before it has focus, so a press the map ignored (a popup, a save
+// in progress) is sent again and a press cannot land twice; the wait fails loudly if the map opened somewhere off the path.
+std::vector<std::string> course_steps(const std::string& name) {
+  struct Course { const char* name; const char* path; int stage; };
+  static const Course kCourse[] = {{"florio", "", 1},      {"jungle", "U", 5},     {"forest", "UU", 6},     {"sands", "UUR", 7},
+                                   {"river", "RU", 13},    {"beach", "RR", 3},     {"reef", "RRR", 14},     {"volcano", "RRRRU", 8},
+                                   {"ruins", "RRRRR", 11}, {"cave", "RRRRRU", 10}, {"snow", "RRRRRUL", 9}};
+  struct Edge { int from; char dir; int to; };
+  static const Edge kEdge[] = {{1, 'R', 12}, {12, 'R', 3}, {3, 'R', 14}, {14, 'R', 4}, {4, 'R', 11}, {11, 'U', 10},
+                               {10, 'L', 9}, {1, 'U', 5},  {5, 'U', 6},  {6, 'R', 7},  {12, 'U', 13}, {4, 'U', 8}};
+  std::vector<std::string> out;
+  for (const Course& c : kCourse) {
+    if (name != c.name) continue;
+    int at = 1;
+    for (const char* p = c.path; *p; ++p) {
+      int to = 0;
+      for (const Edge& e : kEdge) if (e.from == at && e.dir == *p) to = e.to;
+      if (!to) return {};
+      out.push_back(std::string("repeat @f60 @f60000 240 6 ") + (*p == 'R' ? "Right" : *p == 'U' ? "Up" : "Left") + " if=focus=" + std::to_string(at));
+      at = to;
+    }
+    if (at != c.stage) return {};
+    out.push_back("wait focus=" + std::to_string(at) + " timeout=120");
+    out.push_back("repeat @f120 @f60000 240 6 A");
+    out.push_back("wait ui=map_select:CourseSelect timeout=240");
+    return out;
+  }
+  return {};
+}
+
+namespace {
+
 void script_load() {
   g_script.loaded = true;
   const char* path = std::getenv("SNAP_INPUT_SCRIPT");
@@ -1110,12 +1150,25 @@ void script_load() {
   if (!f) { log("input script: cannot open %s", path); return; }
   std::string line;
   int n = 0;
-  while (std::getline(f, line)) {
+  std::vector<std::string> macro;   // lines a "course <name>" line stands for, read before the file goes on
+  size_t macro_at = 0;
+  auto next = [&]() {
+    if (macro_at < macro.size()) { line = macro[macro_at++]; return true; }
+    return (bool)std::getline(f, line);
+  };
+  while (next()) {
     size_t h = line.find('#');
     if (h != std::string::npos) line.resize(h);
     std::istringstream is(line);
     std::string w;
     if (!(is >> w)) continue;
+    if (w == "course") {   // course <name>: see course_steps
+      std::string nm;
+      is >> nm;
+      macro = course_steps(nm); macro_at = 0;
+      if (macro.empty()) { log("input script: unknown course in '%s'; the route cannot go on", line.c_str()); std::fflush(stdout); std::_Exit(3); }
+      continue;
+    }
     if (w == "anchor" || w == "wait") {
       std::string ev, o;
       double to = w == "wait" ? 300.0 : 0.0;

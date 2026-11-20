@@ -370,8 +370,8 @@ void draw_album() {
   if (A.detail) {
     draw_album_detail(click, moved);
   } else {
-    diamond(122, 82, 56, C(0x8f8e90));
-    aperture(122, 82, 26, C(kCream));
+    diamond(122, 82, 46, C(0x8f8e90));
+    aperture(122, 82, 22, C(kCream));
     text(180, 70, 42, C(0x6a6561), "Album");
     std::string sub;
     if (!A.lib.error.empty()) sub = "Your photos from the game's album";

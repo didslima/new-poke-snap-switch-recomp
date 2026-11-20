@@ -47,8 +47,8 @@ float Strength(const char* name) {
   const float v = (float)atof(e);
   return v > 0.f ? std::min(v, 4.f) : 0.f;
 }
-float DofStrength() { static const float v = Strength("SNAP_BOKEH_DOF"); return v; }
-float MblurStrength() { static const float v = Strength("SNAP_MOTION_BLUR"); return v; }
+float DofStrength() { return SNAP_LIVE(float, Strength("SNAP_BOKEH_DOF")); }       // live rows (hle/live.h)
+float MblurStrength() { return SNAP_LIVE(float, Strength("SNAP_MOTION_BLUR")); }
 bool LogOn() { static const bool on = getenv("SNAP_LENS_LOG") != nullptr; return on; }
 
 struct PcFocus { float dp[4], sz[4], ms[4]; };
@@ -69,6 +69,7 @@ void ImgBar(VkCommandBuffer cb, Img& im, VkImageLayout to) {
   im.layout = to;
 }
 bool MakeImg(Host* h, Img& o, uint32_t w, uint32_t hh, VkFormat fmt, VkImageUsageFlags extra) {
+  if (o.img || o.view || o.mem) { RetireVkImage(h, o.img, o.view, o.mem); o = Img{}; }   // a size change: the old image goes once the GPU is past it
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ci.imageType = VK_IMAGE_TYPE_2D; ci.format = fmt; ci.extent = {w, hh, 1}; ci.mipLevels = 1; ci.arrayLayers = 1; ci.samples = VK_SAMPLE_COUNT_1_BIT;
   ci.tiling = VK_IMAGE_TILING_OPTIMAL; ci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | extra; ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -119,7 +120,7 @@ bool Setup(Host* h, VkFormat sceneFmt) {
 
 bool EnsureImages(Host* h, uint32_t w, uint32_t hh, VkFormat fmt) {
   if (g.rw == w && g.rh == hh && g.src.img) return true;
-  if (g.src.img) fprintf(stderr, "lens: render size changed to %ux%u, the old images are kept until exit\n", w, hh);   // a command buffer may still read them
+  if (g.src.img) fprintf(stderr, "lens: render size changed to %ux%u\n", w, hh);   // a command buffer may still read them
   g.ds = (uint32_t)std::max(2, (int)std::lround((double)hh / 540.0));
   const uint32_t lw = (w + g.ds - 1) / g.ds, lh = (hh + g.ds - 1) / g.ds;
   if (!MakeImg(h, g.src, w, hh, fmt, VK_IMAGE_USAGE_TRANSFER_DST_BIT) || !MakeImg(h, g.prep, lw, lh, fmt, 0) || !MakeImg(h, g.blur, lw, lh, fmt, 0) ||

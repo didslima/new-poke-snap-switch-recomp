@@ -8,6 +8,7 @@
 #   -Moment   ride<N> (rail progress N), a name from host\routes\ab_moments.txt, or a literal route `wait` condition (ride>=40, ui=photo_submit, film<=60)
 #   -Effect   lighting (alias all): every effect that honors SNAP_LIGHT_AB / snaplight::ab_on (Enhanced lighting, SSR, atmosphere, lens, bounce light);
 #             SNAP_* / NVN_*: a live environment variable for effects that read getenv every frame. Until runtime\nvn\nvn_dev.h lands.
+#             opts: rows of the options menu, set the way the menu sets them: -Values 'atmos_fog=1|atmos_fog=-' (key=value, '-' = default, '|' between).
 #   -Values   list set one after the other (default off,on). The first value is repeated at the end as a control (noise floor); -NoControl skips it.
 #   -Set      launch-time configuration, NAME=value (e.g. SNAP_LIGHTING=enhanced SNAP_RENDER_SCALE=2)
 #   -Settle   presents to wait after each change (default 12; raise it for temporal effects)   -Window  presents timed per value (default 24)
@@ -23,7 +24,9 @@ param([Parameter(Mandatory)][string]$Route, [Parameter(Mandatory)][string]$Momen
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $root
-$Values = @($Values | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+# -Effect opts: option rows, each value <key>=<value> ('-' = the row's default), separated by '|' (option values hold commas)
+$sep = if ($Effect -eq 'opts') { '|' } else { ',' }
+$Values = @($Values | ForEach-Object { $_.Split($sep) } | Where-Object { $_ })
 if ($Values.Count -lt 2) { Write-Host 'need at least two values (for example off,on)'; exit 2 }
 
 # ---- moment -> a route wait condition
@@ -51,7 +54,7 @@ Set-Content -Path (Join-Path $root "host\routes\$tmpRoute.txt") -Value $lines -E
 
 $vals = @($Values); if (-not $NoControl) { $vals += $Values[0] }
 $plan = Join-Path $work 'plan.txt'; $result = Join-Path $work 'result.json'; $perf = Join-Path $work 'perf'
-@("moment=$cond", "effect=$Effect", "values=$($vals -join ',')", "settle=$Settle", "window=$Window", "photo=$(if ($NoPhoto) { 0 } else { 1 })",
+@("moment=$cond", "effect=$Effect", "values=$($vals -join $sep)", "settle=$Settle", "window=$Window", "photo=$(if ($NoPhoto) { 0 } else { 1 })",
   "out=$result", "timeout=$($Timeout - 80)") | Set-Content $plan -Encoding ascii
 
 # environment for the run (restored afterwards)

@@ -3,16 +3,7 @@
 wait ui=title timeout=200
 repeat @f60 @f30000 40 4 A
 wait ui=map_select:StageSelect timeout=420
-@f240 6 Right
-@f600 6 Right
-@f960 6 Right
-@f1320 6 Right
-@f1680 6 Right
-@f2040 6 Up
-@f2400 6 Up
-@f2760 6 Left
-repeat @f3300 @f9120 240 6 A
-wait ui=map_select:CourseSelect timeout=240
+course snow
 @f180 6 A
 wait ride timeout=300
 aim ev:Mis_Stage009_090|CH_145@Sleep_01 cap=8 range=16 timeout=1 tol=0.08

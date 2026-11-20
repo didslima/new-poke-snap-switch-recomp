@@ -10,7 +10,7 @@
 //                 colour is linear HDR (RGBA16F) at render resolution (1920x1080 x SNAP_RENDER_SCALE / upscaler scene scale), jittered by the upscaler's
 //                 viewport jitter (FxJitter). No rendering scope is open; the hook records its own passes.
 //   postTonemap - recorded after the draw that ran one of the game's tonemap programs (like AaAfterDraw): the target is the LDR window texture.
-// Neither slot runs on photo frames (FxIsPhotoFrame: Evaluation / 360x240 photo passes and the presents a photo reads) or inside an occlusion query scope.
+// Neither slot runs on photo frames (FxIsPhotoFrame: the Evaluation passes and the two presents after one; a ride photo holds nothing, see nvn_fx.cpp) or inside an occlusion query scope.
 #pragma once
 #include <cstdint>
 #include <vulkan/vulkan.h>
@@ -61,7 +61,7 @@ bool FxActive();                              // SNAP_FX is not 0 and at least o
 const FxCam* FxCamera();                      // null until a sane camera was read this frame
 TextureImpl* FxSceneDepth();                  // the 1920x1080 (x scale) DEPTH32F scene target of this frame, null outside a scene frame
 TextureImpl* FxSceneColor();                  // the RGBA16F scene colour drawn with it
-bool FxIsPhotoFrame();                        // this present must stay native (photo / Evaluation frame, or the hold after one)
+bool FxIsPhotoFrame();                        // this present must stay native (Evaluation frame, or the hold after one)
 void FxJitter(float* jx, float* jy);          // scene viewport jitter in render pixels (0, 0 without a jittering upscaler)
 const FxCaster* FxCasterNow();                // null when no dynamic shadow pass was recorded this or the previous present (static-only course, night)
 bool FxAbSkip();                              // SNAP_FX_AB says "off" this present

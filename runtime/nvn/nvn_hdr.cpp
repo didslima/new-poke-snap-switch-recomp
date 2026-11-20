@@ -17,6 +17,7 @@
 #include <string>
 
 #include "nvn_hdr_spv.h"
+#include "hle/live.h"
 
 namespace snap_hdr {
 namespace {
@@ -25,14 +26,14 @@ float EnvF(const char* n, float d) { const char* e = getenv(n); return (e && *e)
 // SNAP_HDR=off|hdr10|scrgb (1 = hdr10, 0 = off). g_active is what the swapchain actually uses after the fallback chain scrgb -> hdr10 -> SDR.
 enum Mode { M_OFF, M_HDR10, M_SCRGB };
 // Read lazily (first use), not in a static initializer: settings::load exports gfx_hdr as SNAP_HDR after process start.
+// Follows the HDR output row while the game runs (hle/live.h); LiveChanged below asks for the new swapchain.
 Mode Want() {
-  static const Mode m = [] {
+  return (Mode)SNAP_LIVE(int, ([]() -> int {
     const char* e = getenv("SNAP_HDR");
     if (!e || !*e || !strcmp(e, "0") || !_stricmp(e, "off")) return M_OFF;
     if (!_stricmp(e, "scrgb")) return M_SCRGB;
     return M_HDR10;
-  }();
-  return m;
+  }()));
 }
 Mode g_active = M_OFF;
 bool Req() { return Want() != M_OFF; }
@@ -40,7 +41,7 @@ float EnvF2(const char* a, const char* b, float d) { const char* e = getenv(a); 
 float g_peak = 1000.f;      // resolved in PickFormat (SNAP_HDR_PEAK_NITS, else the display's MaxLuminance, else 1000)
 float g_paper = 200.f;
 bool g_peakResolved = false;
-float Expand() { static const float v = std::clamp(EnvF("SNAP_HDR_EXPAND", 0.3f), 0.f, 1.f); return v; }   // how far near-white is lifted (a plain SDR frame cannot tell UI white from a highlight)
+float Expand() { return SNAP_LIVE(float, std::clamp(EnvF("SNAP_HDR_EXPAND", 0.3f), 0.f, 1.f)); }   // how far near-white is lifted (a plain SDR frame cannot tell UI white from a highlight)
 
 // DXGI_OUTPUT_DESC1::MaxLuminance of the output the window is on (0 when unavailable, e.g. no HDR display or a hidden desktop).
 float QueryDisplayPeak(void* hwnd) {
@@ -78,6 +79,8 @@ float QueryDisplayPeak(void* hwnd) {
 void ResolveNits(void* hwnd) {
   if (g_peakResolved) return;
   g_peakResolved = true;
+  g_peak = 1000.f;
+  hle::live::EnvRead env_read;
   g_paper = EnvF2("SNAP_HDR_PAPER_NITS", "SNAP_HDR_PAPER", 200.f);
   const char* e = getenv("SNAP_HDR_PEAK_NITS"); if (!e || !*e) e = getenv("SNAP_HDR_PEAK");
   if (e && *e) g_peak = (float)atof(e);
@@ -198,31 +201,47 @@ bool IsSrgb(VkFormat f) { return f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_
 }  // namespace
 
 bool Requested() { return Req(); }
+// Present thread, once per frame: true once when the HDR output, peak or paper white rows changed, so the caller makes the swapchain again
+// (format, color space and metadata are all fixed at its creation). Nothing happens while HDR is off before and after.
+bool LiveChanged() {
+  static std::atomic<unsigned> seen{0};
+  static std::string last; static bool have = false;
+  if (!hle::live::changed(seen)) return false;
+  std::string sig;
+  { hle::live::EnvRead env_read;
+    for (const char* k : {"SNAP_HDR", "SNAP_HDR_PEAK_NITS", "SNAP_HDR_PEAK", "SNAP_HDR_PAPER_NITS", "SNAP_HDR_PAPER"}) { const char* e = getenv(k); sig += e ? e : ""; sig += '|'; } }
+  const bool was = have, same = sig == last;
+  static bool wasOn = false;
+  const bool on = Req(), touched = was && !same && (on || wasOn);
+  last = sig; have = true; wasOn = on;
+  if (!touched) return false;
+  g_peakResolved = false;   // PickFormat reads the nits again
+  fprintf(stderr, "hdr: the HDR rows changed (%s); making the swapchain again\n", on ? "on" : "off");
+  return true;
+}
 bool IsScrgb() { return g_active == M_SCRGB; }
 float Peak() { return g_peak; }
 float Paper() { return g_paper; }
 const char* ModeName() { return g_active == M_SCRGB ? "scrgb (inverse tone map)" : "hdr10 (inverse tone map)"; }
 
-void AppendInstanceExt(std::vector<const char*>& ext) {
-  if (!Req()) return;
+void AppendInstanceExt(std::vector<const char*>& ext) {   // asked for whether or not HDR is on at start: the row can be switched on later with no restart
   uint32_t n = 0;
   vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
   std::vector<VkExtensionProperties> p(n);
   vkEnumerateInstanceExtensionProperties(nullptr, &n, p.data());
   for (auto& e : p)
     if (!strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) { ext.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME); return; }
-  fprintf(stderr, "hdr: SNAP_HDR=1 but the instance lacks %s; the output stays SDR\n", VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+  if (Req()) fprintf(stderr, "hdr: SNAP_HDR=1 but the instance lacks %s; the output stays SDR\n", VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
 }
 
 void AppendDeviceExt(VkPhysicalDevice phys, std::vector<const char*>& ext) {
-  if (!Req()) return;
   uint32_t n = 0;
   vkEnumerateDeviceExtensionProperties(phys, nullptr, &n, nullptr);
   std::vector<VkExtensionProperties> p(n);
   vkEnumerateDeviceExtensionProperties(phys, nullptr, &n, p.data());
   for (auto& e : p)
     if (!strcmp(e.extensionName, VK_EXT_HDR_METADATA_EXTENSION_NAME)) { ext.push_back(VK_EXT_HDR_METADATA_EXTENSION_NAME); g_haveMeta = true; return; }
-  fprintf(stderr, "hdr: device lacks %s; HDR10 will be created without static metadata\n", VK_EXT_HDR_METADATA_EXTENSION_NAME);
+  if (Req()) fprintf(stderr, "hdr: device lacks %s; HDR10 will be created without static metadata\n", VK_EXT_HDR_METADATA_EXTENSION_NAME);
 }
 
 void LoadDeviceFuncs(VkDevice dev) {

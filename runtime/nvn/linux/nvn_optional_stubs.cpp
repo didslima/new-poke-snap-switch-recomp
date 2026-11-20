@@ -83,6 +83,7 @@ extern "C" void nvnHostFreecamShot(void) {}
 namespace snap_hdr {
 
 bool Requested() { return false; }
+bool LiveChanged() { return false; }
 float Peak() { return 1000.0f; }
 float Paper() { return 200.0f; }
 const char* ModeName() { return "off"; }

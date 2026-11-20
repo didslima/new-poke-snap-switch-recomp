@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -15,6 +16,7 @@
 #include "hle.h"
 #include "hle_config.h"
 #include "input_core.h"
+#include "live.h"
 #include "profiles.h"
 #include "hle_host.h"
 #include "visual_defaults.h"   // Look row (gfx_look)
@@ -134,6 +136,27 @@ const struct { const char* key; const char* passes; } kPassKeys[] = {
     {"gfx_pass_grain", "FilmGrain"},            {"gfx_pass_aberration", "ChromaticAberration"},
 };
 
+// Rows that apply with no restart (runtime/ui/ui_options.cpp kLive rows that are read through an env var): export_live() below writes their
+// variable again the moment the row changes and moves hle::live::gen(), and the code that reads the variable parses it again (hle/live.h).
+// A key is added here only when everything that reads its variable follows a change; the rest stay restart rows.
+const char* const kLiveKeys[] = {
+    "atmos_shafts", "atmos_fog", "atmos_exposure", "atmos_bloom", "atmos_clouds", "atmos_sky",   // nvn_atmos.cpp GetWants
+    "gfx_motion_blur", "gfx_bokeh_dof",                                                          // nvn_lens_fx.cpp
+    "gfx_sharpen", "gfx_smaa_quality",                                                           // nvn_aa.cpp AaLiveRefresh
+    "ssao_quality", "gfx_ssao_samples", "gfx_ssao_hbao",                                         // host/mods/gamemods.cpp
+    "gfx_lighting", "gfx_bounce", "gfx_shadow_dist",                                             // hle/lighting_preset.h, nvn_lighting_fx.cpp, nvn_shadowpcf.cpp, nvn_draw.cpp
+    "foliage_aa", "leaf_translucency", "gfx_pom",                                                // nvn_foliage.cpp, nvn_pom.cpp
+    "gfx_lod_bias", "gfx_aniso",                                                                 // nvn_gfx.cpp (samplers are made again)
+    "gfx_lod_dist", "gfx_lod_force0", "gfx_draw_dist", "gfx_full_rate_anim",                     // host/mods/lodanim.cpp
+    "fps_target",                                                                                // host/mods/highfps.cpp
+    "gfx_render_scale", "gfx_aa", "gfx_shadow_res", "gfx_ultrawide",                             // nvn_retarget.cpp (render targets are made again at a present)
+    "gfx_hdr_expand", "gfx_hdr", "gfx_hdr_peak", "gfx_hdr_paper",                                                                            // nvn_hdr.cpp
+};
+bool live_key(const char* key) {
+  for (const char* k : kLiveKeys) if (!std::strcmp(k, key)) return true;
+  return false;
+}
+
 float to_float(const std::string& s, float def) { return s.empty() ? def : (float)std::atof(s.c_str()); }
 
 void set_env_if_unset(const char* name, const std::string& value) {
@@ -226,6 +249,52 @@ void set(const std::string& key, const std::string& value) {
 void set_bool(const std::string& key, bool v) { set(key, v ? "1" : "0"); }
 void set_float(const std::string& key, float v) { char b[32]; std::snprintf(b, sizeof b, "%.3f", v); set(key, b); }
 
+namespace {
+// One live variable: `value` ("" = not set). A variable set by hand keeps winning, exactly as at start. Caller holds env_mu exclusively and g_mu.
+void put_live(const char* name, const std::string& value) {
+  bool ours = false;
+  for (auto& e : g_exported) if (e == name) { ours = true; break; }
+  const char* cur = std::getenv(name);
+  if (cur && *cur && !ours) return;
+  if (std::string(cur ? cur : "") == value) return;
+#ifdef _WIN32
+  _putenv_s(name, value.c_str());
+#else
+  if (value.empty()) unsetenv(name); else setenv(name, value.c_str(), 1);
+#endif
+  if (!ours) g_exported.push_back(name);
+}
+
+// The live rows' variables follow the saved values now (not only at the next start), then every reader is told to parse again.
+void export_live() {
+  if (safe_mode()) return;   // safe mode cleared these variables and keeps them clear
+  std::vector<std::pair<const char*, std::string>> want;
+  for (auto& m : kEnvKeys) {
+    if (!live_key(m.key)) continue;
+    std::string v = get(m.key, "");
+    if (v == "default") v.clear();
+    want.push_back({m.env, v});
+  }
+  {   // Color look + strength -> SNAP_LOOK (host/mods/look.cpp)
+    const std::string look = get("look", "neutral");
+    char b[64] = "";
+    if (look != "neutral" && !look.empty()) std::snprintf(b, sizeof b, "%s:%.2f", look.c_str(), get_float("look_intensity", 1.0f));
+    want.push_back({"SNAP_LOOK", b});
+  }
+  {   // the game's own post-process passes -> SNAP_PASS_OFF (host/mods/gamemods.cpp)
+    std::string off;
+    for (auto& m : kPassKeys) if (get(m.key, "") == "off") off += (off.empty() ? "" : ",") + std::string(m.passes);
+    want.push_back({"SNAP_PASS_OFF", off});
+  }
+  {
+    std::unique_lock<std::shared_mutex> env(live::env_mu());
+    std::lock_guard<std::mutex> g(g_mu);
+    for (auto& w : want) put_live(w.first, w.second);
+  }
+  live::bump();
+}
+}  // namespace
+
 void forget_exported_env() {
   for (auto& n : g_exported) hle::host::unset_env_var(n.c_str());
   g_exported.clear();
@@ -256,7 +325,7 @@ void apply(bool env) {
   }
   for (const char* k : {"access_cvd", "access_cvd_strength", "access_ui_size", "access_contrast", "access_flash", "access_mono"})   // Accessibility rows: live; a SNAP_ACCESS_* variable set by hand wins
     if (!env_wins(k)) hle::access::set(k, get(k, ""));
-  if (!env) return;
+  if (!env) { export_live(); return; }   // a row changed while the game runs: the live rows apply now
   // next start: env-var mods
   std::string look = get("look", "neutral");
   if (look != "neutral" && !look.empty()) {

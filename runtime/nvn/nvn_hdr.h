@@ -15,6 +15,7 @@
 namespace snap_hdr {
 
 bool Requested();            // SNAP_HDR=hdr10|scrgb
+bool LiveChanged();          // once per present: true when the HDR rows changed and the swapchain has to be made again
 float Peak();
 float Paper();
 const char* ModeName();      // "itm" or "guided"

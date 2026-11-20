@@ -635,6 +635,53 @@ def replace_top_exe(new_exe, top, log=None):
     return True
 
 
+def kept_exe(state_dir):
+    """Where the exe of the other build waits: an update puts the exe it replaces here, and a rollback swaps it with the one in use."""
+    return Path(state_dir) / 'exe' / 'previous.exe'
+
+
+def keep_top_exe(top, state_dir, log=None):
+    """Copy the exe the player starts aside before an update replaces it, so a rollback can put it back. False when the copy failed
+    (the update goes on; the rollback then says the exe was not changed)."""
+    dst = kept_exe(state_dir)
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_name(dst.name + '.tmp')
+        shutil.copyfile(top, tmp)
+        os.replace(tmp, dst)
+        return True
+    except OSError as e:
+        if log:
+            log.write(f'the current {Path(top).name} could not be kept for a rollback ({e})')
+        return False
+
+
+def swap_top_exe(state_dir, log=None):
+    """Rollback half for the exe the player starts: the kept exe goes back in its place and the one that was there is kept instead, so a
+    second rollback goes forward again. Returns True when swapped, False when it failed, None when there is nothing to swap (the game
+    was started directly, or the update came before the exe was kept)."""
+    st = load_state(state_dir)
+    top, kept = st.get('top_exe'), kept_exe(state_dir)
+    if not top or not Path(top).is_file() or not kept.is_file():
+        return None
+    top = Path(top)
+    other = kept.with_name('_swap.exe')
+    try:
+        shutil.copyfile(top, other)
+    except OSError as e:
+        if log:
+            log.write(f'{top.name} was not changed back ({e}); the build itself was rolled back.')
+        return False
+    if not replace_top_exe(kept, top, log):
+        other.unlink(missing_ok=True)
+        return False
+    try:
+        os.replace(other, kept)
+    except OSError:
+        pass
+    return True
+
+
 # ----------------------------------------------------------------------------------------------------------- rebuild
 
 REPLAY_FLAGS = ('maps', 'llvm', 'python', 'vulkan_lib', 'ghidra', 'jdk', 'harness', 'ghost', 'cache_dir')
@@ -754,7 +801,12 @@ def apply(builder_dir, work, state_dir, url=None, log=None, run=None, progress=N
         exe_replaced = None
         if is_exe:   # the build passed and is switched in: now the exe the player starts becomes the new version too
             top = Path(top) if top else top_exe()
+            kept = keep_top_exe(top, state_dir, log) if top else False   # before it is replaced: rollback puts this one back
             exe_replaced = replace_top_exe(zpath, top, log) if top else False
+            if exe_replaced:
+                st = load_state(state_dir)
+                st.update(top_exe=str(top) if kept else None)
+                save_state(state_dir, st)
             if not top:
                 log.write(f'this game was not started through {RELEASE_EXE}, so that file was not replaced')
         prune(state_dir, [vdir, builder_dir])
@@ -820,4 +872,8 @@ def rollback(work, state_dir, log=None, wait_pid=None, data_root=None):
         except OSError:
             pass
         log.write(f'rolled back: {out} is build version {now} again; version {was} is in {prev}')
-        return {'now': now, 'previous': was}
+        # the exe the player starts goes back with the build (an update replaced it; left alone it would be newer than the build it starts)
+        exe = swap_top_exe(state_dir, log)
+        if exe is None and st.get('previous_dir'):
+            log.write('the exe you start the game with was not changed (no earlier copy of it was kept).')
+        return {'now': now, 'previous': was, 'exe_restored': exe}

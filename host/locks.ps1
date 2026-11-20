@@ -8,7 +8,40 @@ $script:LockPhys = 8   # physical run slots run0..run7; build\slots\max.txt caps
 if (-not $script:LockMutexWaitMs) { $script:LockMutexWaitMs = 10000 }
 if (-not $script:LockMutexName) { $script:LockMutexName = 'Global\SnapRecompLocks' }
 
-function Get-LockText([string]$Path) { try { (Get-Content -LiteralPath $Path -ErrorAction Stop) -join ' ' } catch { $null } }
+# Readers share everything, Delete included. Get-Content does not: while it had a lock file open, the owner's Remove-Item failed (silently),
+# the lock stayed behind under a live PID, and every waiter sat until its timeout. Waiters read these files on every poll, so more waiters
+# meant more collisions. A rewrite of max.txt failed the same way.
+function Open-LockRead([string]$Path) {
+    [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]'ReadWrite, Delete'))
+}
+function Get-LockText([string]$Path) {
+    $fs = $null
+    try {
+        $fs = Open-LockRead $Path
+        $sr = New-Object System.IO.StreamReader($fs)
+        return (($sr.ReadToEnd().TrimEnd([char]13, [char]10)) -replace '\r?\n', ' ')
+    } catch { return $null } finally { if ($fs) { $fs.Dispose() } }
+}
+# Remove a lock file and make sure it is gone. A leftover handle without Delete sharing (an editor, a scanner) gets a short retry.
+function Remove-LockFile([string]$Path) {
+    foreach ($try in 1..40) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $Path)) { return $true }
+        Start-Sleep -Milliseconds 25
+    }
+    return $false
+}
+# Writes build\slots\max.txt (1..8; empty text = back to the default). A new file is moved over the old one, which works while waiters read it.
+function Set-RunSlotCap([string]$Text) {
+    $dir = Join-Path $script:LockRoot 'build\slots'; New-Item -ItemType Directory -Force $dir | Out-Null
+    $tmp = Join-Path $dir ("max.$PID.tmp")
+    [System.IO.File]::WriteAllText($tmp, $Text)
+    foreach ($try in 1..40) {
+        try { Move-Item -LiteralPath $tmp -Destination (Join-Path $dir 'max.txt') -Force -ErrorAction Stop; return } catch { Start-Sleep -Milliseconds 25 }
+    }
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    throw 'max.txt could not be replaced'
+}
 function Get-RunSlotCap {
     $cap = 0
     $text = Get-LockText (Join-Path $script:LockRoot 'build\slots\max.txt')
@@ -53,7 +86,7 @@ function Try-TakeLock([string]$Path, [string]$What) {
     New-Item -ItemType Directory -Force (Split-Path $Path) | Out-Null
     try {
         Invoke-LockMutex {
-            if ((Test-Path -LiteralPath $Path) -and (Test-LockStale $Path)) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+            if ((Test-Path -LiteralPath $Path) -and (Test-LockStale $Path)) { [void](Remove-LockFile $Path) }
             $fs = $null
             try {
                 $owner = if ($env:SNAP_LOCK_OWNER) { $env:SNAP_LOCK_OWNER } else { 'run_boot' }
@@ -73,7 +106,7 @@ function Try-TakeLock([string]$Path, [string]$What) {
 function Release-Lock([string]$Path) {
     try {
         Invoke-LockMutex {
-            if ((Get-LockText $Path) -match "(?:^| )pid=$PID(?: |$)") { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+            if ((Get-LockText $Path) -match "(?:^| )pid=$PID(?: |$)") { [void](Remove-LockFile $Path) }
         }
     } catch { } # Never delete an unverified lock after a mutex timeout.
 }

@@ -23,17 +23,32 @@ def _first_existing(cands):
     return None
 
 
+def _msvc_target(c):
+    """True when this clang targets windows-msvc. A llvm-mingw clang on PATH has the same file names (clang, clang++, llvm-ar, ld.lld) but links in
+    GNU mode and fails on the MSVC objects ("could not open 'liblibcpmt.a'"), so it must never be taken for the build's compiler."""
+    try:
+        out = subprocess.run([str(Path(c) / 'clang.exe'), '-print-target-triple'], capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.endswith('windows-msvc')
+
+
 def find_llvm(arg, root):
-    """Folder holding clang.exe, clang++.exe, lld-link or ld.lld, llvm-ar.exe (and llvm-rc.exe)."""
-    cands = [arg, os.environ.get('SNAP_LLVM_BIN')]
+    """Folder holding clang.exe, clang++.exe, lld-link or ld.lld, llvm-ar.exe (and llvm-rc.exe), built for the windows-msvc target.
+    The folders this builder fetches or ships come before whatever clang is on PATH."""
+    cands = [arg, os.environ.get('SNAP_LLVM_BIN'), managed() / 'llvm' / 'bin', Path(root) / 'tools' / 'llvm' / 'bin']
     on_path = shutil.which('clang.exe')
-    cands += [Path(on_path).parent if on_path else None, Path(root) / 'tools' / 'llvm' / 'bin', managed() / 'llvm' / 'bin']
+    cands += [Path(on_path).parent if on_path else None]
     for c in cands:
-        if c and all((Path(c) / n).exists() for n in ('clang.exe', 'clang++.exe', 'llvm-ar.exe')) \
-                and ((Path(c) / 'lld-link.exe').exists() or (Path(c) / 'ld.lld.exe').exists()):
+        if c and all((Path(c) / n).exists() for n in ('clang.exe', 'clang++.exe', 'llvm-ar.exe'))                 and ((Path(c) / 'lld-link.exe').exists() or (Path(c) / 'ld.lld.exe').exists()) and _msvc_target(c):
             return Path(c)
-    raise StepError('clang with lld not found. Install LLVM (clang, clang++, lld, llvm-ar) and pass its bin folder with --llvm, '
+    raise StepError('clang with lld not found. Install LLVM (clang, clang++, lld, llvm-ar) for the windows-msvc target (not llvm-mingw) and pass its bin folder with --llvm, '
                     'or set SNAP_LLVM_BIN, or run: python builder/snap_builder.py fetch llvm')
+
+
+def clang_target(llvm):
+    """The compiler's target triple; part of the compile cache keys, so objects made by a different compiler are never reused."""
+    return subprocess.run([str(Path(llvm) / 'clang.exe'), '-print-target-triple'], capture_output=True, text=True).stdout.strip()
 
 
 def clang_version(llvm):
