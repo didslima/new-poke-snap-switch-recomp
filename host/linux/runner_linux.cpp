@@ -347,6 +347,7 @@ int bootstrap_main(int argc, char **argv) {
         if (const char *n = hle::settings::env_name(kv.first)) unsetenv(n);
         hle::settings::override_for_run(kv.first, kv.second);
     }
+    hle::settings::load();
 #endif
 
     if (opts.cmd == "validate") {
