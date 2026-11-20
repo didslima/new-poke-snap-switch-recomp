@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -172,6 +174,92 @@ int main() {
         CHECK(probe.runner_tid != 0 && probe.runner_tid != probe.caller_tid);
         CHECK(probe.getattr_rc == 0);
         CHECK(probe.actual_stack_size >= snap_linux::kRunnerHostStackSize);
+    }
+
+    // 6. ROMFS CLI flag, SNAP_ROMFS env, fallback, spaces, and precedence validation.
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path base = fs::temp_directory_path() / "snap_romfs_unit_test";
+        fs::remove_all(base, ec);
+        const fs::path dir_cli = base / "Pokemon Snap" / "romfs cli";
+        const fs::path dir_env = base / "Pokemon Snap" / "romfs env";
+        const fs::path dir_fb = base / "extracted" / "romfs-v262144";
+        fs::create_directories(dir_cli, ec);
+        fs::create_directories(dir_env, ec);
+        fs::create_directories(dir_fb, ec);
+
+        const fs::path prev_cwd = fs::current_path(ec);
+        const char *prev_env = std::getenv("SNAP_ROMFS");
+        const std::string saved_env = prev_env ? prev_env : "";
+
+        // 6a. Parse --romfs with spaces and empty-value rejection.
+        {
+            snap_linux::BootOpts o;
+            std::string err;
+            CHECK(run_parse({"snap_boot_linux", "--play", "--romfs", dir_cli.string()}, o, err) == snap_linux::ParseStatus::Ok);
+            CHECK(o.romfs == dir_cli.string());
+            CHECK(run_parse({"snap_boot_linux", "--play", "--romfs", ""}, o, err) == snap_linux::ParseStatus::Error);
+        }
+
+        // 6b. Valid --romfs (absolute + relative) and nonexistent --romfs.
+        {
+            snap_linux::BootOpts o;
+            std::string resolved, err;
+            o.romfs = dir_cli.string();
+            unsetenv("SNAP_ROMFS");
+            CHECK(snap_linux::resolve_and_validate_romfs(o, resolved, err));
+            CHECK(resolved == fs::absolute(dir_cli).string());
+
+            fs::current_path(base, ec);
+            o.romfs = "Pokemon Snap/romfs cli";
+            CHECK(snap_linux::resolve_and_validate_romfs(o, resolved, err));
+            CHECK(resolved == fs::absolute(dir_cli).string());
+
+            o.romfs = (base / "does_not_exist").string();
+            CHECK(!snap_linux::resolve_and_validate_romfs(o, resolved, err));
+            CHECK(err.find("--romfs") != std::string::npos);
+        }
+
+        // 6c. SNAP_ROMFS env without --romfs, and precedence (--romfs > SNAP_ROMFS > fallback).
+        {
+            snap_linux::BootOpts o;
+            std::string resolved, err;
+            setenv("SNAP_ROMFS", dir_env.c_str(), 1);
+            CHECK(snap_linux::resolve_and_validate_romfs(o, resolved, err));
+            CHECK(resolved == fs::absolute(dir_env).string());
+
+            // --romfs overrides SNAP_ROMFS (and fallback).
+            o.romfs = dir_cli.string();
+            CHECK(snap_linux::resolve_and_validate_romfs(o, resolved, err));
+            CHECK(resolved == fs::absolute(dir_cli).string());
+        }
+
+        // 6d. Fallback extracted/romfs-v262144 when neither --romfs nor SNAP_ROMFS is set.
+        {
+            snap_linux::BootOpts o;
+            std::string resolved, err;
+            unsetenv("SNAP_ROMFS");
+            fs::current_path(base, ec);
+            CHECK(snap_linux::resolve_and_validate_romfs(o, resolved, err));
+            CHECK(resolved == fs::absolute(dir_fb).string());
+        }
+
+        // 6e. Complete absence of ROMFS fails cleanly with actionable message.
+        {
+            snap_linux::BootOpts o;
+            std::string resolved, err;
+            unsetenv("SNAP_ROMFS");
+            fs::remove_all(dir_fb, ec);
+            fs::current_path(base, ec);
+            CHECK(!snap_linux::resolve_and_validate_romfs(o, resolved, err));
+            CHECK(err.find("SNAP_ROMFS") != std::string::npos);
+        }
+
+        if (saved_env.empty()) unsetenv("SNAP_ROMFS");
+        else setenv("SNAP_ROMFS", saved_env.c_str(), 1);
+        if (!prev_cwd.empty()) fs::current_path(prev_cwd, ec);
+        fs::remove_all(base, ec);
     }
 
     std::printf("boot_linux_test: %d checks, %d failures\n", g_checks.load(), g_fail.load());

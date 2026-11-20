@@ -34,6 +34,7 @@ struct BootOpts {
     bool play = false;
     bool safe = false;
     std::string profile;
+    std::string romfs;
     std::string data_dir;
     std::vector<std::pair<std::string, std::string>> cli_env;
     std::vector<std::pair<std::string, std::string>> cli_sets;
@@ -48,6 +49,13 @@ enum class ParseStatus {
 
 // Parses essential runner CLI arguments; rejects unsupported/unknown options and commands.
 ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err);
+
+// Resolves and validates ROMFS directory using precedence:
+//   1) opts.romfs (--romfs)
+//   2) SNAP_ROMFS environment variable
+//   3) fallback "extracted/romfs-v262144"
+// Mirrors MountRom("sim") directory requirements before entering nnMain().
+bool resolve_and_validate_romfs(const BootOpts &opts, std::string &resolved_out, std::string &err_out);
 
 // Returns true when the host CPU supports x86-64-v3 (AVX2, BMI1, BMI2, FMA).
 bool cpu_has_v3();

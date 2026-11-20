@@ -12,6 +12,7 @@
 //                                 bigger HUD, Xbox button icons. Flags after it win (--set hud_scale=200, --width ...).
 //   --profile <name or id>        the profile to play (also the profile of --import-save / --export-save)
 //   --set <key>=<value>           one settings key for this run only (repeatable); a name that starts with SNAP_ sets that variable
+//   --romfs <folder>              extracted RomFS folder (sets SNAP_ROMFS; overrides env and extracted/romfs-v262144 fallback)
 //   --data-dir <folder>           one folder for saves, settings, mods, caches and logs
 //   --update | --check-install | --report | --restore-backup | --upscalers | --hdtex
 //                                 one launcher action without the launcher window (host/launcher.cpp run_action); the game does not start.
@@ -30,7 +31,7 @@ namespace snap_cli {
 
 struct Parsed {
   bool help = false, version = false, play = false, safe = false;
-  std::string data_dir, profile;
+  std::string data_dir, profile, romfs;
   std::string action;                                      // one launcher action (action_names) without its "--", or ""
   std::vector<std::string> action_args;                    // what followed an action that takes arguments (action_takes_args)
   std::vector<std::pair<std::string, std::string>> env;    // variables to set for this run (window flags, --set SNAP_X=v)
@@ -81,6 +82,9 @@ inline Parsed parse(const std::vector<std::string>& args) {
       p.env.push_back({a == "--monitor" ? "SNAP_WINDOW_MONITOR" : a == "--width" ? "SNAP_WINDOW_W" : "SNAP_WINDOW_H", v});
     } else if (a == "--profile") {
       if (!value(i, &p.profile)) break;
+    } else if (a == "--romfs") {
+      if (!value(i, &p.romfs)) break;
+      if (p.romfs.empty()) p.error = "--romfs needs a folder";
     } else if (a == "--data-dir") {
       if (!value(i, &p.data_dir)) break;
       if (p.data_dir.empty()) p.error = "--data-dir needs a folder";
@@ -152,6 +156,7 @@ inline const char* help_text() {
          "  --monitor <n>                monitor number, 0 is the first\n"
          "  --width <px> --height <px>   window size\n"
          "  --profile <name>             profile to play or to import to / export from\n"
+         "  --romfs <folder>             extracted RomFS folder (overrides SNAP_ROMFS)\n"
          "  --set <key>=<value>          one setting for this start only, repeatable (keys: docs/command-line.md);\n"
          "                               a name that starts with SNAP_ sets that environment variable\n"
          "  --data-dir <folder>          keep saves, settings, mods, caches and logs in this folder\n"

@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <unistd.h>
 
 #include "os/os_host.h"
 
@@ -33,7 +34,7 @@ void print_usage(FILE *out) {
     std::fprintf(out,
         "usage: snap_boot_linux [--main elf] [--sdk elf] [--main-lib lib.a] [--sdk-lib lib.a] "
         "[--play] [--fullscreen|--windowed|--borderless] [--width W] [--height H] [--monitor N] "
-        "[--steam-deck] [--safe-mode] [--profile name] [--data-dir dir] [--set key=val] [--version] "
+        "[--steam-deck] [--safe-mode] [--profile name] [--romfs dir] [--data-dir dir] [--set key=val] [--version] "
         "validate|info|shared|init [--probe N] [--libc]|run [--probe N] [--trace file] [--stop-after-init] [--allow-guest-exec]|"
         "eh|lua|bench [--iters N]|all\n");
 }
@@ -186,6 +187,7 @@ ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err) {
     out.play = cli.play;
     out.safe = cli.safe;
     out.profile = cli.profile;
+    out.romfs = cli.romfs;
     out.data_dir = cli.data_dir;
     out.cli_env = cli.env;
     out.cli_sets = cli.sets;
@@ -268,6 +270,39 @@ ParseStatus parse_args(int argc, char **argv, BootOpts &out, std::string &err) {
     return ParseStatus::Ok;
 }
 
+bool resolve_and_validate_romfs(const BootOpts &opts, std::string &resolved_out, std::string &err_out) {
+    resolved_out.clear();
+    err_out.clear();
+
+    const char *env_romfs = std::getenv("SNAP_ROMFS");
+    const bool from_cli = !opts.romfs.empty();
+    const bool from_env = !from_cli && env_romfs && *env_romfs;
+    const std::string raw = from_cli ? opts.romfs : (from_env ? std::string(env_romfs) : std::string("extracted/romfs-v262144"));
+    const char *src_label = from_cli ? "--romfs" : (from_env ? "SNAP_ROMFS" : "default fallback");
+
+    std::error_code ec;
+    const std::filesystem::path p = std::filesystem::u8path(raw);
+    if (!std::filesystem::exists(p, ec) || ec) {
+        err_out = std::string("ROMFS directory not found (from ") + src_label + "): '" + raw +
+                  "'. Pass --romfs <dir> or set SNAP_ROMFS=<dir> to your extracted New Pokemon Snap 2.0.1 romfs folder.";
+        return false;
+    }
+    if (!std::filesystem::is_directory(p, ec) || ec) {
+        err_out = std::string("ROMFS path is not a directory (from ") + src_label + "): '" + raw +
+                  "'. Pass --romfs <dir> or set SNAP_ROMFS=<dir>.";
+        return false;
+    }
+    const std::filesystem::path abs_p = std::filesystem::absolute(p, ec);
+    const std::string final_p = (!ec && !abs_p.empty()) ? abs_p.string() : raw;
+    if (::access(final_p.c_str(), R_OK | X_OK) != 0) {
+        err_out = std::string("ROMFS directory is not accessible (from ") + src_label + "): '" + final_p +
+                  "' (" + std::strerror(errno) + "). Check directory permissions.";
+        return false;
+    }
+    resolved_out = final_p;
+    return true;
+}
+
 bool cpu_has_v3() {
 #if defined(__x86_64__)
     __builtin_cpu_init();
@@ -342,6 +377,17 @@ int bootstrap_main(int argc, char **argv) {
     if (!opts.profile.empty()) setenv("SNAP_PROFILE", opts.profile.c_str(), 1);
     if (opts.safe) setenv("SNAP_SAFE_MODE", "1", 1);
     for (const auto &kv : opts.cli_env) setenv(kv.first.c_str(), kv.second.c_str(), 1);
+
+    const bool need_romfs = (opts.cmd == "run" && opts.allow_guest_exec && !opts.stop_after_init);
+    if (!opts.romfs.empty() || need_romfs) {
+        std::string resolved_romfs;
+        std::string romfs_err;
+        if (!resolve_and_validate_romfs(opts, resolved_romfs, romfs_err)) {
+            std::fprintf(stderr, "boot_linux: %s\n", romfs_err.c_str());
+            return 2;
+        }
+        setenv("SNAP_ROMFS", resolved_romfs.c_str(), 1);
+    }
 #ifdef SNAP_LINUX_HAS_AOT
     for (const auto &kv : opts.cli_sets) {
         if (const char *n = hle::settings::env_name(kv.first)) unsetenv(n);
